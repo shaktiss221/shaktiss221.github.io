@@ -35,6 +35,7 @@
     <div class="rbar"><div class="wrap rbar-in">
       <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
       <span class="mono muted now" data-now>Discord&#x27;s messages: Cassandra to ScyllaDB</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
       <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>16 min left</span></span>
     </div></div>
     <div class="wrap reader-grid">
@@ -47,7 +48,7 @@ design: data services in front of ScyllaDB</a><a href="#the-migration-the-result
 results and the lessons</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
         <div class="mono muted" style="margin-top:18px" data-pct>0% · 16 min left</div>
       </nav>
-      <article class="article" data-minutes="16">
+      <article class="article" data-slug="discord-scylladb" data-minutes="16">
         <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/databases.html">Databases</a> · October 28, 2026 · 16 min</div>
         <h1>Discord&#x27;s messages: Cassandra to ScyllaDB</h1>
         <p class="dek">How Discord moved trillions of messages to ScyllaDB, and the data-services layer that stopped hot channels hurting everyone else.</p>
@@ -541,7 +542,8 @@ chapter 3 (LSM trees and SSTables)</li>
 </ul>
 
         <div class="end-card">
-          <div class="big">You reached the end.</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
           <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/databases.html">Databases</a><a class="chip" href="/topics/case-study.html">Case Study</a></div>
           <div class="daynav"><a href="/reading/consistent-hashing.html"><div class="kicker">← Older · Oct 27</div><div class="t">Consistent hashing and partitioning</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
         </div>

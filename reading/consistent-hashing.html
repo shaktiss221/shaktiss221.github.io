@@ -35,6 +35,7 @@
     <div class="rbar"><div class="wrap rbar-in">
       <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
       <span class="mono muted now" data-now>Consistent hashing and partitioning</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
       <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>16 min left</span></span>
     </div></div>
     <div class="wrap reader-grid">
@@ -46,7 +47,7 @@ nodes</a><a href="#range-partitioning-hot-keys-and-real-systems">Range
 partitioning, hot keys and real systems</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
         <div class="mono muted" style="margin-top:18px" data-pct>0% · 16 min left</div>
       </nav>
-      <article class="article" data-minutes="16">
+      <article class="article" data-slug="consistent-hashing" data-minutes="16">
         <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/distributed-systems.html">Distributed Systems</a> · October 27, 2026 · 16 min</div>
         <h1>Consistent hashing and partitioning</h1>
         <p class="dek">The hash ring and its successors (rendezvous, jump and Maglev hashing), range partitioning, and how real systems combine them.</p>
@@ -580,7 +581,8 @@ chapter 6 (Partitioning)</li>
 </ul>
 
         <div class="end-card">
-          <div class="big">You reached the end.</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
           <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a><a class="chip" href="/topics/databases.html">Databases</a></div>
           <div class="daynav"><a href="/reading/secrets-management.html"><div class="kicker">← Older · Oct 26</div><div class="t">Secrets management: Vault, KMS and envelope encryption</div></a><a href="/reading/discord-scylladb.html"><div class="kicker">Newer · Oct 28 →</div><div class="t">Discord&#x27;s messages: Cassandra to ScyllaDB</div></a></div>
         </div>

@@ -7,6 +7,7 @@ The HTML is generated and committed; run `python3 tools/build.py` after changing
 - `content/diagrams/` – one SVG per diagram, inlined where an article has `<!--diagram:ID-->`; `src/` keeps the JSX each was rendered from
 - `content/news/` – one AI news digest per day, named `YYYY-MM-DD.md` (see below). The AI News section only appears once this folder has a digest.
 - `style.css`, `site.js` – shared styles and the small script for the Aa menu, reading progress and copy buttons
+- `auth.js`, `vendor/supabase.js`, `supabase/schema.sql` – optional Sign in with Google (Supabase) for read marks and resume. Off until `SUPABASE_URL` and `SUPABASE_ANON_KEY` are set in `tools/build.py`.
 - Generated: `index.html`, `reading/`, `topics/`, `news/`
 
 ## News digest format

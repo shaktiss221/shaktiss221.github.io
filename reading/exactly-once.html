@@ -35,6 +35,7 @@
     <div class="rbar"><div class="wrap rbar-in">
       <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
       <span class="mono muted now" data-now>Exactly-once delivery: what it really means</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
       <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>18 min left</span></span>
     </div></div>
     <div class="wrap reader-grid">
@@ -46,7 +47,7 @@ dual-write problem and the transactional outbox</a><a href="#how-kafka-does-exac
 choosing an approach</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
         <div class="mono muted" style="margin-top:18px" data-pct>0% · 18 min left</div>
       </nav>
-      <article class="article" data-minutes="18">
+      <article class="article" data-slug="exactly-once" data-minutes="18">
         <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/distributed-systems.html">Distributed Systems</a> · October 23, 2026 · 18 min</div>
         <h1>Exactly-once delivery: what it really means</h1>
         <p class="dek">Why no network delivers exactly once, and the patterns that make the effect happen once anyway: idempotent consumers, the outbox and Kafka transactions.</p>
@@ -611,7 +612,8 @@ Apache Flink blog, 2018</li>
 </ul>
 
         <div class="end-card">
-          <div class="big">You reached the end.</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
           <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a><a class="chip" href="/topics/messaging.html">Messaging</a></div>
           <div class="daynav"><a href="/reading/redis-internals.html"><div class="kicker">← Older · Oct 22</div><div class="t">Redis internals: one thread, many tricks</div></a><a href="/reading/starrocks-olap.html"><div class="kicker">Newer · Oct 23 →</div><div class="t">StarRocks and how fast OLAP engines work</div></a></div>
         </div>

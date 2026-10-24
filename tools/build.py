@@ -17,6 +17,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SITE_TITLE = 'The Daily Commit'
 SITE_DESC = 'Deep dives on how real systems work: databases, distributed systems, networking and security.'
 DIAGRAMS = os.path.join(ROOT, 'content', 'diagrams')
+# Supabase project for the optional Sign in with Google. Both values are public
+# (the anon key only reaches rows the database rules allow); leave them empty
+# to build the site without sign-in.
+SUPABASE_URL = ''
+SUPABASE_ANON_KEY = ''
 FONTS = ('https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;'
          '0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap')
 TOPIC_BLURBS = {
@@ -43,6 +48,7 @@ ICONS = {
     'right': '<path d="M5 12h14M13 6l6 6-6 6"/>',
     'left': '<path d="M19 12H5M11 6l-6 6 6 6"/>',
     'clock': '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    'check': '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
 }
 
 
@@ -69,6 +75,10 @@ def page(title, body, current, has_news, description=SITE_DESC, skin=''):
     )
     full_title = title if title == SITE_TITLE else f'{title} · {SITE_TITLE}'
     tagline = 'Deep dives on how systems work, plus the AI news.' if has_news else 'Deep dives on how real systems work.'
+    account = ('<button type="button" class="signin" data-auth hidden>Sign in</button><div class="pop" id="account" hidden></div>'
+               if SUPABASE_URL else '')
+    auth = (f'  <script>window.DC_AUTH={{url:"{SUPABASE_URL}",key:"{SUPABASE_ANON_KEY}"}}</script>\n'
+            '  <script src="/vendor/supabase.js"></script>\n  <script src="/auth.js"></script>\n' if SUPABASE_URL else '')
     sizes = ''.join(f'<button type="button" data-size="{v}">{l}</button>' for l, v in [('S', 17), ('M', 19), ('L', 21), ('XL', 23)])
     themes = ''.join(
         f'<button type="button" class="swatch" data-theme-pick="{k}" style="background:{bg};color:{fg}">{l}</button>'
@@ -94,7 +104,7 @@ def page(title, body, current, has_news, description=SITE_DESC, skin=''):
         {links}
       </nav>
       <div class="tools">
-        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        {account}<button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
         <div class="pop" id="settings" hidden>
           <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg">{sizes}</div></div>
           <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches">{themes}</div></div>
@@ -112,7 +122,7 @@ def page(title, body, current, has_news, description=SITE_DESC, skin=''):
     <span class="mono muted">{tagline}</span>
   </div></footer>
   <script src="/site.js"></script>
-</body>
+{auth}</body>
 </html>
 '''
 
@@ -193,10 +203,10 @@ def read_news(path):
 
 def row(a, date_style='short', show_summary=False):
     summary = f'<p>{esc(a["summary"])}</p>' if show_summary else ''
-    return (f'<a class="row-item" href="/reading/{a["slug"]}.html">'
+    return (f'<a class="row-item" data-slug="{a["slug"]}" href="/reading/{a["slug"]}.html">'
             f'<span class="mono muted">{fmt_date(a["date"], date_style)}</span>'
             f'<div><h3>{esc(a["title"])}</h3>{summary}'
-            f'<div class="mono muted sub">{esc(a["topic"])} · {a["minutes"]} min</div></div></a>')
+            f'<div class="mono muted sub">{esc(a["topic"])} · {a["minutes"]} min<span class="read-mark"> · {icon("check")}Read</span></div></div></a>')
 
 
 def write(rel, text):
@@ -251,6 +261,7 @@ def build():
     <div class="rbar"><div class="wrap rbar-in">
       <a class="link-btn mono" href="/reading/" style="font-size:12px">{icon("left")}Archive</a>
       <span class="mono muted now" data-now>{esc(a["title"])}</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
       <span class="mono left">{icon("clock")}<span data-left>{a["minutes"]} min left</span></span>
     </div></div>
     <div class="wrap reader-grid">
@@ -259,13 +270,14 @@ def build():
         {toc}
         <div class="mono muted" style="margin-top:18px" data-pct>0% · {a["minutes"]} min left</div>
       </nav>
-      <article class="article" data-minutes="{a["minutes"]}">
+      <article class="article" data-slug="{a["slug"]}" data-minutes="{a["minutes"]}">
         <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/{slugify(a["tags"][0])}.html">{esc(a["topic"])}</a> · {fmt_date(a["date"], "full")} · {a["minutes"]} min</div>
         <h1>{esc(a["title"])}</h1>
         <p class="dek">{esc(a["summary"])}</p>
 {a["html"]}
         <div class="end-card">
-          <div class="big">You reached the end.</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden>{icon("check")}<span>Mark as read</span></button></div>
           <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span>{chips}</div>
           <div class="daynav">{nav}</div>
         </div>
@@ -408,7 +420,7 @@ def build():
         <div class="kicker acc" style="margin-bottom:16px">Latest deep dive · {esc(lead["topic"])} · {lead["minutes"]} min read</div>
         <h1><a href="/reading/{lead["slug"]}.html">{esc(lead["title"])}</a></h1>
         <p class="dek">{esc(lead["summary"])}</p>
-        <div style="margin-top:28px"><a class="btn btn-solid" href="/reading/{lead["slug"]}.html">Start reading {icon("right")}</a></div>
+        <div style="margin-top:28px"><a class="btn btn-solid" data-start data-slug="{lead["slug"]}" data-minutes="{lead["minutes"]}" href="/reading/{lead["slug"]}.html">Start reading {icon("right")}</a></div>
         <div class="in-doc"><div class="kicker" style="margin-bottom:14px">In this deep dive</div><ol>{preview}</ol></div>
       </article>
       <aside class="rail">{rail}</aside>

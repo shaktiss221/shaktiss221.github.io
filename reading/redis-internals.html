@@ -35,6 +35,7 @@
     <div class="rbar"><div class="wrap rbar-in">
       <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
       <span class="mono muted now" data-now>Redis internals: one thread, many tricks</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
       <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>18 min left</span></span>
     </div></div>
     <div class="wrap reader-grid">
@@ -47,7 +48,7 @@ restart</a><a href="#forgetting-on-purpose-copying-and-splitting">Forgetting on
 purpose, copying, and splitting</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
         <div class="mono muted" style="margin-top:18px" data-pct>0% · 18 min left</div>
       </nav>
-      <article class="article" data-minutes="18">
+      <article class="article" data-slug="redis-internals" data-minutes="18">
         <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/databases.html">Databases</a> · October 22, 2026 · 18 min</div>
         <h1>Redis internals: one thread, many tricks</h1>
         <p class="dek">One thread, compact encodings, persistence, eviction and clustering: how Redis gets so much from a single core.</p>
@@ -664,7 +665,8 @@ fork</li>
 </ul>
 
         <div class="end-card">
-          <div class="big">You reached the end.</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
           <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/databases.html">Databases</a><a class="chip" href="/topics/caching.html">Caching</a></div>
           <div class="daynav"><a href="/reading/rate-limiting.html"><div class="kicker">← Older · Oct 22</div><div class="t">Rate limiting, from token buckets to global limits</div></a><a href="/reading/exactly-once.html"><div class="kicker">Newer · Oct 23 →</div><div class="t">Exactly-once delivery: what it really means</div></a></div>
         </div>

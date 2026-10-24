@@ -35,6 +35,7 @@
     <div class="rbar"><div class="wrap rbar-in">
       <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
       <span class="mono muted now" data-now>gRPC and Protobuf in production</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
       <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>17 min left</span></span>
     </div></div>
     <div class="wrap reader-grid">
@@ -44,7 +45,7 @@
 evolution: the rules that keep you compatible</a><a href="#grpc-on-top-of-http2">gRPC on top of HTTP/2</a><a href="#running-grpc-in-production">Running gRPC in production</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
         <div class="mono muted" style="margin-top:18px" data-pct>0% · 17 min left</div>
       </nav>
-      <article class="article" data-minutes="17">
+      <article class="article" data-slug="grpc-protobuf" data-minutes="17">
         <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/networking.html">Networking</a> · October 25, 2026 · 17 min</div>
         <h1>gRPC and Protobuf in production</h1>
         <p class="dek">Why field numbers and HTTP/2 streams explain Protobuf&#x27;s schema rules, gRPC streaming and its load-balancing quirks.</p>
@@ -706,7 +707,8 @@ Communications of the ACM, 2013</li>
 </ul>
 
         <div class="end-card">
-          <div class="big">You reached the end.</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
           <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/networking.html">Networking</a><a class="chip" href="/topics/apis.html">APIs</a></div>
           <div class="daynav"><a href="/reading/postgres-mvcc.html"><div class="kicker">← Older · Oct 24</div><div class="t">Postgres MVCC, vacuum and isolation</div></a><a href="/reading/secrets-management.html"><div class="kicker">Newer · Oct 26 →</div><div class="t">Secrets management: Vault, KMS and envelope encryption</div></a></div>
         </div>
