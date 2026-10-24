@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TLS 1.3 from the handshake up · Shakti&#x27;s Knowledge Base</title>
+  <meta name="description" content="The protocol from the first byte to the certificates behind it, plus ECH, post-quantum key exchange and 47-day certificates.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site"><div class="wrap">
+    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/reading/" aria-current="page">Reading</a>
+    </nav>
+  </div></header>
+
+  <main><div class="wrap">
+    <article class="post">
+      <p class="crumb"><a href="/reading/">Reading</a></p>
+      <h1>TLS 1.3 from the handshake up</h1>
+      <p class="meta">October 21, 2026 · 17 min read<span class="tag">security</span><span class="tag">networking</span></p>
+<details class="toc"><summary>Contents</summary>
+<ul>
+<li><a href="#why-tls-1.3-exists" id="toc-why-tls-1.3-exists">1. Why TLS
+1.3 exists</a></li>
+<li><a href="#the-five-building-blocks"
+id="toc-the-five-building-blocks">2. The five building blocks</a></li>
+<li><a href="#the-1-rtt-handshake-message-by-message"
+id="toc-the-1-rtt-handshake-message-by-message">3. The 1-RTT handshake,
+message by message</a></li>
+<li><a href="#the-key-schedule" id="toc-the-key-schedule">4. The key
+schedule</a></li>
+<li><a href="#resumption-and-0-rtt" id="toc-resumption-and-0-rtt">5.
+Resumption and 0-RTT</a></li>
+<li><a href="#certificates-and-trust" id="toc-certificates-and-trust">6.
+Certificates and trust</a></li>
+<li><a href="#deploying-it-in-the-real-world"
+id="toc-deploying-it-in-the-real-world">7. Deploying it in the real
+world</a></li>
+<li><a href="#ideas-to-carry-away-and-questions-for-our-discussion"
+id="toc-ideas-to-carry-away-and-questions-for-our-discussion">8. Ideas
+to carry away, and questions for our discussion</a></li>
+<li><a href="#sources" id="toc-sources">Sources</a></li>
+</ul>
+</details>
+<p>TLS 1.3 is mostly a deletion: it removed almost every option that had
+led to a real attack on TLS 1.2, and in doing so made the handshake one
+round trip shorter. This reading follows the protocol from the first
+byte of a connection to the certificates behind it, and ends with what
+changed in 2025 and 2026: Encrypted Client Hello became an RFC, browsers
+turned on post-quantum key exchange, and certificate lifetimes started
+shrinking toward 47 days.</p>
+<h2 id="why-tls-1.3-exists">1. Why TLS 1.3 exists</h2>
+<p>TLS 1.2 (2008) was not broken, but it was a menu, and attackers kept
+ordering the bad dishes. Over ten years, almost every famous TLS attack
+used a feature that was optional, legacy or negotiable:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>TLS 1.2 feature</th>
+<th>What went wrong</th>
+<th>What TLS 1.3 did</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>RSA key exchange (client encrypts the secret to the server’s RSA
+key)</td>
+<td>No forward secrecy: steal the server key later and you can decrypt
+every recorded session. Also Bleichenbacher-style oracles (ROBOT,
+2017).</td>
+<td>Removed. Every handshake uses ephemeral Diffie-Hellman.</td>
+</tr>
+<tr class="even">
+<td>CBC mode with MAC-then-encrypt</td>
+<td>Padding oracles: BEAST, Lucky Thirteen, POODLE.</td>
+<td>Removed. Only AEAD ciphers.</td>
+</tr>
+<tr class="odd">
+<td>RC4, 3DES, export ciphers</td>
+<td>Weak or deliberately weakened (FREAK, Logjam, Sweet32).</td>
+<td>Removed. Five cipher suites remain.</td>
+</tr>
+<tr class="even">
+<td>Compression</td>
+<td>CRIME: compressed length leaks secrets.</td>
+<td>Removed.</td>
+</tr>
+<tr class="odd">
+<td>Renegotiation</td>
+<td>Injection attacks and complex state machines.</td>
+<td>Removed; replaced by a simple key update.</td>
+</tr>
+<tr class="even">
+<td>Plaintext handshake after Hello</td>
+<td>Certificates and extensions visible to anyone on the path.</td>
+<td>Everything after ServerHello is encrypted.</td>
+</tr>
+</tbody>
+</table>
+<p>The other problem was speed. A TLS 1.2 handshake took <strong>two
+round trips</strong> before the client could send its first request. On
+a 100 ms mobile link that is 200 ms of nothing, on top of the TCP
+handshake.</p>
+<p>TLS 1.3 was published as <a
+href="https://www.rfc-editor.org/rfc/rfc8446">RFC 8446</a> in August
+2018, after 28 drafts and four years of work. It does two things at
+once: <strong>one round trip</strong> for a full handshake (zero for a
+resumed one), and a much smaller design that cryptographers could
+actually analyze. It was the first TLS version formally verified during
+design, with tools like Tamarin and ProVerif finding real bugs in drafts
+before they shipped.</p>
+<p>The guiding idea is worth naming: <strong>every option is attack
+surface.</strong> A secure protocol is not one that supports good
+choices, it is one that has no bad ones to fall back to.</p>
+<h2 id="the-five-building-blocks">2. The five building blocks</h2>
+<p>The whole protocol is assembled from five primitives, and once you
+know what each one is for, the handshake reads like a sentence.</p>
+<p><strong>1. Ephemeral Diffie-Hellman (ECDHE).</strong> Client and
+server each make a fresh key pair, swap public keys, and each compute
+the same shared secret without ever sending it. In practice this is
+X25519 or P-256. “Ephemeral” means the private keys are thrown away
+after the handshake. That is what gives <strong>forward
+secrecy</strong>: even if the server’s long-term key leaks next year,
+today’s traffic stays private, because the key that protected it no
+longer exists anywhere.</p>
+<p><strong>2. Signatures.</strong> Diffie-Hellman alone proves nothing
+about <em>who</em> you are talking to; a man in the middle can do DH
+with both sides. So the server signs the handshake with the private key
+behind its certificate (ECDSA, RSA-PSS or Ed25519). The signature is the
+only job the certificate’s key does in TLS 1.3. It never encrypts
+anything.</p>
+<p><strong>3. AEAD encryption.</strong> Authenticated Encryption with
+Associated Data encrypts and authenticates in one operation, so there is
+no separate MAC to get in the wrong order. TLS 1.3 allows only AEADs.
+The common suites are:</p>
+<ul>
+<li><code>TLS_AES_128_GCM_SHA256</code> (the default almost
+everywhere)</li>
+<li><code>TLS_AES_256_GCM_SHA384</code></li>
+<li><code>TLS_CHACHA20_POLY1305_SHA256</code> (fast on phones without
+AES hardware)</li>
+</ul>
+<p>Notice what a 1.3 suite name no longer contains: the key exchange and
+signature algorithm. Those are negotiated separately through extensions,
+which cut the old list of hundreds of combined suites to a handful.</p>
+<p><strong>4. HKDF.</strong> A key derivation function that turns one
+secret into many independent keys. It has two steps: <em>Extract</em>
+squeezes possibly uneven input (like a DH output) into a uniform secret,
+and <em>Expand</em> stretches that into as many labelled keys as needed.
+Section 4 is entirely HKDF.</p>
+<p><strong>5. The transcript hash.</strong> A running hash of every
+handshake message sent so far. Signatures and the final MACs cover this
+hash, so if an attacker changed any byte of any earlier message, such as
+removing a strong cipher from the client’s list, the hashes on the two
+sides would differ and the handshake would fail. This is the protocol’s
+defense against downgrade and tampering, in one mechanism.</p>
+<h2 id="the-1-rtt-handshake-message-by-message">3. The 1-RTT handshake,
+message by message</h2>
+<p>The trick that saves a round trip is that the client
+<strong>guesses</strong> which key exchange the server will pick and
+sends its Diffie-Hellman public key in the very first message. The
+server can then compute the shared secret immediately and encrypt
+everything it sends back.</p>
+<figure class="diagram"><svg viewBox="0 0 760 456" role="img" aria-label="The client can send its request after one round trip" font-size="13"><defs><marker id="hs-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">The client can send its request after one round trip</text><g><rect x="60" y="48" width="140" height="40" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="130" y="72" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Client</text></g><g><rect x="490" y="48" width="140" height="40" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="560" y="72" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Server</text></g><g stroke="var(--cds-chart-grid)" stroke-width="1.25"><line x1="130" y1="88" x2="130" y2="432"></line><line x1="560" y1="88" x2="560" y2="432"></line></g><g fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"><path d="M130 140H560" marker-end="url(#hs-arrow)"></path><path d="M560 190H130" marker-end="url(#hs-arrow)"></path><path d="M560 254H130" marker-end="url(#hs-arrow)"></path><path d="M130 304H560" marker-end="url(#hs-arrow)"></path><path d="M130 364H560" marker-end="url(#hs-arrow)"></path><path d="M560 414H130" marker-end="url(#hs-arrow)"></path></g><text x="345" y="132" text-anchor="middle" fill="var(--cds-text-primary)">ClientHello + key_share (the guess)</text><text x="345" y="182" text-anchor="middle" fill="var(--cds-text-primary)">ServerHello + key_share</text><text x="345" text-anchor="middle" fill="var(--cds-text-primary)"><tspan x="345" y="230">EncryptedExtensions, Certificate,</tspan><tspan x="345" y="246">CertificateVerify, Finished</tspan></text><text x="345" y="296" text-anchor="middle" fill="var(--cds-text-primary)">Finished</text><text x="345" y="356" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">HTTP request</text><text x="345" y="406" text-anchor="middle" fill="var(--cds-text-primary)">HTTP response</text><g><path d="M104 140V254" fill="none" stroke="var(--cds-chart-categorical-1)" stroke-width="2"></path><path d="M104 140H112M104 254H112" fill="none" stroke="var(--cds-chart-categorical-1)" stroke-width="2"></path><text x="96" y="201" text-anchor="end" font-weight="600" fill="var(--cds-text-primary)">1 RTT</text></g><g><path d="M588 128V196" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></path><text x="600" y="166" font-size="11.5" fill="var(--cds-text-secondary)">plaintext</text></g><g><path d="M588 216V310" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></path><text x="600" y="267" font-size="11.5" fill="var(--cds-text-secondary)">handshake keys</text></g><g><path d="M588 344V420" fill="none" stroke="var(--cds-chart-categorical-1)" stroke-width="2"></path><text x="600" y="386" font-size="11.5" fill="var(--cds-text-secondary)">application keys</text></g></svg></figure>
+<p>Only the two Hello messages travel in plaintext. Everything the
+server says after ServerHello is already encrypted, and the request goes
+out with the client’s Finished.</p>
+<h3 id="flight-1-clienthello-plaintext">Flight 1: ClientHello
+(plaintext)</h3>
+<p>The client sends:</p>
+<ul>
+<li><strong>random</strong>: 32 fresh random bytes.</li>
+<li><strong>cipher_suites</strong>: the AEAD + hash pairs it
+supports.</li>
+<li><strong>supported_versions</strong> extension: lists TLS 1.3. (The
+old <code>version</code> field is frozen at TLS 1.2 for compatibility;
+see section 7.)</li>
+<li><strong>supported_groups</strong>: the DH groups it supports, such
+as X25519 and P-256.</li>
+<li><strong>key_share</strong>: the actual public key for one or two of
+those groups. This is the guess.</li>
+<li><strong>signature_algorithms</strong>: which signatures it can
+verify.</li>
+<li><strong>server_name (SNI)</strong>: the hostname, so a server
+hosting many sites knows which certificate to use. Unencrypted unless
+ECH is used (section 7).</li>
+<li>Optionally <strong>pre_shared_key</strong> and
+<strong>early_data</strong> for resumption (section 5).</li>
+</ul>
+<h3 id="flight-2-the-servers-reply-mostly-encrypted">Flight 2: the
+server’s reply (mostly encrypted)</h3>
+<ol type="1">
+<li><strong>ServerHello</strong> (plaintext): picks the cipher suite and
+returns its own <strong>key_share</strong> in the same group. Both sides
+can now compute the DH shared secret and derive <strong>handshake
+traffic keys</strong>.</li>
+<li><strong>EncryptedExtensions</strong>: everything that is not needed
+to set up the keys, such as ALPN (<code>h2</code> or
+<code>http/1.1</code>). From here on, all messages are encrypted.</li>
+<li><strong>CertificateRequest</strong> (optional): only for mutual
+TLS.</li>
+<li><strong>Certificate</strong>: the server’s certificate chain.</li>
+<li><strong>CertificateVerify</strong>: a signature, with the
+certificate’s private key, over the transcript hash so far. This proves
+the server owns the certificate <em>and</em> that it saw the same
+ClientHello the client sent.</li>
+<li><strong>Finished</strong>: an HMAC over the whole transcript, keyed
+from the handshake secret. It confirms the key exchange was not tampered
+with.</li>
+</ol>
+<p>The server can start sending application data right after its
+Finished, before hearing back. This is sometimes called “0.5-RTT” data.
+It is useful for things like server push, but the server does not yet
+know who the client is.</p>
+<h3 id="flight-3-client-finished">Flight 3: client Finished</h3>
+<p>The client checks the certificate chain and the CertificateVerify
+signature, verifies the server’s Finished, and sends its own
+<strong>Finished</strong> (plus Certificate and CertificateVerify if
+mutual TLS was requested). It can send its HTTP request in the same
+flight. Total cost: <strong>one round trip</strong> before the request
+goes out.</p>
+<h3 id="when-the-guess-is-wrong-helloretryrequest">When the guess is
+wrong: HelloRetryRequest</h3>
+<p>If the client sent a key share for a group the server does not want,
+the server replies with a <strong>HelloRetryRequest</strong> naming the
+group it prefers. The client sends a new ClientHello with the right key
+share. This costs an extra round trip, which is why clients pick their
+key shares carefully. It is also relevant to post-quantum rollout: large
+post-quantum key shares make the guess more expensive to get wrong.</p>
+<h3 id="after-the-handshake">After the handshake</h3>
+<p>Two post-handshake messages matter:</p>
+<ul>
+<li><strong>NewSessionTicket</strong>: the server gives the client a
+ticket for resuming later (section 5).</li>
+<li><strong>KeyUpdate</strong>: either side can rotate the traffic keys
+on a long-lived connection. This replaces renegotiation with a much
+smaller mechanism.</li>
+</ul>
+<h2 id="the-key-schedule">4. The key schedule</h2>
+<p>TLS 1.3 never uses one secret for two jobs. It runs a chain of three
+HKDF-Extract steps, mixing in a new input at each stage, and expands
+each stage into labelled keys for exactly one purpose.</p>
+<ol type="1">
+<li><strong>Early Secret</strong> = Extract(salt 0, PSK). With no
+resumption, the PSK is a string of zeros. This stage produces the keys
+for 0-RTT early data and the binder that proves the client holds the
+PSK.</li>
+<li><strong>Handshake Secret</strong> = Extract(Derive(Early Secret),
+ECDHE shared secret). This stage produces <code>c hs traffic</code> and
+<code>s hs traffic</code>, the client and server <strong>handshake
+traffic secrets</strong> that encrypt everything from
+EncryptedExtensions to Finished.</li>
+<li><strong>Master Secret</strong> = Extract(Derive(Handshake Secret),
+zeros). This stage produces <code>c ap traffic</code> and
+<code>s ap traffic</code>, the <strong>application traffic
+secrets</strong> for the actual data, plus the <code>res master</code>
+secret used to mint resumption tickets and an <code>exp master</code>
+secret for exporters.</li>
+</ol>
+<p>Each <code>Derive-Secret</code> call also mixes in the
+<strong>transcript hash</strong> at that point. So the application keys
+depend not only on the DH output but on every byte of the handshake that
+came before. Two sides that saw different handshakes cannot end up with
+the same keys.</p>
+<p>Why have separate keys per direction and per phase?</p>
+<ul>
+<li><strong>Separation of concerns.</strong> A bug that leaks handshake
+keys does not leak application keys.</li>
+<li><strong>Clean proofs.</strong> Each key is used for exactly one
+thing, which is what made the formal analysis tractable.</li>
+<li><strong>Key updates.</strong> A KeyUpdate replaces a traffic secret
+with
+<code>HKDF-Expand-Label(secret, "traffic upd", "", Hash.length)</code>.
+The old key is deleted, so compromising the current key does not reveal
+earlier traffic on the same connection.</li>
+</ul>
+<p>The Finished message is computed with a <code>finished_key</code>
+derived from each side’s handshake traffic secret. It is an HMAC over
+the transcript hash. That one MAC is what binds the key exchange, the
+certificate and every negotiated parameter together.</p>
+<h2 id="resumption-and-0-rtt">5. Resumption and 0-RTT</h2>
+<p>Resumption skips the certificate work on a repeat visit, and 0-RTT
+goes further by sending data in the very first packet, at the cost of
+letting an attacker replay that data.</p>
+<h3 id="pre-shared-keys-and-tickets">Pre-shared keys and tickets</h3>
+<p>After a handshake, the server sends one or more
+<strong>NewSessionTicket</strong> messages. Each holds an opaque ticket
+(usually the resumption secret encrypted under a key only the server
+knows) and a lifetime, which RFC 8446 caps at seven days. The client
+stores the ticket together with a <strong>PSK</strong> derived from
+<code>res master</code>.</p>
+<p>Next time, the client includes the ticket in its ClientHello’s
+<code>pre_shared_key</code> extension, plus a <strong>binder</strong>:
+an HMAC proving it actually knows the PSK, not just the ticket. There
+are two modes:</p>
+<ul>
+<li><strong>psk_dhe_ke</strong>: PSK plus a fresh ECDHE exchange. Keeps
+forward secrecy. This is what browsers use.</li>
+<li><strong>psk_ke</strong>: PSK only, no DH. Cheaper but loses forward
+secrecy if the ticket key leaks. Rarely appropriate.</li>
+</ul>
+<p>Resumption skips the Certificate and CertificateVerify messages and
+the signature check, which is the expensive part for both sides.</p>
+<h3 id="rtt-early-data">0-RTT early data</h3>
+<p>With a PSK, the client can derive keys from the <strong>Early
+Secret</strong> before hearing from the server at all. It then sends its
+HTTP request alongside the ClientHello. The server can answer in its
+first flight. For a returning user this removes a whole round trip.</p>
+<p>The catch is <strong>replay</strong>. Early data is encrypted only
+under the PSK, with no fresh input from the server. An attacker who
+records the first packet can send it again, and a server cannot always
+tell. If the early data was <code>POST /transfer?amount=100</code>, that
+is a real problem.</p>
+<p>RFC 8446 is blunt about it: TLS does not protect 0-RTT data against
+replay, so the application must decide what is safe. In practice:</p>
+<ul>
+<li>Servers accept 0-RTT only for <strong>idempotent</strong> requests,
+typically GET without side effects.</li>
+<li>Servers can keep a cache of recently seen ClientHellos or use
+single-use tickets, which limits replay within one server or cluster but
+is hard to do globally.</li>
+<li>HTTP has a status code for this, <strong>425 Too Early</strong> (<a
+href="https://www.rfc-editor.org/rfc/rfc8470">RFC 8470</a>), so a
+backend can tell a TLS-terminating proxy “retry this after the handshake
+completes”.</li>
+<li>Early data also lacks forward secrecy with respect to the ticket
+key: whoever holds the server’s ticket encryption key can decrypt
+it.</li>
+</ul>
+<p>The general lesson goes beyond TLS: <strong>latency gains often come
+from skipping a step that provided a guarantee.</strong> 0-RTT is safe
+exactly when the request did not need that guarantee.</p>
+<h2 id="certificates-and-trust">6. Certificates and trust</h2>
+<p>The handshake proves the server holds a private key; the certificate
+is what ties that key to a name, and the hard problems of the web PKI
+are all about that tie: who may vouch for it, how a client checks it,
+and what happens when it goes wrong.</p>
+<h3 id="the-chain">The chain</h3>
+<p>A server sends its <strong>leaf certificate</strong> (for
+<code>example.com</code>) and one or more <strong>intermediate</strong>
+certificates. The client already has a set of <strong>root</strong>
+certificates in its trust store, shipped by the browser or OS.
+Validation walks the chain upward:</p>
+<ol type="1">
+<li>Each certificate’s signature verifies with the public key of the one
+above it, ending at a trusted root.</li>
+<li>Each certificate is within its validity dates.</li>
+<li>The leaf’s <strong>Subject Alternative Name</strong> matches the
+hostname the client asked for. (The old Common Name field is ignored by
+modern clients.)</li>
+<li>Key usage and constraints allow the certificate to be used for a TLS
+server.</li>
+</ol>
+<p>Roots are kept offline and sign intermediates; intermediates sign
+leaves. If an intermediate is compromised it can be revoked without
+replacing a root that is baked into billions of devices.</p>
+<p>A classic production bug: a server that sends only its leaf and not
+the intermediate. Browsers often recover by fetching or caching the
+intermediate, so the site looks fine, while curl, Java clients or mobile
+apps fail. Always serve the full chain (minus the root).</p>
+<h3 id="revocation-and-why-it-mostly-failed">Revocation, and why it
+mostly failed</h3>
+<p>When a private key leaks, the certificate needs to be revoked before
+it expires. The two classic mechanisms were:</p>
+<ul>
+<li><strong>CRLs</strong>: CAs publish lists of revoked serial numbers.
+They grew large and were slow to fetch.</li>
+<li><strong>OCSP</strong>: the client asks the CA “is this certificate
+still good?” during the handshake. It added latency, leaked browsing
+history to the CA, and when the responder was down, clients
+<strong>soft-failed</strong> and accepted the certificate anyway, which
+defeats the point.</li>
+</ul>
+<p><strong>OCSP stapling</strong> let the server fetch the OCSP response
+itself and attach it to the handshake, fixing privacy and latency, but
+adoption stayed patchy. The industry has largely given up: browsers ship
+their own compressed revocation sets (Chrome’s CRLSets, Firefox’s
+CRLite), and Let’s Encrypt, the largest CA, <a
+href="https://isrg.org/post/ending-ocsp/">shut down its OCSP service in
+2025</a> in favor of CRLs.</p>
+<h3 id="short-lifetimes-instead-of-revocation">Short lifetimes instead
+of revocation</h3>
+<p>If revocation is unreliable, the next best thing is certificates that
+expire quickly. In April 2025 the CA/Browser Forum approved ballot
+SC-081, which <a
+href="https://www.globalsign.com/en/blog/47-day-tls-certificate-lifespan-what-it-means-for-security-teams">shrinks
+the maximum certificate lifetime</a> from 398 days to 200 days from
+March 15, 2026, and in steps down to <strong>47 days</strong> by March
+15, 2029. The period a CA can reuse a domain-validation check drops to
+10 days. Let’s Encrypt also began offering six-day certificates.</p>
+<p>The practical consequence for backend engineers: certificate renewal
+must be fully automated (ACME, cert-manager, a cloud certificate
+service). A manual renewal calendar that worked with yearly certificates
+breaks at 47 days.</p>
+<h3 id="certificate-transparency">Certificate Transparency</h3>
+<p>The other answer to “what if a CA misbehaves” is visibility. With
+<strong>Certificate Transparency (CT)</strong>, every publicly trusted
+certificate must be logged in public, append-only, Merkle-tree logs. The
+certificate carries <strong>signed certificate timestamps
+(SCTs)</strong> proving it was logged, and Chrome and Safari reject
+certificates without them. Domain owners can monitor the logs (for
+example via crt.sh) and see any certificate issued for their names.
+Several CA distrust decisions started with something spotted in CT
+logs.</p>
+<h2 id="deploying-it-in-the-real-world">7. Deploying it in the real
+world</h2>
+<p>The cryptography of TLS 1.3 was settled early; most of the remaining
+years of work went into getting it past the boxes that sit between
+clients and servers.</p>
+<h3 id="middleboxes-and-ossification">Middleboxes and ossification</h3>
+<p>When browsers first tried early TLS 1.3 drafts on real networks, a
+noticeable share of connections failed. Firewalls, antivirus proxies and
+corporate inspection boxes had hard-coded what a TLS handshake “should”
+look like, and dropped anything new. This is <strong>protocol
+ossification</strong>: a field that was meant to be flexible becomes
+frozen because deployed software depends on its old values.</p>
+<p>The fix was to make TLS 1.3 <em>look</em> like TLS 1.2 resumption on
+the wire:</p>
+<ul>
+<li>The <code>legacy_version</code> field in ClientHello and ServerHello
+stays at <code>0x0303</code> (TLS 1.2). The real version is negotiated
+in the <strong>supported_versions</strong> extension.</li>
+<li>The client sends a fake <code>legacy_session_id</code>, and both
+sides send a meaningless <strong>ChangeCipherSpec</strong> message,
+because middleboxes expected one.</li>
+</ul>
+<p>To stop the new extension points from ossifying too, Google
+introduced <strong>GREASE</strong> (<a
+href="https://www.rfc-editor.org/rfc/rfc8701">RFC 8701</a>): clients
+randomly include reserved, meaningless values in version, cipher and
+extension lists. Any server or middlebox that chokes on unknown values
+breaks early and visibly, instead of years later when a real new value
+arrives.</p>
+<h3 id="downgrade-protection">Downgrade protection</h3>
+<p>If an attacker can make the client and server fall back to TLS 1.2,
+they bypass everything 1.3 fixed. The transcript hash protects a 1.3
+handshake, but a 1.2 handshake does not cover the 1.3 signal. So a TLS
+1.3 server that is forced to negotiate TLS 1.2 puts a
+<strong>sentinel</strong> in the last eight bytes of its ServerHello
+random: the ASCII string <code>DOWNGRD</code> followed by
+<code>0x01</code>. That random value <em>is</em> signed in TLS 1.2. A
+1.3-capable client that sees the sentinel knows someone tampered with
+the negotiation and aborts.</p>
+<h3 id="encrypted-client-hello-ech">Encrypted Client Hello (ECH)</h3>
+<p>TLS 1.3 encrypts the certificate, but the ClientHello is still
+plaintext, and its <strong>SNI</strong> field reveals which site you are
+visiting to anyone on the path. That is how many networks filter and
+censor.</p>
+<p><strong>ECH</strong> fixes this by splitting the ClientHello in two.
+An <strong>outer</strong> ClientHello carries a harmless public name
+(for example the CDN’s own domain). An <strong>inner</strong>
+ClientHello, with the real SNI and other sensitive extensions, is
+encrypted with HPKE to a public key the server publishes in DNS (in the
+HTTPS resource record). The server, typically a large CDN fronting many
+sites, decrypts the inner hello and continues with it. Observers see
+only that you connected to the CDN.</p>
+<p>ECH was published as <a
+href="https://rfc-editor.org/rfc/rfc9849.html">RFC 9849</a> in March
+2026, after years of deployment as a draft by Cloudflare, Chrome and
+Firefox. It only gives real privacy when many sites share one outer
+name, so it is mainly a CDN-scale feature. It also needs encrypted DNS,
+since a plaintext DNS lookup would leak the name anyway.</p>
+<h3 id="post-quantum-key-exchange">Post-quantum key exchange</h3>
+<p>A large enough quantum computer would break both X25519 and RSA.
+Nobody has one yet, but traffic recorded today could be decrypted later:
+<strong>harvest now, decrypt later</strong>. Key exchange is the urgent
+part, since signatures only need to resist forgery at the moment of the
+handshake.</p>
+<p>NIST standardized <strong>ML-KEM</strong> (formerly Kyber) as FIPS
+203 in August 2024. TLS deploys it as a <strong>hybrid</strong>: the key
+share combines X25519 and ML-KEM-768, and the shared secret mixes both,
+so the connection is safe as long as either one holds. Chrome first
+enabled a hybrid with the earlier Kyber draft in 2024 and <a
+href="https://thehackernews.com/2024/09/google-chrome-switches-to-ml-kem-for.html">switched
+to the standardized X25519MLKEM768</a> in Chrome 131. Firefox,
+Cloudflare and major TLS libraries followed.</p>
+<p>The main cost is size. An ML-KEM-768 public key is 1,184 bytes,
+against 32 bytes for X25519. The ClientHello no longer fits in one
+packet, and some middleboxes that assumed it would (the ossification
+story again) broke. This is also why the key-share guess from section 3
+matters more now: guessing wrong costs a HelloRetryRequest with large
+messages.</p>
+<p>Post-quantum <strong>signatures</strong> and certificates are harder
+still, because the signatures are larger and appear many times in a
+certificate chain. That migration is still being designed.</p>
+<h2 id="ideas-to-carry-away-and-questions-for-our-discussion">8. Ideas
+to carry away, and questions for our discussion</h2>
+<p>Five ideas from TLS 1.3 apply well beyond cryptography:</p>
+<ol type="1">
+<li><strong>Every option is attack surface.</strong> Removing choices
+made the protocol both faster and easier to prove secure.</li>
+<li><strong>Bind everything to a transcript.</strong> One hash over the
+whole conversation, covered by a signature and a MAC, defeats a whole
+family of tampering and downgrade attacks.</li>
+<li><strong>One key, one job.</strong> The key schedule separates keys
+by direction and phase, so a leak in one place stays contained.</li>
+<li><strong>Latency often costs a guarantee.</strong> 0-RTT is fast
+because it skips the server’s fresh input, and that is exactly why it
+can be replayed.</li>
+<li><strong>Design for the network that exists.</strong> Middlebox
+compatibility mode and GREASE exist because deployed software freezes
+whatever it can see.</li>
+</ol>
+<p>Think about these before we talk:</p>
+<ul>
+<li>Why does sending the key share in the first message save a round
+trip, and what does it cost when the guess is wrong?</li>
+<li>In TLS 1.3, what exactly does the certificate’s private key sign,
+and why is that enough to stop a man in the middle?</li>
+<li>Which of your service’s endpoints would be safe to accept as 0-RTT
+early data, and which would not?</li>
+<li>If revocation does not really work, what is the actual exposure
+window for a leaked key today, and how does a 47-day lifetime change
+it?</li>
+<li>Where in your own infrastructure is TLS terminated (load balancer,
+sidecar, app)? What travels in plaintext after that point?</li>
+<li>Why is post-quantum key exchange being deployed years before
+post-quantum signatures?</li>
+</ul>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>IETF, <a href="https://www.rfc-editor.org/rfc/rfc8446">RFC 8446: The
+Transport Layer Security (TLS) Protocol Version 1.3</a>, August
+2018</li>
+<li>Cloudflare, <a
+href="https://blog.cloudflare.com/rfc-8446-aka-tls-1-3/">A Detailed Look
+at RFC 8446 (a.k.a. TLS 1.3)</a>, 2018</li>
+<li>Michael Driscoll, <a href="https://tls13.xargs.org/">The Illustrated
+TLS 1.3 Connection</a>, every byte of a real handshake explained</li>
+<li>IETF, <a href="https://rfc-editor.org/rfc/rfc9849.html">RFC 9849:
+TLS Encrypted Client Hello</a>, March 2026</li>
+<li>IETF, <a href="https://www.rfc-editor.org/rfc/rfc8470">RFC 8470:
+Using Early Data in HTTP</a> and <a
+href="https://www.rfc-editor.org/rfc/rfc8701">RFC 8701: GREASE</a></li>
+<li>ISRG, <a href="https://isrg.org/post/ending-ocsp/">Ending OCSP
+Support in 2025</a></li>
+<li>GlobalSign, <a
+href="https://www.globalsign.com/en/blog/47-day-tls-certificate-lifespan-what-it-means-for-security-teams">47-day
+TLS certificate lifespan</a></li>
+<li>The Hacker News, <a
+href="https://thehackernews.com/2024/09/google-chrome-switches-to-ml-kem-for.html">Google
+Chrome switches to ML-KEM</a>, September 2024</li>
+<li>Book for going deeper: Ivan Ristić, <em>Bulletproof TLS and PKI</em>
+(2nd edition, Feisty Duck)</li>
+</ul>
+<p>Some details, such as the TLS 1.2 attack history and ML-KEM key
+sizes, are from my own knowledge of the specifications rather than a
+page opened today.</p>
+
+    </article>
+    <nav class="pager"><a class="prev" href="/reading/dynamodb.html"><span>Older</span>DynamoDB under the hood</a><a class="next" href="/reading/rate-limiting.html"><span>Newer</span>Rate limiting, from token buckets to global limits</a></nav>
+  </div></main>
+
+  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+</body>
+</html>

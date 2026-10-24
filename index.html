@@ -3,33 +3,33 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Shakti's Knowledge Base</title>
-  <meta name="description" content="My notes on AI and the tech reading I recommend.">
+  <title>Shakti&#x27;s Knowledge Base</title>
+  <meta name="description" content="Long-form notes on how real systems work: databases, distributed systems, networking and security.">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header class="site"><div class="wrap">
-    <a class="brand" href="/">Shakti's Knowledge Base</a>
+    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
     <nav>
       <a href="/" aria-current="page">Home</a>
-      <a href="/notes/">AI Notes</a>
       <a href="/reading/">Reading</a>
     </nav>
   </div></header>
 
   <main><div class="wrap">
-    <h1>Notes on AI and tech</h1>
-    <p class="lede">A public notebook of what I'm learning about AI, plus the articles, papers and books worth reading.</p>
+    <h1>Notes on how systems really work</h1>
+    <p class="lede">A public notebook of long reads on databases, distributed systems, networking and security, each built around real papers and engineering write-ups.</p>
+    <p class="topics"><span class="tag">databases · 6</span><span class="tag">distributed systems · 5</span><span class="tag">APIs · 2</span><span class="tag">caching · 2</span><span class="tag">networking · 2</span><span class="tag">security · 2</span><span class="tag">analytics · 1</span><span class="tag">case study · 1</span><span class="tag">infrastructure · 1</span><span class="tag">messaging · 1</span></p>
 
-    <div class="cards">
-      <a class="card" href="/notes/"><strong>AI Notes →</strong><span>Concepts, explainers and things I've figured out.</span></a>
-      <a class="card" href="/reading/"><strong>Reading list →</strong><span>Articles, papers and books I recommend.</span></a>
-    </div>
-
-    <h2>Latest notes</h2>
+    <h2>Latest reads</h2>
     <ul class="list">
-      <li><a class="title" href="/notes/what-is-rag.html">What is RAG?</a><span class="desc">Retrieval-augmented generation in plain terms.</span></li>
+      <li><a class="title" href="/reading/discord-scylladb.html">Discord&#x27;s messages: Cassandra to ScyllaDB</a><span class="desc">How Discord moved trillions of messages to ScyllaDB, and the data-services layer that stopped hot channels hurting everyone else.</span><span class="meta-line">October 28, 2026 · 16 min read<span class="tag">databases</span><span class="tag">case study</span></span></li>
+      <li><a class="title" href="/reading/consistent-hashing.html">Consistent hashing and partitioning</a><span class="desc">The hash ring and its successors (rendezvous, jump and Maglev hashing), range partitioning, and how real systems combine them.</span><span class="meta-line">October 27, 2026 · 16 min read<span class="tag">distributed systems</span><span class="tag">databases</span></span></li>
+      <li><a class="title" href="/reading/secrets-management.html">Secrets management: Vault, KMS and envelope encryption</a><span class="desc">From passwords in config files to dynamic credentials and workload identity, with envelope encryption underneath.</span><span class="meta-line">October 26, 2026 · 17 min read<span class="tag">security</span><span class="tag">infrastructure</span></span></li>
+      <li><a class="title" href="/reading/grpc-protobuf.html">gRPC and Protobuf in production</a><span class="desc">Why field numbers and HTTP/2 streams explain Protobuf&#x27;s schema rules, gRPC streaming and its load-balancing quirks.</span><span class="meta-line">October 25, 2026 · 17 min read<span class="tag">networking</span><span class="tag">APIs</span></span></li>
+      <li><a class="title" href="/reading/postgres-mvcc.html">Postgres MVCC, vacuum and isolation</a><span class="desc">Row versions, snapshots, vacuum and transaction ID wraparound: how Postgres lets readers and writers never block each other.</span><span class="meta-line">October 24, 2026 · 16 min read<span class="tag">databases</span></span></li>
     </ul>
+    <p class="more"><a href="/reading/">All 12 reads →</a></p>
   </div></main>
 
   <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>

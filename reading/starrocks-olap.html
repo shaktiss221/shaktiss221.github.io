@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StarRocks and how fast OLAP engines work · Shakti&#x27;s Knowledge Base</title>
+  <meta name="description" content="Columnar storage, vectorized execution, cost-based joins and real-time upserts, learned through one open-source engine.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site"><div class="wrap">
+    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/reading/" aria-current="page">Reading</a>
+    </nav>
+  </div></header>
+
+  <main><div class="wrap">
+    <article class="post">
+      <p class="crumb"><a href="/reading/">Reading</a></p>
+      <h1>StarRocks and how fast OLAP engines work</h1>
+      <p class="meta">October 23, 2026 · 15 min read<span class="tag">databases</span><span class="tag">analytics</span></p>
+<details class="toc"><summary>Contents</summary>
+<ul>
+<li><a href="#why-analytics-engines-look-different"
+id="toc-why-analytics-engines-look-different">1. Why analytics engines
+look different</a></li>
+<li><a href="#architecture-frontends-backends-and-where-the-data-lives"
+id="toc-architecture-frontends-backends-and-where-the-data-lives">2.
+Architecture: frontends, backends and where the data lives</a></li>
+<li><a href="#storage-how-a-column-store-avoids-reading-data"
+id="toc-storage-how-a-column-store-avoids-reading-data">3. Storage: how
+a column store avoids reading data</a></li>
+<li><a href="#query-execution-making-the-cpu-the-bottleneck"
+id="toc-query-execution-making-the-cpu-the-bottleneck">4. Query
+execution: making the CPU the bottleneck</a></li>
+<li><a href="#real-time-data-materialized-views-and-the-data-lake"
+id="toc-real-time-data-materialized-views-and-the-data-lake">5.
+Real-time data, materialized views and the data lake</a></li>
+<li><a href="#how-it-compares-and-when-to-pick-it"
+id="toc-how-it-compares-and-when-to-pick-it">6. How it compares, and
+when to pick it</a></li>
+<li><a href="#ideas-to-carry-away-and-questions-for-our-discussion"
+id="toc-ideas-to-carry-away-and-questions-for-our-discussion">7. Ideas
+to carry away, and questions for our discussion</a></li>
+<li><a href="#sources" id="toc-sources">Sources</a></li>
+</ul>
+</details>
+<p>A fast analytics database is mostly a machine for not reading data:
+it stores columns instead of rows, skips blocks it can prove are
+irrelevant, and processes what is left in batches that fit the CPU.
+StarRocks is a good engine to learn this from because it combines nearly
+every modern trick in one open-source system: columnar storage, a
+vectorized MPP engine, a cost-based optimizer, real-time updates, and
+the option to run on object storage or directly over a data lake.</p>
+<h2 id="why-analytics-engines-look-different">1. Why analytics engines
+look different</h2>
+<p>A transactional database and an analytical database are optimized for
+opposite query shapes, and almost every design choice below follows from
+that.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th></th>
+<th>OLTP (Postgres, MySQL, DynamoDB)</th>
+<th>OLAP (StarRocks, ClickHouse, Druid, Snowflake)</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Typical query</td>
+<td>Fetch or update one order by ID</td>
+<td>Sum revenue by country and week over two years</td>
+</tr>
+<tr class="even">
+<td>Rows touched</td>
+<td>A handful</td>
+<td>Millions to billions</td>
+</tr>
+<tr class="odd">
+<td>Columns touched</td>
+<td>Most of the row</td>
+<td>3 to 10 of perhaps 200</td>
+</tr>
+<tr class="even">
+<td>Writes</td>
+<td>Many small, concurrent transactions</td>
+<td>Batches or streams of appends, fewer updates</td>
+</tr>
+<tr class="odd">
+<td>Latency goal</td>
+<td>Milliseconds per request</td>
+<td>Sub-second to seconds per query</td>
+</tr>
+<tr class="even">
+<td>Storage layout</td>
+<td>Rows together (B-tree pages)</td>
+<td>Columns together</td>
+</tr>
+</tbody>
+</table>
+<p>The key line is “columns touched”. If a table has 200 columns and a
+query reads 4, a row store must still pull all 200 off disk, because
+each page holds whole rows. A column store reads only the 4 columns it
+needs, which can be 50 times less I/O before any other trick.</p>
+<p>Columns also <strong>compress</strong> far better than rows, because
+a column holds values of one type that often repeat (country codes,
+status flags, timestamps that increase). Less data on disk means less to
+read and more fits in memory.</p>
+<p>The third idea is <strong>parallelism</strong>. An analytical query
+is easy to split: each node scans and partially aggregates its own slice
+of the data, then the partial results are merged. Systems that do this
+across many machines are called <strong>MPP</strong> (massively parallel
+processing) databases.</p>
+<p>StarRocks sits in a family of engines built on these ideas. Its
+particular aim is to handle three workloads in one system: low-latency
+dashboards with many concurrent users, complex multi-table joins (which
+some fast engines handle poorly), and data that changes in real
+time.</p>
+<h2 id="architecture-frontends-backends-and-where-the-data-lives">2.
+Architecture: frontends, backends and where the data lives</h2>
+<p>StarRocks has only two kinds of process: frontends that think and
+backends that work. Its biggest architectural change, from
+shared-nothing to shared-data, is about where the backends keep their
+data.</p>
+<figure class="diagram"><svg viewBox="0 0 760 430" role="img" aria-label="In shared-data mode, stateless compute nodes cache data that lives in object storage" font-size="13"><defs><marker id="sr-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">In shared-data mode, stateless compute nodes cache data from object storage</text><g fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"><path d="M380 84V108" marker-end="url(#sr-arrow)"></path><path d="M380 200V224" marker-end="url(#sr-arrow)"></path><path d="M380 340V364" marker-end="url(#sr-arrow)"></path></g><g><rect x="270" y="48" width="220" height="36" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="380" y="70" text-anchor="middle" fill="var(--cds-text-primary)">SQL client or BI tool</text></g><g><rect x="24" y="108" width="712" height="92" rx="8" fill="var(--cds-chart-reference-tint)" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="40" y="130" font-weight="600" fill="var(--cds-text-primary)">Frontends (Java): metadata, SQL planning, scheduling</text><rect x="56" y="144" width="200" height="40" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.12" stroke="var(--cds-chart-categorical-1)" stroke-width="2"></rect><text x="156" y="168" text-anchor="middle" fill="var(--cds-text-primary)">Leader</text><rect x="280" y="144" width="200" height="40" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="380" y="168" text-anchor="middle" fill="var(--cds-text-primary)">Followers (can take over)</text><rect x="504" y="144" width="200" height="40" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="604" y="168" text-anchor="middle" fill="var(--cds-text-primary)">Observers (scale reads)</text></g><g><rect x="24" y="224" width="712" height="116" rx="8" fill="var(--cds-chart-reference-tint)" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="40" y="246" font-weight="600" fill="var(--cds-text-primary)">Compute nodes (C++): run plan fragments in parallel, exchange data</text><rect x="56" y="260" width="200" height="64" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="156" y="286" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Compute node</text><text x="156" y="306" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">local disk and memory cache</text><rect x="280" y="260" width="200" height="64" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="380" y="286" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Compute node</text><text x="380" y="306" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">local disk and memory cache</text><rect x="504" y="260" width="200" height="64" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="604" y="286" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Add or remove freely</text><text x="604" y="306" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">no data to move</text></g><g><rect x="150" y="364" width="460" height="44" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="380" y="391" text-anchor="middle" fill="var(--cds-text-primary)">Object storage (S3, GCS, Azure, HDFS): the source of truth</text></g></svg></figure>
+<p>In shared-nothing mode the bottom two layers merge: backends store
+tablets on their own disks, three copies each, and scaling means moving
+data.</p>
+<h3 id="a-little-history">A little history</h3>
+<p>StarRocks started in 2020 as a fork of Apache Doris (itself born at
+Baidu as Palo), first called DorisDB. The team rewrote large parts of
+the execution engine and optimizer, renamed it StarRocks and
+open-sourced it in 2021. In February 2023 CelerData, the company behind
+it, <a
+href="https://bigdatawire.com/2023/02/14/celerdata-contributes-starrocks-to-the-linux-foundation">contributed
+the project to the Linux Foundation</a>. CelerData sells a managed cloud
+version; StarRocks 4.0 <a
+href="https://www.starrocks.io/blog/starrocks-4.0-now-available">was
+released in late 2025</a>.</p>
+<h3 id="frontend-fe">Frontend (FE)</h3>
+<p>FE nodes are written in Java and handle everything except touching
+data:</p>
+<ul>
+<li><strong>Metadata</strong>: databases, tables, partitions, tablets
+and which nodes hold them.</li>
+<li><strong>Query planning</strong>: parse SQL, run the cost-based
+optimizer, and split the plan into fragments for the backends.</li>
+<li><strong>Coordination</strong>: schedule fragments, track load jobs
+and transactions.</li>
+</ul>
+<p>One FE is the <strong>leader</strong>; others are
+<strong>followers</strong> that replicate the metadata journal and can
+take over through an election, or <strong>observers</strong> that only
+replicate and serve reads to scale out query planning. The metadata
+journal is replicated with an embedded Berkeley DB Java Edition.</p>
+<h3 id="backend-be-and-compute-node-cn">Backend (BE) and compute node
+(CN)</h3>
+<p>BE nodes are written in C++ and do the real work: storing data and
+executing query fragments. A query typically runs on all BEs at once,
+each scanning and pre-aggregating its own tablets, before results are
+exchanged and merged.</p>
+<p>A <strong>compute node (CN)</strong> is a backend with no permanent
+data, only execution and a cache. CNs are the unit of elastic scaling:
+you can add 20 for a busy hour and remove them afterwards, because
+nothing needs to be moved.</p>
+<h3 id="shared-nothing-vs-shared-data">Shared-nothing vs
+shared-data</h3>
+<p>In the original <strong>shared-nothing</strong> mode, each table is
+split into <strong>tablets</strong> and each tablet is stored on the
+local disks of usually three BEs. This is fast and simple, but storage
+and compute scale together: to add disk you add machines, and adding or
+removing a node means moving tablets around.</p>
+<p>Starting with version 3.0 (2023), StarRocks added a
+<strong>shared-data</strong> mode. Data lives in object storage (S3,
+GCS, Azure Blob, MinIO or HDFS) as the source of truth, and CNs keep a
+local <strong>cache</strong> of hot data on disk and in memory. Object
+storage provides durability and cheap capacity, so the engine does not
+need its own three-way replication; the cache keeps repeated queries
+fast. Compute becomes stateless and elastic.</p>
+<p>The trade-off is the cold read. A query that misses the cache pays
+object-storage latency, which is tens of milliseconds per request rather
+than well under one millisecond for local NVMe. Much of the engineering
+in shared-data mode goes into prefetching, cache warm-up and making sure
+small writes are batched before they reach object storage. This is the
+same direction Snowflake took a decade earlier and most analytics
+systems have followed since.</p>
+<h2 id="storage-how-a-column-store-avoids-reading-data">3. Storage: how
+a column store avoids reading data</h2>
+<p>Every layer of StarRocks storage exists to let a query skip work:
+partitions skip whole time ranges, indexes skip blocks inside a file,
+and encodings shrink what remains.</p>
+<h3 id="partitions-buckets-and-tablets">Partitions, buckets and
+tablets</h3>
+<p>A table is first <strong>partitioned</strong>, usually by date (one
+partition per day or month). A query with
+<code>WHERE dt &gt;= '2026-10-01'</code> never opens older partitions.
+This is <strong>partition pruning</strong>, and it is the single biggest
+lever on query speed.</p>
+<p>Each partition is then split into <strong>buckets</strong> by hashing
+one or more columns (or randomly). Each bucket of each partition is a
+<strong>tablet</strong>, the unit that is stored, replicated, moved and
+scanned in parallel. Choosing the bucket key well matters for joins, as
+section 4 shows.</p>
+<h3 id="inside-a-tablet">Inside a tablet</h3>
+<p>Data is written as immutable <strong>segment files</strong>. Inside a
+segment, each column is stored separately and broken into
+<strong>pages</strong> of a few tens of kilobytes. Each column picks an
+encoding suited to its data:</p>
+<ul>
+<li><strong>Dictionary encoding</strong> for low-cardinality strings:
+store “Germany” once and use a small integer everywhere else.</li>
+<li><strong>Run-length encoding</strong> for long runs of repeated
+values.</li>
+<li><strong>Frame-of-reference and bit-packing</strong> for integers
+that sit close together, such as timestamps.</li>
+</ul>
+<p>Then a general compressor such as LZ4 or Zstandard runs on top.</p>
+<p>Rows in a segment are sorted by the table’s <strong>sort
+key</strong>. That enables a set of lightweight indexes:</p>
+<ul>
+<li>A sparse <strong>prefix index</strong> on the sort key, so a query
+filtering on the leading key columns can jump straight to the right
+range.</li>
+<li><strong>Zone maps</strong>: the min and max of each column per page
+and per segment. A filter <code>amount &gt; 1000</code> skips every page
+whose max is below 1,000 without decompressing it.</li>
+<li>Optional <strong>Bloom filter</strong> and <strong>bitmap</strong>
+indexes for high-selectivity filters on columns that are not in the sort
+key.</li>
+</ul>
+<p>An engine that is smart about these indexes can answer “revenue for
+one customer last week” by reading a tiny fraction of a terabyte
+table.</p>
+<h3 id="the-four-table-types">The four table types</h3>
+<p>Column stores are naturally append-only, since rewriting a value in a
+compressed, sorted column file is expensive. StarRocks offers four table
+types that differ in how they handle rows with the same key:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Table type</th>
+<th>Behavior</th>
+<th>Typical use</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Duplicate Key</td>
+<td>Keeps every row; the key only defines the sort order</td>
+<td>Logs, events, append-only facts</td>
+</tr>
+<tr class="even">
+<td>Aggregate</td>
+<td>Rows with the same key are merged with a function per column (SUM,
+MAX, REPLACE and so on)</td>
+<td>Pre-aggregated metrics</td>
+</tr>
+<tr class="odd">
+<td>Unique Key</td>
+<td>Keeps only the latest row per key, merged at <strong>read</strong>
+time</td>
+<td>Older way to do upserts</td>
+</tr>
+<tr class="even">
+<td>Primary Key</td>
+<td>Keeps only the latest row per key, resolved at
+<strong>write</strong> time</td>
+<td>Real-time upserts and deletes, CDC from OLTP databases</td>
+</tr>
+</tbody>
+</table>
+<h3 id="merge-on-read-vs-delete-and-insert">Merge-on-read vs
+delete-and-insert</h3>
+<p>The difference between the last two is the most instructive design
+choice in the system.</p>
+<p>With <strong>merge-on-read</strong> (Unique Key), an update simply
+writes a new version of the row. At query time, the engine must merge
+all versions of each key and keep the newest. That merge has to happen
+<em>before</em> filters can be trusted: a filter on an old version could
+wrongly include a row whose latest version no longer matches. So filters
+cannot be pushed down into the scan, and reads get slower as updates
+pile up until compaction cleans them.</p>
+<p>The <strong>Primary Key</strong> table uses
+<strong>delete-and-insert</strong> (also called merge-on-write). It
+keeps a <strong>primary key index</strong> mapping each key to the
+location of its current row. On each write, the engine looks up the old
+row, marks it deleted in a per-segment <strong>delete vector</strong> (a
+bitmap of dead row positions), and writes the new row. Reads then simply
+skip rows marked dead. No merging is needed, filters and indexes work
+normally, and query speed stays close to an append-only table even under
+heavy updates.</p>
+<p>The price is paid on writes: every upsert needs an index lookup.
+StarRocks keeps the index in memory, or as a persistent on-disk index to
+cap memory use on very large tables. This is the classic trade-off
+between optimizing for writes (LSM-style, merge later) and for reads (do
+the work up front), and for dashboards that are read far more often than
+written, paying at write time wins.</p>
+<h2 id="query-execution-making-the-cpu-the-bottleneck">4. Query
+execution: making the CPU the bottleneck</h2>
+<p>Once I/O is minimized, the CPU becomes the limit, and StarRocks’
+execution engine is built around keeping every core busy on tight loops
+over columns.</p>
+<h3 id="vectorized-execution">Vectorized execution</h3>
+<p>A classic database engine (the Volcano model) processes <strong>one
+row at a time</strong>: each operator calls <code>next()</code> on its
+child, gets a row, and passes it up. For analytics this wastes most of
+the CPU on function calls, branches and type checks per row.</p>
+<p>A <strong>vectorized</strong> engine passes <strong>batches of a few
+thousand values per column</strong> between operators. A filter runs one
+tight loop over an array of integers; an aggregation adds up an array.
+These loops are friendly to CPU caches and branch predictors, and
+compilers can turn them into <strong>SIMD</strong> instructions that
+process 8 or 16 values in one instruction. The difference between
+row-at-a-time and vectorized execution on analytic queries is often
+several times, sometimes an order of magnitude. StarRocks has been fully
+vectorized in C++ since its early versions; this was one of the main
+changes from its Doris roots.</p>
+<h3 id="mpp-and-the-pipeline-engine">MPP and the pipeline engine</h3>
+<p>The FE turns a query plan into <strong>fragments</strong>, and each
+fragment runs as many parallel instances across BEs, connected by
+<strong>exchange</strong> operators that ship data over the network.
+Partial aggregation happens near the data, final aggregation after an
+exchange.</p>
+<p>Inside each node, the <strong>pipeline execution engine</strong>
+breaks fragments into pipelines of operators that are scheduled on a
+fixed pool of threads, roughly one per core. Instead of each query
+grabbing its own threads and blocking on I/O, a pipeline that is waiting
+for data yields its thread to one that has work. This matters most under
+<strong>concurrency</strong>: hundreds of dashboard queries share the
+cores fairly instead of fighting through thread context switches.</p>
+<h3 id="the-cost-based-optimizer">The cost-based optimizer</h3>
+<p>Fast operators do not help if the plan is bad, and for multi-table
+joins the plan dominates everything. StarRocks has a <strong>cost-based
+optimizer (CBO)</strong> in the Cascades style. It explores equivalent
+plans by applying transformation rules (reordering joins, pushing
+predicates and aggregations down, rewriting subqueries) and picks the
+cheapest using <strong>statistics</strong>: row counts, distinct counts,
+null counts and histograms per column.</p>
+<p>The optimizer also chooses how to execute each distributed join:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Join strategy</th>
+<th>How it works</th>
+<th>When it is chosen</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Broadcast</td>
+<td>Send the whole small table to every node</td>
+<td>One side is small</td>
+</tr>
+<tr class="even">
+<td>Shuffle</td>
+<td>Hash both sides on the join key and redistribute</td>
+<td>Both sides are large</td>
+</tr>
+<tr class="odd">
+<td>Bucket shuffle</td>
+<td>Shuffle only one side, to match the other’s existing bucketing</td>
+<td>One side is already bucketed by the join key</td>
+</tr>
+<tr class="even">
+<td>Colocate</td>
+<td>No network at all: both tables are bucketed identically, so matching
+rows are already on the same node</td>
+<td>Tables designed together, same bucket key and count</td>
+</tr>
+</tbody>
+</table>
+<p>This table is why bucket keys matter. Two large fact tables that are
+always joined on <code>user_id</code> and are both bucketed by
+<code>user_id</code> can be joined with no data movement.</p>
+<h3 id="runtime-filters">Runtime filters</h3>
+<p>In a join between a large fact table and a filtered dimension table
+(“sales in stores in Germany”), the engine builds a hash table on the
+small side first. StarRocks then turns the set of join keys into a
+<strong>runtime filter</strong> (a Bloom filter, an IN-list or a min-max
+range) and pushes it <strong>into the scan of the large table</strong>,
+even on other nodes. Rows that cannot possibly join are discarded before
+they are decoded, sent over the network or probed. For star-schema
+queries, runtime filters often remove most of the fact table rows before
+the join even starts.</p>
+<h2 id="real-time-data-materialized-views-and-the-data-lake">5.
+Real-time data, materialized views and the data lake</h2>
+<p>Three features turn a fast query engine into a platform: loading data
+continuously, precomputing expensive results, and querying data that
+lives somewhere else.</p>
+<h3 id="loading-data">Loading data</h3>
+<p>StarRocks offers several loading paths, each with transaction
+semantics so that a batch becomes visible all at once:</p>
+<ul>
+<li><strong>Stream Load</strong>: push a file or batch over HTTP. The
+usual building block for connectors such as Flink and Kafka.</li>
+<li><strong>Routine Load</strong>: StarRocks itself consumes a Kafka
+topic continuously.</li>
+<li><strong>Broker Load and INSERT INTO … SELECT FROM FILES()</strong>:
+bulk loads from object storage.</li>
+</ul>
+<p>Combined with Primary Key tables, this supports <strong>change data
+capture</strong>: replicate inserts, updates and deletes from MySQL or
+Postgres through Flink CDC or Debezium into StarRocks, and dashboards
+see changes within seconds.</p>
+<p>The usual warning applies: column stores dislike many tiny writes.
+Each load creates a new data version that later needs compaction. Batch
+writes into loads of at least a few seconds or thousands of rows rather
+than one row per load.</p>
+<h3 id="materialized-views">Materialized views</h3>
+<p>A <strong>materialized view</strong> stores the result of a query and
+keeps it updated. StarRocks supports <strong>synchronous</strong> views
+(single-table rollups maintained on every load) and
+<strong>asynchronous</strong> views that can join several tables and
+refresh on a schedule or when base tables change, refreshing only
+changed partitions.</p>
+<p>The powerful part is <strong>transparent query rewrite</strong>.
+Analysts keep querying the base tables; the optimizer notices that a
+materialized view can answer the query (or part of it) more cheaply and
+rewrites the plan to use it. You get pre-aggregation without changing a
+single dashboard query. The cost is storage, refresh compute and some
+staleness.</p>
+<h3 id="querying-the-lake">Querying the lake</h3>
+<p>Through <strong>external catalogs</strong>, StarRocks can query
+tables in Hive, Apache Iceberg, Apache Hudi, Delta Lake and Apache
+Paimon directly in object storage, using the same vectorized engine and
+optimizer. A common pattern now is a <strong>lakehouse</strong>: keep
+the data once in open table formats such as Iceberg, query it in place
+from StarRocks for interactive dashboards, and only copy the hottest
+tables or materialized views into native StarRocks storage when they
+need lower latency. Engineering blogs from companies such as Pinterest
+and Coinbase have described this pattern.</p>
+<h2 id="how-it-compares-and-when-to-pick-it">6. How it compares, and
+when to pick it</h2>
+<p>StarRocks competes in a crowded field, and the honest summary is that
+each engine is strongest on a different query shape.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Engine</th>
+<th>Strongest at</th>
+<th>Weaker at</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>StarRocks</td>
+<td>Multi-table joins with a real CBO, high concurrency, real-time
+upserts, querying lake tables</td>
+<td>Operational maturity and ecosystem are smaller than
+ClickHouse’s</td>
+</tr>
+<tr class="even">
+<td>Apache Doris</td>
+<td>Very similar design (shared ancestry); strong in the same
+niches</td>
+<td>Same trade-offs; the two projects now differ mainly in details and
+community</td>
+</tr>
+<tr class="odd">
+<td>ClickHouse</td>
+<td>Raw scan and aggregation speed on a single wide table, huge
+community</td>
+<td>Complex joins have historically needed careful manual tuning;
+updates are expensive</td>
+</tr>
+<tr class="even">
+<td>Apache Druid / Pinot</td>
+<td>Sub-second slice-and-dice on event streams with many concurrent
+users</td>
+<td>Joins and ad-hoc SQL are limited</td>
+</tr>
+<tr class="odd">
+<td>Trino</td>
+<td>Federated SQL over many sources and lakes, no storage of its
+own</td>
+<td>Less suited to many concurrent low-latency dashboard queries</td>
+</tr>
+<tr class="even">
+<td>Snowflake, BigQuery</td>
+<td>Fully managed, elastic, broad SQL</td>
+<td>Cost and latency for high-concurrency customer-facing analytics</td>
+</tr>
+</tbody>
+</table>
+<p>Good reasons to choose StarRocks:</p>
+<ul>
+<li>Your data model is a <strong>star or snowflake schema</strong> with
+several large joins, and you do not want to denormalize everything into
+one wide table.</li>
+<li>You need <strong>customer-facing analytics</strong>: hundreds of
+concurrent queries with sub-second targets.</li>
+<li>The data <strong>changes</strong>, for example CDC from an OLTP
+database, and you need upserts and deletes to be cheap.</li>
+<li>You already keep data in <strong>Iceberg or another lake
+format</strong> and want fast queries without copying everything.</li>
+</ul>
+<p>Reasons to hesitate: you need a mature, widely understood operational
+story above all; your workload is one denormalized table where
+ClickHouse is excellent; or a managed warehouse already meets your
+latency and cost needs.</p>
+<p>Vendor benchmarks are worth reading skeptically. Every engine in this
+table publishes a benchmark it wins. The useful exercise is to run your
+own top 20 queries, at your own concurrency, on your own data shape.</p>
+<h2 id="ideas-to-carry-away-and-questions-for-our-discussion">7. Ideas
+to carry away, and questions for our discussion</h2>
+<p>Five ideas that apply to any analytics system:</p>
+<ol type="1">
+<li><strong>The fastest data is data you never read.</strong> Columnar
+layout, partition pruning, zone maps and runtime filters are all ways of
+skipping work.</li>
+<li><strong>Batch the CPU’s work.</strong> Vectorized execution turns
+per-row overhead into tight loops the hardware is built for.</li>
+<li><strong>The plan matters more than the operators.</strong> For
+joins, a cost-based optimizer with good statistics beats any amount of
+raw speed.</li>
+<li><strong>Pay at write time when reads dominate.</strong>
+Delete-and-insert makes upserts slower so that every query is
+faster.</li>
+<li><strong>Separate storage from compute.</strong> Object storage plus
+a local cache makes compute elastic, at the price of cold-read
+latency.</li>
+</ol>
+<p>Think about these before we talk:</p>
+<ul>
+<li>Why can’t a merge-on-read table push a filter like
+<code>status = 'paid'</code> into the scan, while a delete-and-insert
+table can?</li>
+<li>You have <code>orders</code> and <code>order_items</code>, both
+large and always joined on <code>order_id</code>. How would you
+partition and bucket them, and which join strategy would you
+expect?</li>
+<li>A dashboard query is fast at 10 users and slow at 300. Which parts
+of the architecture would you look at first?</li>
+<li>When would a materialized view with query rewrite be a bad
+idea?</li>
+<li>In shared-data mode, what happens to the first query after you scale
+from 4 to 20 compute nodes, and how could you soften it?</li>
+<li>For your own analytics needs, which row of the comparison table fits
+best, and why?</li>
+</ul>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>StarRocks documentation: <a
+href="https://docs.starrocks.io/docs/introduction/Architecture/">Architecture</a>,
+<a
+href="https://docs.starrocks.io/docs/table_design/table_types/primary_key_table/">Primary
+Key table</a>, <a
+href="https://docs.starrocks.io/docs/introduction/Features/">Features</a>,
+<a
+href="https://docs.starrocks.io/docs/3.0/deployment/deploy_shared_data/">Deploy
+shared-data StarRocks (3.0)</a></li>
+<li>StarRocks blog, <a
+href="https://starrocks.io/blog/the-answer-to-the-data-upsert-challenge-in-real-time-analytics">The
+answer to the data upsert challenge in real-time analytics</a></li>
+<li>StarRocks blog, <a
+href="https://www.starrocks.io/blog/starrocks-4.0-now-available">StarRocks
+4.0 now available</a>, and <a
+href="https://www.starrocks.io/blog/starrocks-2025-year-in-review">StarRocks
+2025 year in review</a></li>
+<li>BigDATAwire, <a
+href="https://bigdatawire.com/2023/02/14/celerdata-contributes-starrocks-to-the-linux-foundation">CelerData
+contributes StarRocks to the Linux Foundation</a>, February 2023</li>
+<li>Rill Data, <a
+href="https://www.rilldata.com/blog/why-coinbase-and-pinterest-chose-starrocks-lakehouse-native-design-and-fast-joins-at-terabyte-scale">Why
+Coinbase and Pinterest chose StarRocks</a></li>
+<li>Background: Boncz, Zukowski and Nes, <em>MonetDB/X100:
+Hyper-Pipelining Query Execution</em> (CIDR 2005), the paper that
+popularized vectorized execution; Graefe, <em>The Cascades Framework for
+Query Optimization</em> (1995)</li>
+</ul>
+<p>A caveat on today’s sources: I could open search results but not the
+StarRocks documentation pages themselves, so the internal details (FE
+roles, encodings, index types, join strategies, primary key index) come
+from my knowledge of StarRocks and are not re-checked against the
+current docs. The Linux Foundation move, shared-data arriving in 3.0,
+and the 4.0 release were confirmed through search results; the 2020 and
+2021 origin dates are from memory.</p>
+
+    </article>
+    <nav class="pager"><a class="prev" href="/reading/exactly-once.html"><span>Older</span>Exactly-once delivery: what it really means</a><a class="next" href="/reading/caching-memcache.html"><span>Newer</span>Caching at scale: lessons from Facebook&#x27;s memcache</a></nav>
+  </div></main>
+
+  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+</body>
+</html>

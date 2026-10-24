@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rate limiting, from token buckets to global limits · Shakti&#x27;s Knowledge Base</title>
+  <meta name="description" content="The classic algorithms, how Stripe and Cloudflare run limits in production, and the contract between a limited server and a well-behaved client.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site"><div class="wrap">
+    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/reading/" aria-current="page">Reading</a>
+    </nav>
+  </div></header>
+
+  <main><div class="wrap">
+    <article class="post">
+      <p class="crumb"><a href="/reading/">Reading</a></p>
+      <h1>Rate limiting, from token buckets to global limits</h1>
+      <p class="meta">October 22, 2026 · 15 min read<span class="tag">distributed systems</span><span class="tag">APIs</span></p>
+<details class="toc"><summary>Contents</summary>
+<ul>
+<li><a href="#why-rate-limit-at-all" id="toc-why-rate-limit-at-all">1.
+Why rate limit at all</a></li>
+<li><a href="#the-algorithms" id="toc-the-algorithms">2. The
+algorithms</a></li>
+<li><a href="#making-it-distributed" id="toc-making-it-distributed">3.
+Making it distributed</a></li>
+<li><a href="#a-real-system-stripes-four-limiters"
+id="toc-a-real-system-stripes-four-limiters">4. A real system: Stripe’s
+four limiters</a></li>
+<li><a href="#the-api-contract-telling-clients-to-slow-down"
+id="toc-the-api-contract-telling-clients-to-slow-down">5. The API
+contract: telling clients to slow down</a></li>
+<li><a href="#ideas-to-carry-away-and-questions-for-our-discussion"
+id="toc-ideas-to-carry-away-and-questions-for-our-discussion">6. Ideas
+to carry away, and questions for our discussion</a></li>
+<li><a href="#sources" id="toc-sources">Sources</a></li>
+</ul>
+</details>
+<p>A rate limiter is a counter with an opinion, and almost every
+interesting question about it is about the counter: how precise it is,
+where it lives, and what happens when it is wrong. This reading goes
+from the classic algorithms to how Stripe and Cloudflare run limits in
+production, and ends with the API contract between a limited server and
+a well-behaved client.</p>
+<h2 id="why-rate-limit-at-all">1. Why rate limit at all</h2>
+<p>Rate limiting exists to keep one caller from spending capacity that
+belongs to everyone else. That breaks down into four jobs:</p>
+<ul>
+<li><strong>Protection.</strong> A buggy client in a retry loop, a
+scraper or a credential-stuffing attack can send far more traffic than a
+service was sized for. A limit turns “the database fell over” into “one
+client got 429s”.</li>
+<li><strong>Fairness.</strong> In a multi-tenant system, one large
+customer’s batch job should not raise latency for everyone else.
+Per-tenant limits are a form of isolation.</li>
+<li><strong>Cost control.</strong> When each request costs money
+downstream (an LLM call, an SMS, a paid third-party API), limits cap the
+bill.</li>
+<li><strong>Product tiers.</strong> Free plans get 60 requests a minute,
+paid plans get 6,000. Here the limit is part of the product, not just a
+safety device.</li>
+</ul>
+<p>It helps to separate two ideas that are often blurred together.
+Stripe’s engineering blog puts the distinction well: a <strong>rate
+limiter</strong> decides based on <em>who</em> is calling (“this user
+has used their quota”), while a <strong>load shedder</strong> decides
+based on <em>the state of the whole system</em> (“we are at 95% CPU,
+drop low-priority work”). A user well under their quota can still be
+shed during an incident, and a user over their quota is limited even
+when the system is idle. A robust service needs both.</p>
+<p>The other distinction is <strong>what you count</strong>:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Limit on</th>
+<th>Example</th>
+<th>Protects against</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Request rate</td>
+<td>100 requests per second per API key</td>
+<td>Floods of cheap requests</td>
+</tr>
+<tr class="even">
+<td>Concurrency</td>
+<td>20 requests in flight per API key</td>
+<td>Slow, expensive requests that pile up</td>
+</tr>
+<tr class="odd">
+<td>Cost or weight</td>
+<td>1,000 “points” per minute, where a search costs 10 and a get costs
+1</td>
+<td>Requests with very different costs</td>
+</tr>
+<tr class="even">
+<td>Volume</td>
+<td>1 million tokens per day</td>
+<td>Long-term quota and billing</td>
+</tr>
+</tbody>
+</table>
+<p>Request rate is the most common, but concurrency limits are
+underrated. A rate of 100 per second is harmless if each request takes 5
+ms and dangerous if each takes 30 seconds. Limiting in-flight requests
+ties the limit to the resource that actually runs out.</p>
+<h2 id="the-algorithms">2. The algorithms</h2>
+<p>There are really only two families: count requests in a time window,
+or model a bucket that fills and drains. The rest are clever ways to get
+the accuracy of one with the cost of the other.</p>
+<h3 id="fixed-window-counter">Fixed window counter</h3>
+<p>Keep one counter per key per window, for example
+<code>user42:2026-10-22T10:15</code> for the 10:15 minute. Increment on
+each request; reject when it exceeds the limit; let the key expire.</p>
+<p>It is one integer and one <code>INCR</code> per request, which is why
+it is everywhere. The flaw is the <strong>boundary burst</strong>. With
+a limit of 100 per minute, a client can send 100 requests at 10:15:59
+and another 100 at 10:16:00. That is 200 requests in two seconds, and
+both windows are within their limit.</p>
+<h3 id="sliding-log">Sliding log</h3>
+<p>Store a timestamp for every request (in Redis, a sorted set per key).
+On each request, drop timestamps older than the window, count what
+remains, and allow if under the limit.</p>
+<p>This is exact, with no boundary problem. It is also expensive: memory
+grows with the limit, so a limit of 10,000 per hour means up to 10,000
+timestamps per key.</p>
+<h3 id="sliding-window-counter">Sliding window counter</h3>
+<p>This is the practical compromise, and the one Cloudflare described in
+its 2017 post on rate limiting millions of domains. Keep the
+fixed-window counters for the current and previous window, and estimate
+the sliding count by weighting the previous window by how much of it
+still overlaps:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">rate</mtext><mo>=</mo><mtext mathvariant="normal">prev</mtext><mo>×</mo><mfrac><mrow><mtext mathvariant="normal">window</mtext><mo>−</mo><mtext mathvariant="normal">elapsed</mtext></mrow><mtext mathvariant="normal">window</mtext></mfrac><mo>+</mo><mtext mathvariant="normal">current</mtext></mrow><annotation encoding="application/x-tex">\text{rate} = \text{prev} \times \frac{\text{window} - \text{elapsed}}{\text{window}} + \text{current}</annotation></semantics></math></p>
+<p>Cloudflare’s worked example: 42 requests last minute, 18 so far this
+minute, and 15 seconds into the current minute. The estimate is 42 ×
+45/60 + 18 = 49.5. The assumption is that the previous window’s traffic
+was evenly spread. Cloudflare reported that on 400 million real requests
+from 270,000 sources, only 0.003% were wrongly allowed or limited. Two
+integers per key buys almost all the accuracy of a full log.</p>
+<h3 id="token-bucket">Token bucket</h3>
+<p>Each key has a bucket that holds up to <strong>B</strong> tokens and
+refills at <strong>R</strong> tokens per second. A request takes one
+token; if the bucket is empty, it is rejected. Two parameters, two
+separate meanings:</p>
+<ul>
+<li><strong>R</strong> is the sustained rate you allow over the long
+run.</li>
+<li><strong>B</strong> is the burst you tolerate. A client who has been
+idle can send B requests at once.</li>
+</ul>
+<p>You never need a timer to refill. Store <code>tokens</code> and
+<code>last_refill_time</code>; on each request, add
+<code>R × (now − last_refill_time)</code> tokens (capped at B), then try
+to take one. Stripe uses a token bucket per user, stored in Redis, for
+its main request limiter. AWS API Gateway also describes its throttling
+in terms of a rate and a burst, which is the same model.</p>
+<h3 id="leaky-bucket">Leaky bucket</h3>
+<p>The leaky bucket is the token bucket viewed from the other side.
+Requests pour into a bucket that drains at a constant rate; if it
+overflows, requests are dropped. As a <strong>queue</strong> (requests
+actually wait in the bucket), it smooths bursty input into a steady
+output, which is what traffic shaping in routers and NGINX’s
+<code>limit_req</code> with a queue do. As a <strong>meter</strong> (no
+queue, just accept or reject), it is mathematically equivalent to a
+token bucket.</p>
+<h3 id="gcra-a-token-bucket-in-one-number">GCRA: a token bucket in one
+number</h3>
+<p>The <strong>Generic Cell Rate Algorithm</strong> comes from ATM
+networks and is a favorite for Redis-based limiters (Brandur Leach’s
+post on it is the classic explanation). Instead of storing tokens and a
+timestamp, it stores one value: the <strong>theoretical arrival time
+(TAT)</strong>, when the next request would be due if the client sent at
+exactly the allowed rate.</p>
+<ul>
+<li>The emission interval is T = period / limit. For 10 per second, T =
+100 ms.</li>
+<li>When a request arrives at time <code>now</code>, the new TAT would
+be max(TAT, now) + T.</li>
+<li>If that new TAT is further ahead of <code>now</code> than the
+allowed burst, reject. Otherwise accept and store the new TAT.</li>
+</ul>
+<p>It behaves like a token bucket, but it is one atomic compare-and-set
+on one value, and it tells you exactly when the client may retry: that
+is just the moment when TAT minus the burst allowance reaches the
+current time.</p>
+<h3 id="which-to-use">Which to use</h3>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Algorithm</th>
+<th>State per key</th>
+<th>Bursts</th>
+<th>Good for</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Fixed window</td>
+<td>1 counter</td>
+<td>Up to 2× at boundaries</td>
+<td>Simple quotas, daily limits</td>
+</tr>
+<tr class="even">
+<td>Sliding log</td>
+<td>1 entry per request</td>
+<td>Exact</td>
+<td>Low limits needing precision, such as logins</td>
+</tr>
+<tr class="odd">
+<td>Sliding window counter</td>
+<td>2 counters</td>
+<td>Close to exact</td>
+<td>High-volume edge limits</td>
+</tr>
+<tr class="even">
+<td>Token bucket</td>
+<td>Tokens + timestamp</td>
+<td>Explicit burst B</td>
+<td>API rate limits</td>
+</tr>
+<tr class="odd">
+<td>GCRA</td>
+<td>1 timestamp</td>
+<td>Explicit burst</td>
+<td>Same as token bucket, minimal storage</td>
+</tr>
+<tr class="even">
+<td>Concurrency limit</td>
+<td>In-flight count</td>
+<td>Not applicable</td>
+<td>Slow or expensive endpoints</td>
+</tr>
+</tbody>
+</table>
+<h2 id="making-it-distributed">3. Making it distributed</h2>
+<p>On one server, any of these algorithms is a few lines of code. Across
+a fleet of 50 API servers, the hard question becomes where the counter
+lives, and every answer trades accuracy against latency and
+availability.</p>
+<h3 id="option-1-a-shared-store-usually-redis">Option 1: a shared store
+(usually Redis)</h3>
+<p>Every API server checks and updates the same counter in Redis. This
+is what Stripe describes, and it gives accurate global limits. Three
+details decide whether it works:</p>
+<ul>
+<li><strong>Atomicity.</strong> “Read the count, compare, then write”
+from the application races with other servers: two servers both read 99
+and both allow request 100. Use an atomic command (<code>INCR</code>
+returns the new value) or put the whole token-bucket or GCRA logic in a
+<strong>Lua script</strong>, which Redis runs atomically.</li>
+<li><strong>One clock.</strong> If each API server uses its own clock
+for refill timestamps, skew between servers makes the limit drift.
+Taking time from the Redis server inside the script removes that
+problem.</li>
+<li><strong>Failure mode.</strong> If Redis is slow or down, does every
+API request fail? Almost always the answer should be <strong>fail
+open</strong>: allow the request and log it. Stripe’s post is explicit
+that errors in its limiters fail open. A rate limiter that causes an
+outage has made things worse than the traffic it was protecting
+against.</li>
+</ul>
+<p>The costs are one network round trip per request (usually under a
+millisecond in the same zone) and a new hot spot: one very busy key,
+such as a huge tenant’s limit, all lands on one Redis shard.</p>
+<h3 id="option-2-local-limits-only">Option 2: local limits only</h3>
+<p>Each server enforces limit / N on its own, in memory. No network
+call, no shared failure. It is accurate only if the load balancer
+spreads each client’s traffic evenly, which it often does not: with
+sticky connections or HTTP/2, one client can land entirely on one server
+and be limited at 1/N of their real allowance. N also changes during
+autoscaling.</p>
+<p>Local limits are still very useful as a <strong>coarse first
+layer</strong>. Envoy, for example, has a local rate limit filter that
+runs a token bucket inside each proxy instance, purely to protect that
+instance.</p>
+<h3 id="option-3-local-counting-periodic-sync">Option 3: local counting,
+periodic sync</h3>
+<p>Each server counts locally and periodically pushes its counts to a
+central store (or gossips them to peers), pulling back the global total.
+Decisions are made locally against the last known global count. The
+limit can overshoot by whatever arrives between syncs, but there is no
+per-request round trip and a central outage only makes the limit
+staler.</p>
+<p>This is the same pattern as DynamoDB’s global admission control from
+an earlier reading: a global budget handed out as local allowances.</p>
+<h3 id="option-4-limit-where-the-traffic-lands">Option 4: limit where
+the traffic lands</h3>
+<p>Cloudflare’s 2017 design is a variant that sidesteps the global
+problem. Its rate limiting counters live <strong>inside each point of
+presence (PoP)</strong>, in a memcache-protocol cluster, because a given
+attacker’s traffic tends to reach the same nearby PoP through anycast.
+Its post states that sending every counter to one central point was not
+realistic at its scale. The limit is therefore per-PoP rather than truly
+global, which is the right trade for blocking abusive sources at the
+edge.</p>
+<h3 id="a-dedicated-rate-limit-service">A dedicated rate limit
+service</h3>
+<p>Large service meshes often pull the logic into its own service.
+Envoy’s <strong>global rate limit</strong> filter calls an external gRPC
+service (the reference implementation,
+<code>envoyproxy/ratelimit</code>, came from Lyft and stores counters in
+Redis). Each request is described by <strong>descriptors</strong>, such
+as <code>(api_key=abc, path=/search)</code>, and the service holds the
+configured limit for each descriptor. Application code no longer
+contains any rate limit logic; it is configuration at the proxy.</p>
+<p>A common production setup combines layers: a generous local limit per
+proxy to absorb floods cheaply, a precise global limit per tenant in a
+central service, and load shedding behind both.</p>
+<h2 id="a-real-system-stripes-four-limiters">4. A real system: Stripe’s
+four limiters</h2>
+<p>Stripe’s 2017 post by Paul Tarjan is still the best short description
+of layered rate limiting in production: four checks, each catching what
+the one before it cannot, ordered from per-user to whole-system.</p>
+<figure class="diagram"><svg viewBox="0 0 760 492" role="img" aria-label="Each request passes four checks, from per-user limits to whole-system shedding" font-size="13"><defs><marker id="rl-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Each request passes four checks, from per-user limits to whole-system shedding</text><g fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"><path d="M360 84V108" marker-end="url(#rl-arrow)"></path><path d="M360 164V188" marker-end="url(#rl-arrow)"></path><path d="M360 244V268" marker-end="url(#rl-arrow)"></path><path d="M360 324V348" marker-end="url(#rl-arrow)"></path><path d="M360 404V428" marker-end="url(#rl-arrow)"></path></g><g fill="none" stroke="var(--cds-chart-status-critical)" stroke-width="1.25"><path d="M520 136H572"></path><path d="M520 216H572"></path><path d="M520 296H572"></path><path d="M520 376H572"></path></g><g><rect x="260" y="48" width="200" height="36" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="360" y="70" text-anchor="middle" fill="var(--cds-text-primary)">Incoming API request</text></g><g><rect x="200" y="108" width="320" height="56" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.12" stroke="var(--cds-chart-categorical-1)" stroke-width="2"></rect><text x="360" y="130" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">1. Request rate limiter</text><text x="360" y="148" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">token bucket per user, with room for bursts</text></g><g><rect x="200" y="188" width="320" height="56" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="360" y="210" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">2. Concurrent requests limiter</text><text x="360" y="228" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">caps requests in flight per user</text></g><g><rect x="200" y="268" width="320" height="56" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="360" y="290" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">3. Fleet usage load shedder</text><text x="360" y="308" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">keeps a share of the fleet for critical methods</text></g><g><rect x="200" y="348" width="320" height="56" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="360" y="370" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">4. Worker utilization load shedder</text><text x="360" y="388" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">sheds test traffic, then GETs, then POSTs</text></g><g><rect x="260" y="428" width="200" height="40" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="360" y="452" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">API handler</text></g><text x="580" y="140" font-size="12" fill="var(--cds-text-primary)">429 Too Many Requests</text><text x="580" y="220" font-size="12" fill="var(--cds-text-primary)">429 Too Many Requests</text><text x="580" y="300" font-size="12" fill="var(--cds-text-primary)">503 Service Unavailable</text><text x="580" y="380" font-size="12" fill="var(--cds-text-primary)">503 Service Unavailable</text><g><path d="M176 108V244" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></path><text x="166" y="180" text-anchor="end" font-size="12" fill="var(--cds-text-secondary)">about the user</text></g><g><path d="M176 268V404" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></path><text x="166" y="340" text-anchor="end" font-size="12" fill="var(--cds-text-secondary)">about the system</text></g></svg></figure>
+<p>The first two checks reject a caller for their own behavior with 429.
+The last two reject for the system’s sake with 503, dropping the least
+important traffic first.</p>
+<ol type="1">
+<li><strong>Request rate limiter.</strong> A token bucket per user: N
+requests per second, with room for short bursts (Stripe mentions flash
+sales). Stripe calls this “by far the most important one”.</li>
+<li><strong>Concurrent requests limiter.</strong> A cap on requests in
+flight per user, with the post’s example of 20 at a time. It exists for
+expensive endpoints, where a client that retries aggressively against a
+slow endpoint makes it slower for everyone. It triggered about 12,000
+times in the month Stripe cited.</li>
+<li><strong>Fleet usage load shedder.</strong> Traffic is split into
+<strong>critical</strong> methods (creating a charge) and
+<strong>non-critical</strong> ones (listing charges). A share of the
+fleet is reserved for critical traffic. With a 20% reservation,
+non-critical requests beyond their 80% share get a 503. Counts live in
+Redis.</li>
+<li><strong>Worker utilization load shedder.</strong> The last line of
+defense. When an individual server’s workers are saturated, it sheds
+traffic by category, lowest priority first: test-mode traffic, then
+GETs, then POSTs, and critical methods last. It sheds and recovers
+slowly, to avoid flapping between “shed everything” and “shed nothing”.
+It fired about 100 times in the cited month, only during major
+incidents.</li>
+</ol>
+<p>The status codes are deliberate. The first two answer <strong>429 Too
+Many Requests</strong>, which tells the client “this is about you”. The
+load shedders answer <strong>503 Service Unavailable</strong>, which
+says “this is about us”.</p>
+<p>The operating advice in the post is as valuable as the design:</p>
+<ul>
+<li><strong>Dark launch</strong> every limiter first: log what it would
+have blocked, and only enforce once the numbers look right.</li>
+<li><strong>Fail open</strong> at every level, so a bug or a Redis
+outage never blocks legitimate traffic.</li>
+<li>Put each limiter behind a <strong>feature flag</strong>, so a human
+can turn it off quickly during an incident.</li>
+<li>Start with the request rate limiter. It gives most of the benefit,
+and the others can come later.</li>
+</ul>
+<p>The priority ordering is the idea to keep. Under overload, a system
+will drop something. Deciding in advance <em>what</em> to drop (test
+traffic before reads, reads before writes, writes before payments) turns
+an outage into a degradation.</p>
+<h2 id="the-api-contract-telling-clients-to-slow-down">5. The API
+contract: telling clients to slow down</h2>
+<p>A rate limit is only half a system. The other half is the client, and
+a server that rejects well but gives clients no guidance gets a retry
+storm instead of less traffic.</p>
+<h3 id="what-the-server-should-send">What the server should send</h3>
+<ul>
+<li><strong>Status 429 Too Many Requests</strong> (RFC 6585) when the
+caller has exceeded its limit. Use 503 when the server itself is
+overloaded.</li>
+<li><strong>Retry-After</strong> with a number of seconds (or an HTTP
+date). With a token bucket or GCRA you can compute exactly when the next
+request would succeed, so send that instead of a guess.</li>
+<li><strong>Remaining quota on every response</strong>, not only on
+rejections, so well-behaved clients can slow down <em>before</em> they
+hit the wall.</li>
+</ul>
+<p>For years every API invented its own headers for that last part.
+GitHub, for example, sends <code>x-ratelimit-limit</code>,
+<code>x-ratelimit-remaining</code>, <code>x-ratelimit-used</code> and
+<code>x-ratelimit-reset</code>. The IETF HTTPAPI working group has been
+standardizing this as two fields, described in <a
+href="https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/">draft-ietf-httpapi-ratelimit-headers</a>
+(version 11, May 2026, still a draft):</p>
+<pre><code>RateLimit-Policy: &quot;default&quot;;q=100;w=60
+RateLimit: &quot;default&quot;;r=37;t=21</code></pre>
+<p>The policy says the quota is 100 per 60-second window. The second
+header says 37 remain and the window resets in 21 seconds. Several
+policies can be listed at once, for example a per-second burst limit and
+a daily quota.</p>
+<p>One security note: limits applied to unauthenticated traffic, such as
+login attempts, should be keyed by more than IP address (also by account
+name, for example). Otherwise an attacker spreads across many IPs, or
+many users behind one corporate NAT share one limit.</p>
+<h3 id="what-the-client-should-do">What the client should do</h3>
+<p>A client that retries immediately on every 429 turns a limit into a
+denial of service against itself. The well-known recipe has three
+parts.</p>
+<p><strong>1. Exponential backoff with jitter.</strong> Wait longer
+after each failure, and randomize the wait. Marc Brooker’s AWS
+Architecture Blog post on backoff showed with simulations that plain
+exponential backoff still makes clients retry in synchronized waves;
+adding randomness spreads them out. The simplest good version is “full
+jitter”:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">sleep</mtext><mo>=</mo><mtext mathvariant="normal">random</mtext><mrow><mo stretchy="true" form="prefix">(</mo><mn>0</mn><mo>,</mo><mspace width="0.222em"></mspace><mo>min</mo><mrow><mo stretchy="true" form="prefix">(</mo><mtext mathvariant="normal">cap</mtext><mo>,</mo><mspace width="0.222em"></mspace><mtext mathvariant="normal">base</mtext><mo>×</mo><msup><mn>2</mn><mtext mathvariant="normal">attempt</mtext></msup><mo stretchy="true" form="postfix">)</mo></mrow><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">\text{sleep} = \text{random}(0,\ \min(\text{cap},\ \text{base} \times 2^{\text{attempt}}))</annotation></semantics></math></p>
+<p>If the server sent Retry-After, honor it instead.</p>
+<p><strong>2. Retry budgets.</strong> Retries multiply through layers.
+If a front end, a service and its database client each make up to 3
+attempts, one user request can become 3 × 3 × 3 = 27 database calls at
+exactly the moment the database is struggling. Google’s SRE book
+recommends capping retries per request (around three attempts) and also
+per client, so that retries are at most about 10% of a client’s traffic.
+Once the budget is spent, fail fast instead of retrying.</p>
+<p><strong>3. Client-side throttling.</strong> The same SRE chapter
+describes <strong>adaptive throttling</strong>: each client tracks how
+many requests it sent and how many the backend accepted over the last
+couple of minutes. When the backend starts rejecting, the client starts
+dropping a matching share of its own requests locally, before they ever
+leave the process. The book’s formula:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>P</mi><mrow><mo stretchy="true" form="prefix">(</mo><mtext mathvariant="normal">reject locally</mtext><mo stretchy="true" form="postfix">)</mo></mrow><mo>=</mo><mo>max</mo><mrow><mo stretchy="true" form="prefix">(</mo><mn>0</mn><mo>,</mo><mspace width="0.222em"></mspace><mfrac><mrow><mtext mathvariant="normal">requests</mtext><mo>−</mo><mi>K</mi><mo>×</mo><mtext mathvariant="normal">accepts</mtext></mrow><mrow><mtext mathvariant="normal">requests</mtext><mo>+</mo><mn>1</mn></mrow></mfrac><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">P(\text{reject locally}) = \max\left(0,\ \frac{\text{requests} - K \times \text{accepts}}{\text{requests} + 1}\right)</annotation></semantics></math></p>
+<p>With K = 2, the client keeps sending until requests reach twice the
+accepted count, then sheds the excess itself. Rejected requests that
+never reach the server cost the server nothing.</p>
+<p>Finally, only retry what is safe to retry. GETs are idempotent; a
+retried POST that creates a payment is not, unless the API supports
+<strong>idempotency keys</strong> so the server can recognize a
+repeat.</p>
+<h2 id="ideas-to-carry-away-and-questions-for-our-discussion">6. Ideas
+to carry away, and questions for our discussion</h2>
+<p>Five ideas to keep:</p>
+<ol type="1">
+<li><strong>Rate limiting is about the caller; load shedding is about
+the system.</strong> You need both, and they should return different
+status codes.</li>
+<li><strong>A token bucket has two dials.</strong> R is the sustained
+rate, B is the burst. Most limit complaints are really about choosing B
+badly.</li>
+<li><strong>Precision costs coordination.</strong> Exact global limits
+need a shared store on every request; approximate limits (sliding window
+counters, local counting with periodic sync, per-PoP limits) are cheaper
+and usually good enough.</li>
+<li><strong>Fail open.</strong> A rate limiter whose outage blocks all
+traffic is a bigger risk than the traffic it was meant to stop.</li>
+<li><strong>The client is half the system.</strong> Retry-After, backoff
+with jitter, retry budgets and client-side throttling decide whether a
+limit reduces load or multiplies it.</li>
+</ol>
+<p>Think about these before we talk:</p>
+<ul>
+<li>A partner says your 100-per-minute limit blocked them after only 60
+requests in a minute. Which algorithm would explain that, and how would
+you check?</li>
+<li>How would you choose R and B for an endpoint that a mobile app calls
+in a burst of 10 when it opens?</li>
+<li>Your rate limiter uses Redis and Redis goes down. What should
+happen, and what would you monitor to notice?</li>
+<li>Where in your own systems would a concurrency limit protect better
+than a rate limit?</li>
+<li>What would a priority order for load shedding look like in your
+product: what would you drop first, and what last?</li>
+<li>How many layers of retries sit between your users and your database
+today, and what is the worst-case amplification?</li>
+</ul>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Paul Tarjan, Stripe, <a
+href="https://stripe.com/blog/rate-limiters">Scaling your API with rate
+limiters</a>, March 2017</li>
+<li>Julien Desgats, Cloudflare, <a
+href="https://blog.cloudflare.com/counting-things-a-lot-of-different-things/">How
+we built rate limiting capable of scaling to millions of domains</a>,
+June 2017</li>
+<li>Brandur Leach, <a href="https://brandur.org/rate-limiting">Rate
+Limiting, Cells, and GCRA</a></li>
+<li>IETF HTTPAPI, <a
+href="https://www.ietf.org/archive/id/draft-ietf-httpapi-ratelimit-headers-11.html">RateLimit
+header fields for HTTP, draft 11</a>, May 2026</li>
+<li>Marc Brooker, AWS Architecture Blog, <a
+href="https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/">Exponential
+Backoff And Jitter</a>, 2015</li>
+<li>Google, <em>Site Reliability Engineering</em>, chapter 21, <a
+href="https://sre.google/sre-book/handling-overload/">Handling
+Overload</a></li>
+<li>Envoy documentation on local and global rate limiting, and the <a
+href="https://github.com/envoyproxy/ratelimit">envoyproxy/ratelimit</a>
+reference service</li>
+</ul>
+<p>The Stripe, Cloudflare and IETF details were checked against those
+pages today. The Google SRE figures (K = 2, about three attempts per
+request, about 10% retries per client) and the AWS backoff summary are
+from my knowledge of those texts; I could not open the SRE chapter
+today.</p>
+
+    </article>
+    <nav class="pager"><a class="prev" href="/reading/tls-13.html"><span>Older</span>TLS 1.3 from the handshake up</a><a class="next" href="/reading/redis-internals.html"><span>Newer</span>Redis internals: one thread, many tricks</a></nav>
+  </div></main>
+
+  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+</body>
+</html>

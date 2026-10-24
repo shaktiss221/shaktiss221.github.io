@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DynamoDB under the hood · Shakti&#x27;s Knowledge Base</title>
+  <meta name="description" content="How AWS keeps single-digit millisecond latency at any scale, from Paxos partitions to global admission control.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site"><div class="wrap">
+    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/reading/" aria-current="page">Reading</a>
+    </nav>
+  </div></header>
+
+  <main><div class="wrap">
+    <article class="post">
+      <p class="crumb"><a href="/reading/">Reading</a></p>
+      <h1>DynamoDB under the hood</h1>
+      <p class="meta">October 20, 2026 · 16 min read<span class="tag">databases</span><span class="tag">distributed systems</span></p>
+<details class="toc"><summary>Contents</summary>
+<ul>
+<li><a href="#why-dynamodb-exists" id="toc-why-dynamodb-exists">1. Why
+DynamoDB exists</a></li>
+<li><a href="#the-data-model-in-five-minutes"
+id="toc-the-data-model-in-five-minutes">2. The data model in five
+minutes</a></li>
+<li><a href="#architecture-partitions-leaders-and-routers"
+id="toc-architecture-partitions-leaders-and-routers">3. Architecture:
+partitions, leaders and routers</a></li>
+<li><a
+href="#capacity-from-per-partition-quotas-to-global-admission-control"
+id="toc-capacity-from-per-partition-quotas-to-global-admission-control">4.
+Capacity: from per-partition quotas to global admission control</a></li>
+<li><a href="#durability-and-availability"
+id="toc-durability-and-availability">5. Durability and
+availability</a></li>
+<li><a href="#what-the-internals-mean-for-your-data-model"
+id="toc-what-the-internals-mean-for-your-data-model">6. What the
+internals mean for your data model</a></li>
+<li><a href="#ideas-to-carry-away-and-questions-for-our-discussion"
+id="toc-ideas-to-carry-away-and-questions-for-our-discussion">7. Ideas
+to carry away, and questions for our discussion</a></li>
+<li><a href="#sources" id="toc-sources">Sources</a></li>
+</ul>
+</details>
+<p>DynamoDB is a key-value store that is less interesting for its API
+than for one promise: the same single-digit millisecond latency at 10
+requests per second or 10 million. This reading follows how AWS keeps
+that promise. It is drawn mainly from the 2022 USENIX ATC paper by the
+DynamoDB team, Marc Brooker’s commentary on it, and Alex DeBrie’s
+writing on data modeling.</p>
+<h2 id="why-dynamodb-exists">1. Why DynamoDB exists</h2>
+<p>DynamoDB was built because Amazon’s earlier store, Dynamo, scaled
+well but every team had to run it themselves. The 2007 Dynamo paper
+(SOSP) described a leaderless, eventually consistent store with
+consistent hashing, vector clocks and sloppy quorums. It powered the
+shopping cart, but each team installed and operated its own cluster.
+That meant on-call, capacity planning and upgrades for every team.</p>
+<p>Around the same time AWS offered SimpleDB, a fully managed store.
+Teams loved not operating it, but it had hard limits: a domain held at
+most 10 GB, and latency was unpredictable because every attribute was
+indexed. Engineers kept picking Dynamo for scale and wishing for
+SimpleDB’s operations story.</p>
+<p>DynamoDB, launched in January 2012, is the merge of the two. It keeps
+Dynamo’s ideas about partitioning and replication but changes the
+replication model (more on that in section 3) and adds the managed
+service. The paper lists six properties the team holds itself to:</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Property</th>
+<th>What it means in practice</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Fully managed</td>
+<td>No servers, patching, backups or upgrades for the customer</td>
+</tr>
+<tr class="even">
+<td>Multi-tenant</td>
+<td>Many customers share the same storage nodes, so isolation is a core
+problem</td>
+</tr>
+<tr class="odd">
+<td>Boundless scale</td>
+<td>No fixed upper limit on table size or throughput</td>
+</tr>
+<tr class="even">
+<td>Predictable performance</td>
+<td>A 1 KB get or put stays in single-digit milliseconds as the table
+grows</td>
+</tr>
+<tr class="odd">
+<td>Highly available</td>
+<td>Replicas across three Availability Zones; a 99.99% SLA, 99.999% for
+global tables</td>
+</tr>
+<tr class="even">
+<td>Flexible use cases</td>
+<td>Key-value and document data, with a choice of eventual or strong
+consistency</td>
+</tr>
+</tbody>
+</table>
+<p>The phrase to keep in mind is <strong>predictable
+performance</strong>. Average speed is easy. The hard part is that p99
+latency does not drift when the table grows a thousandfold or when a
+noisy neighbor shares your hardware. During Amazon Prime Day 2021,
+DynamoDB peaked at 89.2 million requests per second with that latency
+held. Most of the design decisions below trade raw efficiency for
+predictability.</p>
+<h2 id="the-data-model-in-five-minutes">2. The data model in five
+minutes</h2>
+<p>Every DynamoDB request is shaped by the primary key, so the internals
+only make sense once you know what that key is. A <strong>table</strong>
+holds <strong>items</strong>, and each item is a set of attributes up to
+400 KB. Apart from the key, items in the same table do not need the same
+attributes.</p>
+<p>The primary key comes in two forms:</p>
+<ul>
+<li><strong>Partition key only.</strong> One attribute, such as
+<code>user_id</code>. DynamoDB hashes it to choose where the item lives.
+You can get, put, update or delete one item by exact key.</li>
+<li><strong>Partition key plus sort key.</strong> For example
+<code>customer_id</code> + <code>order_date</code>. All items with the
+same partition key form an <strong>item collection</strong>, stored
+together and sorted by the sort key. You can now <code>Query</code> a
+range inside one collection: “orders for customer 42 since October
+1”.</li>
+</ul>
+<p>Two kinds of secondary index give you other access paths:</p>
+<ul>
+<li>A <strong>local secondary index (LSI)</strong> keeps the same
+partition key with a different sort key. It lives in the same partition
+as the base data, so it can be strongly consistent, but it caps an item
+collection at 10 GB.</li>
+<li>A <strong>global secondary index (GSI)</strong> has a completely
+different key. Under the hood it is a separate table that DynamoDB keeps
+in sync asynchronously, so GSI reads are eventually consistent.</li>
+</ul>
+<p>There is no join and no query planner. <code>Scan</code> reads the
+whole table and is rarely what you want in production. The design pushes
+you to know your access patterns first and shape the keys to answer each
+one with a single <code>GetItem</code> or <code>Query</code>. Section 6
+returns to what that means for modeling.</p>
+<p>Capacity is measured in units that map directly onto the work a
+partition does:</p>
+<ul>
+<li>One <strong>read capacity unit (RCU)</strong> is one strongly
+consistent read per second of an item up to 4 KB. An eventually
+consistent read costs half.</li>
+<li>One <strong>write capacity unit (WCU)</strong> is one write per
+second of an item up to 1 KB.</li>
+</ul>
+<p>These units matter because they are what the system rations. Section
+4 is essentially the story of how DynamoDB learned to ration them
+fairly.</p>
+<h2 id="architecture-partitions-leaders-and-routers">3. Architecture:
+partitions, leaders and routers</h2>
+<p>A DynamoDB table is split into partitions, each partition is a small
+Paxos group of three replicas in three Availability Zones, and a
+stateless fleet of request routers decides which group gets each
+request.</p>
+<figure class="diagram"><svg viewBox="0 0 760 456" role="img" aria-label="Every request goes through a router to the one leader that owns its partition" font-size="13"><defs><marker id="arch-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="30" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Every request goes through a router to the leader that owns its partition</text><g fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"><path d="M185 100H290" marker-end="url(#arch-arrow)"></path><path d="M470 100H496V70H523" marker-end="url(#arch-arrow)"></path><path d="M496 100V130H523" marker-end="url(#arch-arrow)"></path><path d="M380 128V224" marker-end="url(#arch-arrow)"></path><path d="M280 260H250" marker-end="url(#arch-arrow)"></path><path d="M480 260H510" marker-end="url(#arch-arrow)"></path><path d="M380 296V388" marker-end="url(#arch-arrow)"></path></g><g><rect x="35" y="76" width="150" height="48" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="110" y="104" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Client (SDK)</text></g><g><rect x="290" y="72" width="180" height="56" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="380" y="96" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Request router</text><text x="380" y="116" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">auth, look up, admit, forward</text></g><g><rect x="523" y="48" width="210" height="44" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="628" y="74" text-anchor="middle" fill="var(--cds-text-primary)">Metadata (MemDS)</text></g><g><rect x="523" y="108" width="210" height="44" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="628" y="134" text-anchor="middle" fill="var(--cds-text-primary)">Global admission control</text></g><g><rect x="24" y="180" width="712" height="140" rx="8" fill="var(--cds-chart-reference-tint)" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="40" y="204" font-weight="600" fill="var(--cds-text-primary)">One partition = a Paxos group in 3 AZs</text></g><text x="392" y="160" font-size="11.5" fill="var(--cds-text-secondary)">writes, strong reads</text><g><rect x="50" y="224" width="200" height="72" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="150" y="248" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Follower replica</text><text x="150" y="268" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">AZ 1 · WAL + B-tree</text><text x="150" y="284" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">eventually consistent reads</text></g><g><rect x="280" y="224" width="200" height="72" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.12" stroke="var(--cds-chart-categorical-1)" stroke-width="2"></rect><text x="380" y="248" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Leader replica</text><text x="380" y="268" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">AZ 2 · WAL + B-tree</text><text x="380" y="284" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">acks after 2 of 3 persist</text></g><g><rect x="510" y="224" width="200" height="72" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="610" y="248" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Follower replica</text><text x="610" y="268" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">AZ 3 · WAL + B-tree</text><text x="610" y="284" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">eventually consistent reads</text></g><text x="392" y="356" font-size="11.5" fill="var(--cds-text-secondary)">WAL archived continuously</text><g><rect x="270" y="388" width="220" height="44" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="380" y="414" text-anchor="middle" fill="var(--cds-text-primary)">Amazon S3 (log archive)</text></g></svg></figure>
+<p>The router asks MemDS where the partition lives and asks GAC whether
+the table has capacity, then sends the request to the leader. The leader
+replicates each write to its two followers and the log is archived to
+S3.</p>
+<h3 id="partitions">Partitions</h3>
+<p>The partition key is hashed, and each partition owns a contiguous
+range of the hash space. A small table may have one partition; a large
+one has thousands. Partitions split when they grow too large in size or
+when they need more throughput than one partition can serve. The
+customer never sees this; it is the main lever DynamoDB pulls to
+scale.</p>
+<h3 id="replication-groups-and-multi-paxos">Replication groups and
+Multi-Paxos</h3>
+<p>This is the biggest break from the original Dynamo. Dynamo was
+leaderless: any node could take a write, and conflicts were reconciled
+later with vector clocks. DynamoDB instead gives each partition a
+<strong>leader</strong>, elected with <strong>Multi-Paxos</strong>.</p>
+<ul>
+<li>Only the leader accepts writes. It writes the change to its
+<strong>write-ahead log (WAL)</strong>, sends the log record to its
+peers, and acknowledges the client once a <strong>quorum</strong> (two
+of three) has persisted it.</li>
+<li>Strongly consistent reads also go to the leader, because only it is
+guaranteed to have every acknowledged write.</li>
+<li>Eventually consistent reads can go to any replica, which is why they
+cost half an RCU.</li>
+<li>The leader holds a <strong>lease</strong> that it keeps renewing. If
+a follower stops hearing from the leader, it can call an election. A
+newly elected leader does not serve traffic until the old leader’s lease
+has expired, so two leaders never serve at once.</li>
+</ul>
+<p>Each replica stores two things: the WAL and a <strong>B-tree</strong>
+of the actual items. The paper also describes <strong>log
+replicas</strong>, which store only the WAL. They are cheap to create,
+so when a replica dies the group can restore its write quorum in seconds
+instead of waiting minutes to copy a full B-tree. Section 5 comes back
+to this.</p>
+<p>The trade-off is clear. A leader gives you strong consistency, simple
+conflict handling and an obvious place for the write path to go. It
+costs a little availability during leader failover, which the team then
+worked hard to shrink.</p>
+<h3 id="the-services-around-the-storage-nodes">The services around the
+storage nodes</h3>
+<p>The paper names a handful of core services:</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Service</th>
+<th>Job</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Request routers</td>
+<td>Authenticate and authorize each request, look up which storage node
+leads the target partition, and forward the request. Stateless, so they
+scale horizontally.</td>
+</tr>
+<tr class="even">
+<td>Metadata service</td>
+<td>Stores the routing table: tables, indexes, partitions and which
+nodes host each replica group.</td>
+</tr>
+<tr class="odd">
+<td>Storage nodes</td>
+<td>Host replicas of many partitions from many customers. Run the WAL,
+B-tree and Paxos.</td>
+</tr>
+<tr class="even">
+<td>Autoadmin</td>
+<td>The “central nervous system”: watches fleet and partition health,
+replaces failed replicas, moves partitions off hot nodes, and executes
+control-plane requests like creating a table.</td>
+</tr>
+<tr class="odd">
+<td>Global admission control</td>
+<td>Tracks how much capacity each table is consuming across all routers
+(section 4).</td>
+</tr>
+</tbody>
+</table>
+<p>Other features such as backups, streams, global tables, GSIs and
+transactions are built as additional services around this core. The key
+insight is that the data path (router to storage node) is short and has
+very few dependencies, while everything slower lives off to the
+side.</p>
+<h2
+id="capacity-from-per-partition-quotas-to-global-admission-control">4.
+Capacity: from per-partition quotas to global admission control</h2>
+<p>This is the heart of the paper. DynamoDB’s first capacity model was
+simple and fair on paper, and it kept throttling customers who were
+nowhere near their limits. Each fix along the way moved the unit of
+fairness from the partition toward the whole table.</p>
+<h3 id="version-1-split-the-tables-capacity-evenly">Version 1: split the
+table’s capacity evenly</h3>
+<p>At launch, a customer provisioned capacity for the table, for example
+1,000 WCU. DynamoDB divided it evenly across partitions. With four
+partitions, each got 250 WCU, enforced locally on the storage node. This
+gave clean isolation: the storage node knew exactly how much each
+replica could use, and could pack replicas from many tables onto one
+machine without overcommitting it.</p>
+<p>Two problems showed up in production.</p>
+<ol type="1">
+<li><strong>Hot partitions.</strong> Real traffic is not uniform. If one
+partition gets 60% of the writes, it is throttled at its 250 WCU while
+the other three sit mostly idle. The customer sees throttling at well
+under 1,000 WCU and cannot understand why.</li>
+<li><strong>Throughput dilution.</strong> When a partition split for
+size, its capacity was split too. A table that grew from 4 to 8
+partitions without changing its provisioned throughput saw each
+partition drop from 250 to 125 WCU. Growth alone made hot spots
+worse.</li>
+</ol>
+<p>Customers’ workaround was to over-provision, paying for capacity they
+could not use. That is exactly the kind of leak a managed service should
+not have.</p>
+<h3 id="fix-1-bursting">Fix 1: bursting</h3>
+<p>The first patch observed that partitions often have short spikes.
+DynamoDB began letting a partition bank its unused capacity for up to
+300 seconds and spend it in a burst. Bursting was only allowed if the
+storage node itself had spare capacity, enforced with a second,
+node-level token bucket. So a partition has its own allocated bucket
+plus a burst bucket, and the node has a bucket that protects all its
+tenants.</p>
+<p>Bursting helps with short spikes. It does nothing for a partition
+that is hot for an hour.</p>
+<h3 id="fix-2-adaptive-capacity">Fix 2: adaptive capacity</h3>
+<p>Next, DynamoDB watched both provisioned and consumed capacity per
+table. When a table was being throttled while its total consumption was
+still under its provisioned total, adaptive capacity raised the limit on
+the hot partitions using a proportional control algorithm. If the node
+got too hot, autoadmin moved partitions elsewhere.</p>
+<p>This fixed most of the complaints, but it was
+<strong>reactive</strong>. It only acted after throttling had already
+happened, so customers still saw a short window of errors at the start
+of each spike.</p>
+<h3 id="fix-3-global-admission-control-gac">Fix 3: global admission
+control (GAC)</h3>
+<p>The lasting fix was to stop enforcing the table’s limit at the
+partition at all. With <strong>global admission control</strong>, the
+table’s capacity lives in a central token bucket tracked by the GAC
+service.</p>
+<ul>
+<li>Each request router keeps a small local token bucket for each table
+it is serving.</li>
+<li>Routers draw from their local bucket for each request and ask GAC
+for more tokens every few seconds.</li>
+<li>GAC sees consumption across every router, so it can hand out tokens
+wherever the traffic actually is.</li>
+</ul>
+<p>Now a single partition can use most of the table’s capacity if that
+is where the traffic goes, as long as the table as a whole stays within
+its limit. Partition-level token buckets were kept as an upper
+safeguard, so one partition cannot overrun its storage node.</p>
+<p>This is a recurring pattern in large systems: local enforcement is
+cheap and isolating, global enforcement is accurate, and the practical
+answer is a global budget handed out in small local leases.</p>
+<h3 id="balancing-the-nodes-and-splitting-for-traffic">Balancing the
+nodes and splitting for traffic</h3>
+<p>Once partitions can take more than their “share”, storage nodes can
+get hot. DynamoDB monitors each node, and when the replicas on it exceed
+a threshold of the node’s capacity, it moves replicas to colder
+nodes.</p>
+<p>It also learned to <strong>split for consumption</strong>. If a
+partition stays hot, DynamoDB splits it, but not at the midpoint of its
+key range. It picks the split point from the observed key distribution,
+so the hot keys land on separate partitions. The paper is honest about
+the limits: this does not help if the heat is a single item, or if keys
+are written in sequential order such as timestamps, because every new
+key lands at the end of the range.</p>
+<h3 id="on-demand-tables">On-demand tables</h3>
+<p>In 2018, DynamoDB added <strong>on-demand</strong> mode, where you do
+not provision anything. The table accommodates up to double its previous
+peak instantly, and grows by splitting partitions for consumption.
+On-demand is only possible because of everything above: GAC for
+table-wide accounting and consumption-based splits for scaling. The
+irony is that the simplest feature for customers to understand, “just
+pay per request”, needed the most machinery underneath.</p>
+<h2 id="durability-and-availability">5. Durability and availability</h2>
+<p>DynamoDB treats “never lose data” and “keep answering” as separate
+problems, and solves each with layers of checks rather than one clever
+mechanism.</p>
+<h3 id="not-losing-data">Not losing data</h3>
+<ul>
+<li><strong>Replicated WAL.</strong> A write is acknowledged only after
+two of three replicas, in different Availability Zones, have persisted
+its log record.</li>
+<li><strong>Archive to S3.</strong> Each partition’s WAL is continuously
+archived to Amazon S3, which is designed for eleven nines of durability.
+At any moment, only a small tail of recent log (the paper says typically
+a few hundred megabytes per node) exists only on the replicas.</li>
+<li><strong>Checksums everywhere.</strong> Every log entry, message and
+log file carries a checksum. Silent corruption from disks, memory or
+networks is assumed to happen, not hoped against.</li>
+<li><strong>Continuous verification (scrub).</strong> A background
+process checks that all replicas of a partition hold identical data. It
+also rebuilds a copy offline from the archived WAL and snapshots in S3,
+and verifies that it matches the live replicas. This catches bugs that
+would slowly diverge the copies.</li>
+<li><strong>Formal methods.</strong> The replication protocol was
+specified and model-checked in TLA+. Failure-injection and stress
+testing run on top.</li>
+</ul>
+<p>Because the WAL is already in S3, backups and point-in-time restore
+(to any second in the last 35 days) do not touch the live partitions at
+all. They are built from the archive.</p>
+<h3 id="staying-up-when-a-replica-dies">Staying up when a replica
+dies</h3>
+<p>A partition can take writes as long as it has a healthy leader and a
+write quorum. When one replica fails, the group has only two left, so
+one more failure would stop writes. Rebuilding a full storage replica
+means copying the whole B-tree, which takes minutes.</p>
+<p>This is where <strong>log replicas</strong> pay off. The leader adds
+a log replica that only needs to store the WAL, which takes seconds. The
+quorum is healthy again almost immediately, and a full replica is
+rebuilt in the background.</p>
+<h3 id="gray-failures">Gray failures</h3>
+<p>The trickier problem is a node that is not dead but is not quite
+healthy either, for example one with a flaky network path. A follower
+that cannot reach the leader might call an election that was not needed,
+causing a short outage for no reason.</p>
+<p>DynamoDB’s fix is simple: before triggering an election, a follower
+asks the other replicas whether they can still reach the leader. If they
+can, the follower assumes the problem is on its own side and stays
+quiet.</p>
+<h3 id="not-depending-on-dependencies">Not depending on
+dependencies</h3>
+<p>DynamoDB depends on AWS IAM for authorization and AWS KMS for
+encryption keys. If either has an outage, DynamoDB should keep working.
+Request routers and storage nodes cache those results, so the data plane
+continues serving with what it last knew. This idea is called
+<strong>static stability</strong>: a system keeps doing what it was
+doing when something it relies on fails.</p>
+<h3 id="the-metadata-cache-and-constant-work">The metadata cache and
+constant work</h3>
+<p>This is the paper’s best story. Routers originally cached partition
+metadata locally, with a hit rate of about 99.75%. That sounds great
+until a cache is cold: a fleet of fresh routers, or a deployment, sends
+a sudden flood of requests to the metadata service. A system whose load
+depends on the cache hit rate has two very different modes, and the bad
+mode arrives precisely when things are already disturbed.</p>
+<p>The fix was <strong>MemDS</strong>, a distributed in-memory metadata
+store built on a structure the team calls a Perkle tree (a Patricia trie
+combined with a Merkle tree). The important part is how routers use it.
+On a cache hit, the router still answers from its cache, but it also
+sends an <strong>asynchronous</strong> request to MemDS to refresh the
+entry. So MemDS receives roughly the same load whether the cache is warm
+or cold. Routers may briefly use a stale entry; if a storage node no
+longer owns a partition, it tells the router, which then refreshes.</p>
+<p>This is the <strong>constant work</strong> principle that appears
+across AWS: a system that does the same amount of work in good times and
+bad has no hidden cliff to fall off.</p>
+<h2 id="what-the-internals-mean-for-your-data-model">6. What the
+internals mean for your data model</h2>
+<p>Everything above explains why DynamoDB modeling advice looks so
+different from relational advice: a request that touches one partition
+is fast and predictable, and anything else is your problem.</p>
+<h3 id="single-table-design">Single-table design</h3>
+<p>In a relational database you would have <code>customers</code> and
+<code>orders</code> tables and join them. DynamoDB has no joins, and two
+separate <code>GetItem</code> calls means two network round trips. Alex
+DeBrie’s well-known answer is <strong>single-table design</strong>: put
+different entity types in one table and arrange the keys so that related
+items share a partition key.</p>
+<table>
+<thead>
+<tr class="header">
+<th>PK</th>
+<th>SK</th>
+<th>Attributes</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>CUSTOMER#42</code></td>
+<td><code>PROFILE</code></td>
+<td>name, email, tier</td>
+</tr>
+<tr class="even">
+<td><code>CUSTOMER#42</code></td>
+<td><code>ORDER#2026-10-01#981</code></td>
+<td>total, status</td>
+</tr>
+<tr class="odd">
+<td><code>CUSTOMER#42</code></td>
+<td><code>ORDER#2026-10-18#1204</code></td>
+<td>total, status</td>
+</tr>
+</tbody>
+</table>
+<p>Now one <code>Query</code> on <code>PK = CUSTOMER#42</code> returns
+the customer profile and all their orders, sorted by date, from a single
+partition. A <code>begins_with(SK, "ORDER#2026-10")</code> condition
+narrows it to October. The item collection is doing the job a join would
+do, and it can do it because section 3 guarantees those items live
+together on one partition, sorted by the sort key.</p>
+<p>Common techniques that follow from this:</p>
+<ul>
+<li><strong>Generic key names</strong> like <code>PK</code> and
+<code>SK</code>, because the same attribute holds different kinds of
+identifiers.</li>
+<li><strong>GSI overloading</strong>: one GSI with generic keys
+(<code>GSI1PK</code>, <code>GSI1SK</code>) serves several access
+patterns for different entity types.</li>
+<li><strong>Prefixes</strong> like <code>ORDER#</code> so that range
+conditions select one entity type.</li>
+</ul>
+<h3 id="when-not-to-bother">When not to bother</h3>
+<p>DeBrie is clear that single-table design has costs. It is harder to
+learn and to read. Adding a new access pattern later can mean a data
+migration. Exporting to analytics tools is awkward because one table
+holds many shapes. AWS’s own guidance has since softened: multiple
+tables are fine when entities are not fetched together, and for many
+apps (for example GraphQL APIs that resolve each type separately) there
+is little to gain. The real rule is <strong>store together what you read
+together</strong>, not “one table no matter what”.</p>
+<h3 id="avoiding-hot-keys">Avoiding hot keys</h3>
+<p>Global admission control lets a hot partition borrow the table’s
+capacity, but it cannot make one storage node infinitely fast. AWS
+documents a per-partition ceiling of about 3,000 RCU and 1,000 WCU.
+So:</p>
+<ul>
+<li>Choose partition keys with many distinct values that are accessed
+fairly evenly, such as user ID rather than country.</li>
+<li>For a key that is genuinely hot on writes, such as a global counter,
+use <strong>write sharding</strong>: append a suffix
+(<code>COUNTER#0</code> to <code>COUNTER#9</code>) and sum across the
+shards when reading.</li>
+<li>Avoid partition keys that are timestamps or sequential IDs. As
+section 4 noted, split-for-consumption cannot help when every new write
+lands at the end of the range.</li>
+<li>For a key that is hot on reads, put a cache such as DAX or
+ElastiCache in front of it.</li>
+</ul>
+<h2 id="ideas-to-carry-away-and-questions-for-our-discussion">7. Ideas
+to carry away, and questions for our discussion</h2>
+<p>Five ideas from DynamoDB show up in almost every large backend
+system:</p>
+<ol type="1">
+<li><strong>Predictability over peak efficiency.</strong> DynamoDB
+accepts extra cost (three replicas, log replicas, background scrubbing)
+to keep tail latency flat.</li>
+<li><strong>Move fairness to the right scope.</strong> Per-partition
+limits were easy to enforce and wrong for customers; a global budget
+handed out as local tokens fixed it.</li>
+<li><strong>Static stability.</strong> Cache what you depend on so that
+a dependency outage does not become your outage.</li>
+<li><strong>Constant work.</strong> If load on a component depends on a
+cache hit rate, it has a hidden failure mode. Make the work the same in
+good and bad times.</li>
+<li><strong>Leaders simplify.</strong> Moving from Dynamo’s leaderless
+design to a Paxos leader per partition traded a little failover time for
+much simpler consistency.</li>
+</ol>
+<p>Think about these before we talk:</p>
+<ul>
+<li>Why did splitting a partition for size make hot-partition throttling
+worse under the original model?</li>
+<li>GAC hands out tokens to routers every few seconds. What could go
+wrong if a router crashes holding tokens, or if traffic shifts faster
+than the refresh interval?</li>
+<li>Why does a new leader wait for the old leader’s lease to expire?
+What would break if it did not?</li>
+<li>MemDS makes routers call it even on a cache hit. That is wasted work
+most of the time. Why is it still the right choice?</li>
+<li>In your own systems, where is there a cache whose cold-start
+behavior could take down the thing behind it?</li>
+<li>When would you choose a multi-table design over single-table
+design?</li>
+</ul>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Elhemali et al., <a
+href="https://usenix.org/system/files/atc22-elhemali.pdf">Amazon
+DynamoDB: A Scalable, Predictably Performant, and Fully Managed NoSQL
+Database Service</a>, USENIX ATC 2022 (<a
+href="https://www.usenix.org/conference/atc22/presentation/vig">conference
+page</a>)</li>
+<li>Marc Brooker, <a
+href="https://brooker.co.za/blog/2022/07/12/dynamodb.html">The DynamoDB
+paper</a>, July 2022</li>
+<li>Alex DeBrie, <a
+href="https://alexdebrie.com/posts/dynamodb-single-table">The What, Why,
+and When of Single-Table Design with DynamoDB</a></li>
+<li>AWS Database Blog, <a
+href="https://aws.amazon.com/blogs/database/single-table-vs-multi-table-design-in-amazon-dynamodb/">Single-table
+vs. multi-table design in Amazon DynamoDB</a></li>
+<li>DeCandia et al., Dynamo: Amazon’s Highly Available Key-value Store,
+SOSP 2007 (background for section 1)</li>
+</ul>
+<p>Some numbers, such as the per-partition limits and LSI size cap, come
+from AWS documentation as I remember it and may have changed. Check the
+current DynamoDB service quotas before relying on them.</p>
+
+    </article>
+    <nav class="pager"><span></span><a class="next" href="/reading/tls-13.html"><span>Newer</span>TLS 1.3 from the handshake up</a></nav>
+  </div></main>
+
+  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+</body>
+</html>

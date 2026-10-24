@@ -3,6 +3,7 @@
 Personal AI knowledge base and tech reading list, served by GitHub Pages.
 
 - `index.html` – home page
-- `notes/` – AI notes (copy `what-is-rag.html` to start a new note, then link it from `notes/index.html` and the home page)
+- `content/reading/` – one Markdown file per read; run `python3 tools/build.py` to regenerate the HTML
+- `content/diagrams/` – one SVG per diagram, inlined where an article has `<!--diagram:ID-->`; `src/` keeps the JSX each was rendered from
 - `reading/index.html` – reading list
 - `style.css` – shared styles (light and dark mode)

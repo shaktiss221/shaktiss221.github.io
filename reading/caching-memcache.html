@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Caching at scale: lessons from Facebook&#x27;s memcache · Shakti&#x27;s Knowledge Base</title>
+  <meta name="description" content="Caching patterns and their failure modes, how Facebook scaled memcache, and how Meta pushed cache consistency to ten nines.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site"><div class="wrap">
+    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/reading/" aria-current="page">Reading</a>
+    </nav>
+  </div></header>
+
+  <main><div class="wrap">
+    <article class="post">
+      <p class="crumb"><a href="/reading/">Reading</a></p>
+      <h1>Caching at scale: lessons from Facebook&#x27;s memcache</h1>
+      <p class="meta">October 24, 2026 · 14 min read<span class="tag">caching</span><span class="tag">distributed systems</span></p>
+<details class="toc"><summary>Contents</summary>
+<ul>
+<li><a href="#what-a-cache-buys-and-what-it-costs"
+id="toc-what-a-cache-buys-and-what-it-costs">1. What a cache buys, and
+what it costs</a></li>
+<li><a href="#the-caching-patterns" id="toc-the-caching-patterns">2. The
+caching patterns</a></li>
+<li><a href="#stampedes-when-everyone-misses-at-once"
+id="toc-stampedes-when-everyone-misses-at-once">3. Stampedes: when
+everyone misses at once</a></li>
+<li><a href="#how-facebook-scaled-memcache"
+id="toc-how-facebook-scaled-memcache">4. How Facebook scaled
+memcache</a></li>
+<li><a href="#making-caches-consistent"
+id="toc-making-caches-consistent">5. Making caches consistent</a></li>
+<li><a href="#hot-keys-big-keys-and-other-sharp-edges"
+id="toc-hot-keys-big-keys-and-other-sharp-edges">6. Hot keys, big keys
+and other sharp edges</a></li>
+<li><a href="#ideas-to-carry-away-and-questions-for-our-discussion"
+id="toc-ideas-to-carry-away-and-questions-for-our-discussion">7. Ideas
+to carry away, and questions for our discussion</a></li>
+<li><a href="#sources" id="toc-sources">Sources</a></li>
+</ul>
+</details>
+<p>A cache is the easiest component to add and one of the hardest to get
+right: it makes reads cheap by keeping a second copy of the data, and
+every hard problem in caching is about that second copy being wrong,
+missing or overwhelmed. This reading covers the standard patterns and
+their failure modes, then follows how Facebook scaled memcache to
+billions of requests per second and how Meta later pushed cache
+consistency to ten nines.</p>
+<h2 id="what-a-cache-buys-and-what-it-costs">1. What a cache buys, and
+what it costs</h2>
+<p>A cache trades <strong>correctness risk</strong> for
+<strong>capacity</strong>. That framing is more useful than “a cache
+makes things faster”.</p>
+<p>What you gain:</p>
+<ul>
+<li><strong>Throughput.</strong> An in-memory key-value server can
+answer hundreds of thousands of gets per second on one machine; a
+relational database doing indexed lookups serves far fewer. The MIT
+6.824 notes on Facebook’s paper make the point that their cache was
+mainly about <strong>throughput, not latency</strong>: the databases
+simply could not serve Facebook’s read load alone.</li>
+<li><strong>Latency</strong>, especially for results that are expensive
+to compute (a rendered page fragment, an aggregate, a call to a slow
+third party).</li>
+<li><strong>Protection.</strong> The cache absorbs the bulk of reads, so
+the database is sized for writes and misses.</li>
+</ul>
+<p>What you pay:</p>
+<ul>
+<li><strong>Staleness.</strong> Two copies of the data can disagree.
+Every caching design is a choice about how long and how often.</li>
+<li><strong>A new dependency with a dangerous failure mode.</strong>
+When a cache that absorbs 90% of reads fails or is flushed, the database
+suddenly sees ten times its normal load. A cache you cannot run without
+is no longer an optimization; it is load-bearing infrastructure.</li>
+<li><strong>Complexity.</strong> Invalidation logic spreads across every
+code path that writes data.</li>
+</ul>
+<p>Phil Karlton’s line about the two hard things in computer science
+(cache invalidation and naming things) survives because it keeps being
+true. The rest of this reading is about why.</p>
+<h2 id="the-caching-patterns">2. The caching patterns</h2>
+<p>The patterns differ in one question: who is responsible for keeping
+the cache and the database in step, the application or the cache?</p>
+<h3 id="cache-aside-look-aside">Cache-aside (look-aside)</h3>
+<p>The application owns everything. To read: check the cache; on a miss,
+read the database and put the value in the cache. To write: update the
+database, then <strong>delete</strong> the cache key.</p>
+<p>This is the most common pattern and the one Facebook used. The cache
+knows nothing about the database, so you can cache anything, including
+computed results. The cost is that every write path must remember to
+invalidate, and races between readers and writers can leave stale data
+(section 5).</p>
+<p>Why delete instead of setting the new value on write? Deletes are
+<strong>idempotent</strong> and order-insensitive: two deletes in any
+order leave the same state. Two concurrent sets of different values can
+land in the wrong order and leave the older one in the cache. Deleting
+also avoids computing a value that might never be read. Facebook’s
+design uses sets only to fill on a read miss.</p>
+<h3 id="read-through">Read-through</h3>
+<p>The application only talks to the cache; on a miss, the cache itself
+loads from the database (through a loader function you register). It
+centralizes miss handling, which makes it a natural place to coalesce
+concurrent misses. Libraries such as Caffeine in Java and many CDN
+setups work this way.</p>
+<h3 id="write-through">Write-through</h3>
+<p>Writes go to the cache, which synchronously writes to the database
+before acknowledging. The cache always has the latest value for anything
+written through it, at the cost of slower writes and caching data that
+may never be read.</p>
+<h3 id="write-behind-write-back">Write-behind (write-back)</h3>
+<p>Writes go to the cache and are acknowledged immediately; the cache
+flushes them to the database later, often in batches. Very fast writes,
+but a cache crash loses acknowledged data. Appropriate for counters and
+metrics where a small loss is acceptable, and dangerous almost
+everywhere else.</p>
+<h3 id="ttls-the-safety-net">TTLs: the safety net</h3>
+<p>Whatever the pattern, set a <strong>time to live</strong>. A TTL
+bounds how long any bug in invalidation can show stale data, and it lets
+unused keys age out. Two practical rules:</p>
+<ul>
+<li>Add random <strong>jitter</strong> to TTLs. If a batch job fills 1
+million keys with exactly one hour of TTL, they all expire at the same
+second.</li>
+<li>Choose TTLs by how stale each kind of data may be, not one global
+number. A feature flag and a product description have very different
+tolerances.</li>
+</ul>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Pattern</th>
+<th>Who fills the cache</th>
+<th>Write path</th>
+<th>Main risk</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Cache-aside</td>
+<td>Application on a miss</td>
+<td>DB, then delete key</td>
+<td>Races leave stale values; forgotten invalidations</td>
+</tr>
+<tr class="even">
+<td>Read-through</td>
+<td>Cache’s loader on a miss</td>
+<td>Usually combined with delete or write-through</td>
+<td>Loader becomes a hidden dependency</td>
+</tr>
+<tr class="odd">
+<td>Write-through</td>
+<td>Writes go through the cache</td>
+<td>Cache, then DB, synchronously</td>
+<td>Slower writes; cache full of unread data</td>
+</tr>
+<tr class="even">
+<td>Write-behind</td>
+<td>Writes go to the cache</td>
+<td>Cache now, DB later</td>
+<td>Losing acknowledged writes</td>
+</tr>
+</tbody>
+</table>
+<h2 id="stampedes-when-everyone-misses-at-once">3. Stampedes: when
+everyone misses at once</h2>
+<p>The most common way a cache takes down a database is not by being
+wrong but by being empty for one popular key at the wrong moment.</p>
+<p>Picture a key read 10,000 times per second, such as the home page’s
+trending list. Its entry expires, or a write deletes it. For the next
+few hundred milliseconds, while one request recomputes the value, every
+other request also misses and also goes to the database. Thousands of
+identical expensive queries hit at once; the database slows down; the
+recomputation takes longer; more requests pile up. This is a
+<strong>cache stampede</strong> (or thundering herd, or dog-pile).</p>
+<p>There are four standard defenses, and large systems use several.</p>
+<h3 id="leases-facebooks-answer">1. Leases (Facebook’s answer)</h3>
+<p>In Facebook’s memcache, a client that misses receives a
+<strong>lease</strong>: a token giving it the right to fill that key.
+Memcache hands out at most one lease per key every 10 seconds. Other
+clients that miss during that window are told to wait briefly and retry,
+by which time the leaseholder has usually filled the value. One database
+query instead of thousands.</p>
+<p>Leases also solve a correctness problem. If the key is deleted while
+the leaseholder is still computing, memcache invalidates the lease, and
+the late <code>set</code> with the stale value is rejected. Section 5
+explains why that race matters.</p>
+<p>A refinement: for data where slight staleness is fine, memcache can
+return the <strong>just-deleted value</strong>, marked stale, to the
+waiting clients instead of making them wait at all.</p>
+<h3 id="request-coalescing">2. Request coalescing</h3>
+<p>Inside one process, collapse concurrent misses for the same key into
+one call and share the result. Go’s <code>singleflight</code> package
+and NGINX’s <code>proxy_cache_lock</code> do exactly this. It only
+deduplicates within a process or proxy, so with 500 app servers you
+still get up to 500 database queries, which is far better than
+10,000.</p>
+<h3 id="serve-stale-while-revalidating">3. Serve stale while
+revalidating</h3>
+<p>Keep the old value past its soft expiry and serve it while one
+background refresh runs. HTTP standardizes this as the
+<code>stale-while-revalidate</code> Cache-Control extension (RFC 5861),
+and CDNs support it. Users never see the miss at all.</p>
+<h3 id="probabilistic-early-expiration">4. Probabilistic early
+expiration</h3>
+<p>Instead of every client refreshing at the exact expiry time, let each
+request refresh a little <strong>early with a small probability</strong>
+that rises as expiry approaches. The paper <em>Optimal Probabilistic
+Cache Stampede Prevention</em> (Vattani, Chierichetti and Lowenstein,
+VLDB 2015) gives the XFetch rule. A request recomputes early if:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">now</mtext><mo>−</mo><mi>Δ</mi><mo>⋅</mo><mi>β</mi><mo>⋅</mo><mo>ln</mo><mrow><mo stretchy="true" form="prefix">(</mo><mtext mathvariant="normal">rand</mtext><mrow><mo stretchy="true" form="prefix">(</mo><mo stretchy="true" form="postfix">)</mo></mrow><mo stretchy="true" form="postfix">)</mo></mrow><mo>≥</mo><mtext mathvariant="normal">expiry</mtext></mrow><annotation encoding="application/x-tex">\text{now} - \Delta \cdot \beta \cdot \ln(\text{rand}()) \ge \text{expiry}</annotation></semantics></math></p>
+<p>where Δ is how long the recomputation takes, rand() is uniform on (0,
+1] (so its logarithm is negative), and β (default 1) tunes how eagerly
+to refresh. Slow-to-compute values start refreshing earlier. Usually
+exactly one request refreshes shortly before expiry, with no locks or
+coordination at all.</p>
+<h3 id="the-cold-cache">The cold cache</h3>
+<p>The largest stampede is a whole cold cache: a new cluster, a restart,
+or a flush. Facebook’s paper describes <strong>cold cluster
+warmup</strong>: a new cluster’s clients read misses from a warm
+cluster’s cache rather than the database, until hit rates recover. The
+MIT notes give the arithmetic of why: a cluster that normally misses 1%
+of reads but starts at a 33% miss rate means roughly 30 times the usual
+database load.</p>
+<h2 id="how-facebook-scaled-memcache">4. How Facebook scaled
+memcache</h2>
+<p><em>Scaling Memcache at Facebook</em> (Nishtala et al., NSDI 2013)
+describes taking a simple open-source cache to billions of requests per
+second across several regions. Its lasting value is that each scaling
+step uncovered a new problem, and each fix is a reusable idea.</p>
+<figure class="diagram"><svg viewBox="0 0 760 436" role="img" aria-label="Invalidations come from the database commit log, not from web servers" font-size="13"><defs><marker id="mc-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--cds-chart-axis)"></path></marker><marker id="mc-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--cds-chart-categorical-1)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Invalidations come from the database commit log, not from web servers</text><g><rect x="24" y="44" width="536" height="372" rx="8" fill="var(--cds-chart-reference-tint)" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="40" y="66" font-weight="600" fill="var(--cds-text-primary)">Master region</text></g><g><rect x="40" y="80" width="240" height="156" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="56" y="102" font-weight="600" fill="var(--cds-text-primary)">Front-end cluster</text><rect x="56" y="114" width="208" height="40" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="160" y="138" text-anchor="middle" fill="var(--cds-text-primary)">Web servers + mcrouter</text><rect x="56" y="166" width="208" height="54" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="160" y="188" text-anchor="middle" fill="var(--cds-text-primary)">Memcache servers</text><text x="160" y="208" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">plus a small gutter pool</text></g><g><rect x="304" y="80" width="240" height="156" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="320" y="102" font-weight="600" fill="var(--cds-text-primary)">Front-end cluster</text><rect x="320" y="114" width="208" height="40" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="424" y="138" text-anchor="middle" fill="var(--cds-text-primary)">Web servers + mcrouter</text><rect x="320" y="166" width="208" height="54" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="424" y="188" text-anchor="middle" fill="var(--cds-text-primary)">Memcache servers</text><text x="424" y="208" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">plus a small gutter pool</text></g><g><rect x="40" y="300" width="320" height="48" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="200" y="329" text-anchor="middle" fill="var(--cds-text-primary)">MySQL storage cluster</text></g><g><rect x="400" y="300" width="144" height="48" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.12" stroke="var(--cds-chart-categorical-1)" stroke-width="2"></rect><text x="472" y="320" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">mcsqueal</text><text x="472" y="338" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">tails commit log</text></g><g><rect x="576" y="44" width="160" height="372" rx="8" fill="var(--cds-chart-reference-tint)" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="592" y="66" font-weight="600" fill="var(--cds-text-primary)">Replica region</text><rect x="592" y="80" width="128" height="56" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="656" y="104" text-anchor="middle" fill="var(--cds-text-primary)">Own clusters</text><text x="656" y="122" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">local reads</text><rect x="592" y="160" width="128" height="72" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="656" y="184" text-anchor="middle" fill="var(--cds-text-primary)">Remote marker</text><text x="656" y="202" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">just-written keys</text><text x="656" y="218" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">read from master</text><rect x="592" y="300" width="128" height="48" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="656" y="329" text-anchor="middle" fill="var(--cds-text-primary)">MySQL replica</text></g><g fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"><path d="M100 236V300" marker-end="url(#mc-arrow)"></path><path d="M360 324H400" marker-end="url(#mc-arrow)"></path><path d="M200 348V384H656V348" marker-end="url(#mc-arrow)"></path></g><g fill="none" stroke="var(--cds-chart-categorical-1)" stroke-width="2"><path d="M472 300V236" marker-end="url(#mc-arrow-accent)"></path><path d="M430 300V268H200V236" marker-end="url(#mc-arrow-accent)"></path></g><text x="108" y="276" font-size="11.5" fill="var(--cds-text-secondary)">misses, writes</text><text x="240" y="262" font-size="11.5" fill="var(--cds-text-primary)">deletes to every cluster</text><text x="420" y="402" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">MySQL replication</text></svg></figure>
+<p>Web servers fill caches on misses; committed writes flow from MySQL
+through mcsqueal as deletes to every cluster, and replica regions learn
+about writes through MySQL replication.</p>
+<h3 id="step-1-one-cluster">Step 1: one cluster</h3>
+<p>Web servers use memcache as a look-aside cache with delete-on-write,
+as in section 2. Keys are spread over many memcache servers by
+consistent hashing. A single page view can fetch hundreds of keys in
+parallel, so two problems appear quickly:</p>
+<ul>
+<li><strong>Latency of many small requests.</strong> Clients batch
+requests and fetch independent data in parallel, building a dependency
+graph of what can be fetched at once. Gets go over <strong>UDP</strong>
+(a lost packet is just treated as a miss, which is rare and harmless),
+while sets and deletes go over TCP through <strong>mcrouter</strong>, a
+proxy that pools connections so each web server does not hold a
+connection to every cache server.</li>
+<li><strong>Incast.</strong> When a request fans out to hundreds of
+servers, all the replies arrive at once and overflow switch buffers.
+Clients limit how many requests they have outstanding at a time, a
+sliding window similar to TCP congestion control.</li>
+</ul>
+<p><strong>Leases</strong> (section 3) handle stampedes and stale sets
+within the cluster.</p>
+<p><strong>Gutter pools</strong> handle failures. If a memcache server
+stops responding, its keys would all miss and land on the database.
+Instead, clients retry against a small pool of otherwise idle
+<strong>gutter</strong> servers, about 1% of the cluster according to
+reviews of the paper, whose entries expire quickly. The gutter pool
+absorbs the misses for a few minutes until the failed server is
+replaced. Rehashing the dead server’s keys onto the remaining servers
+was rejected, because a hot key could then overload a second server and
+cause a cascade.</p>
+<h3 id="step-2-many-clusters-in-a-region">Step 2: many clusters in a
+region</h3>
+<p>One cluster cannot grow forever: more servers means more fan-out per
+request and worse incast. So a region runs several <strong>front-end
+clusters</strong> of web and memcache servers, all sharing one storage
+cluster of MySQL databases.</p>
+<p>Now a write must invalidate the key in every cluster, not only the
+writer’s. Facebook moved invalidation to the database side: a daemon
+called <strong>mcsqueal</strong> tails the MySQL commit log, extracts
+the keys each committed transaction affects, and broadcasts deletes to
+every cluster through mcrouter. Because invalidations come from the
+commit log, they are only sent for committed data, are replayable after
+failures, and can be batched. The writing web server still deletes the
+key in its own cluster immediately, so the user who wrote sees their own
+write.</p>
+<p>To save memory, rarely read keys live in a shared <strong>regional
+pool</strong> instead of being copied into every cluster’s cache;
+popular keys are replicated in each cluster.</p>
+<h3 id="step-3-many-regions">Step 3: many regions</h3>
+<p>Across regions, one region holds the master MySQL databases and the
+others hold read replicas fed by MySQL replication. Each region has its
+own memcache. Reads are served locally; writes go to the master
+region.</p>
+<p>The tricky case is a user in a replica region who writes and then
+reads. The write goes to the master, but the local replica database may
+not have it yet, so a cache miss would refill the cache with old data.
+Facebook’s fix is a <strong>remote marker</strong>: when writing from a
+replica region, the client sets a marker for the key in its region. A
+later miss that finds the marker reads from the master region instead of
+the local replica. The marker is removed once replication catches up. It
+trades a slower read (a cross-region round trip, on the order of 100 ms)
+for read-your-writes consistency, only for keys that were just
+written.</p>
+<h2 id="making-caches-consistent">5. Making caches consistent</h2>
+<p>Even with delete-on-write, a cache-aside system can end up
+permanently stale, because a read and a write can interleave in exactly
+the wrong order.</p>
+<h3 id="the-classic-race">The classic race</h3>
+<p>Meta’s 2022 post <a
+href="https://engineering.fb.com/2022/06/08/core-infra/cache-made-consistent/">Cache
+made consistent</a> gives the canonical example:</p>
+<ol type="1">
+<li>A cache miss on <code>x</code> sends a fill request to the database,
+which returns <code>x = 42</code>.</li>
+<li>Before that reply reaches the cache, a write changes <code>x</code>
+to 43, and the invalidation for 43 arrives at the cache first.</li>
+<li>The delayed fill with 42 then lands and overwrites it.</li>
+</ol>
+<p>The database says 43, the cache says 42, and nothing will fix it
+until the key expires or is written again. With a long TTL that can be
+days.</p>
+<h3 id="the-fixes">The fixes</h3>
+<ul>
+<li><strong>Leases or fill tokens.</strong> The cache only accepts a
+fill from the client holding a valid lease, and any delete in between
+cancels the lease. This is Facebook’s memcache answer from section
+3.</li>
+<li><strong>Versions.</strong> Store a version number (or a commit
+timestamp) with each value and refuse to overwrite a newer version with
+an older one. TAO, Meta’s graph cache, uses versioned entries.</li>
+<li><strong>Delete again later.</strong> Some teams issue a second,
+delayed delete a second or two after each write to catch fills that were
+in flight. It narrows the window rather than closing it.</li>
+<li><strong>Short TTLs</strong> as the last line of defense, so any
+inconsistency heals by itself.</li>
+</ul>
+<h3 id="measuring-it-polaris">Measuring it: Polaris</h3>
+<p>The most important idea in Meta’s post is that you cannot improve
+what you cannot measure. Meta built <strong>Polaris</strong>, a service
+that receives the same invalidation events as the caches and then checks
+whether cache replicas actually reflect them. It rechecks suspected
+inconsistencies at 1, 5 and 10 minute timescales to avoid false alarms,
+and reports results as “N nines of cache writes are consistent in M
+minutes”.</p>
+<p>With Polaris and a targeted <strong>consistency tracing</strong>
+library that logs only the narrow window where fills and invalidations
+race, Meta reports that TAO’s cache consistency went from 99.9999% (six
+nines) to 99.99999999% (ten nines) at the five-minute timescale: fewer
+than one in 10 billion cache writes still inconsistent after five
+minutes.</p>
+<p>The bug story in the post is a good lesson in why this is hard. A
+cache entry held <code>metadata=0 @version 4</code> while the database
+held <code>metadata=1 @version 4</code>. A rare transaction interleaved
+with a cache fill, the invalidation then hit a transient error, and the
+error handler called a “drop this entry if its version is older”
+function. The stale entry already had the newest version number, so
+nothing was dropped. Polaris raised the alarm, and with tracing the
+on-call engineers found the bug in under 30 minutes.</p>
+<h2 id="hot-keys-big-keys-and-other-sharp-edges">6. Hot keys, big keys
+and other sharp edges</h2>
+<p>Consistent hashing spreads keys evenly, but it cannot spread
+<strong>traffic</strong> evenly when traffic itself is skewed.</p>
+<p><strong>Hot keys.</strong> A celebrity’s profile or a viral post can
+receive far more reads than one cache server can serve. Common
+fixes:</p>
+<ul>
+<li><strong>Replicate the hot key</strong>: store copies under
+<code>key#1</code> to <code>key#N</code> on different servers and have
+readers pick one at random. Writes must invalidate every copy.</li>
+<li><strong>A small local cache</strong> in each application process for
+the hottest keys, with a TTL of a second or two. This removes most
+network calls for the very top keys and is how many systems survive
+viral spikes.</li>
+<li><strong>Detect hotness dynamically.</strong> Track per-key request
+rates (client-side sampling or server-side stats) so hot keys can be
+promoted to replication or local caching automatically.</li>
+</ul>
+<p><strong>Big keys.</strong> A 5 MB value (a huge list or a serialized
+page) is slow to fetch, blocks the network, and in single-threaded
+caches like Redis can stall every other request on that server. Split
+large values into chunks, compress them, or cache only the part actually
+needed.</p>
+<p><strong>Negative caching.</strong> If a key does not exist in the
+database, cache that fact too (with a short TTL). Otherwise lookups for
+missing keys, including from attackers probing random IDs, bypass the
+cache and all hit the database.</p>
+<p><strong>Eviction is not invalidation.</strong> An LRU cache that
+evicts a key under memory pressure gives a miss, which is safe. A cache
+that silently keeps a stale value is not. Never rely on eviction to
+remove data that must not be served.</p>
+<p><strong>Watch the hit rate and the miss cost, not just the hit
+rate.</strong> A 99% hit rate sounds great until you notice the 1% of
+misses are the most expensive queries. Monitor database load from
+misses, and alert when the hit rate drops, because a falling hit rate is
+the early warning before a stampede.</p>
+<h2 id="ideas-to-carry-away-and-questions-for-our-discussion">7. Ideas
+to carry away, and questions for our discussion</h2>
+<p>Five ideas to keep:</p>
+<ol type="1">
+<li><strong>A cache trades correctness risk for capacity.</strong> Once
+it absorbs most reads, it is part of your availability story, not an
+optimization.</li>
+<li><strong>Delete, don’t set, on write.</strong> Deletes are idempotent
+and order-insensitive; sets can land out of order.</li>
+<li><strong>Protect the database from the cache’s failures.</strong>
+Leases, coalescing, stale-while-revalidate, gutter pools and warm-up all
+exist to stop a miss storm.</li>
+<li><strong>Invalidate from the source of truth.</strong> Driving
+invalidations from the database commit log, as mcsqueal does, means no
+write path can forget.</li>
+<li><strong>Measure consistency.</strong> Meta’s jump from six to ten
+nines started with a system that could tell them how inconsistent the
+cache actually was.</li>
+</ol>
+<p>Think about these before we talk:</p>
+<ul>
+<li>Walk through the 42/43 race in section 5. How exactly does a lease
+prevent it?</li>
+<li>Why did Facebook prefer a gutter pool over rehashing a failed
+server’s keys onto the remaining servers?</li>
+<li>Your cache cluster restarts during peak traffic. What protects the
+database in your current design?</li>
+<li>When is write-through a better choice than cache-aside?</li>
+<li>How would you find out how stale your own caches are today?</li>
+<li>What is the hottest key in a system you work on, and what would
+happen if it went viral?</li>
+</ul>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Nishtala et al., <em>Scaling Memcache at Facebook</em>, NSDI 2013
+(<a href="https://www.usenix.org/node/172909">USENIX page</a>)</li>
+<li>MIT 6.824, <a
+href="https://people.csail.mit.edu/alinush/6.824-spring-2015/l16-memcached.html">Lecture
+notes on Memcache at Facebook</a>, 2015</li>
+<li>UW-Madison CS739, <a
+href="https://pages.cs.wisc.edu/~swift/classes/cs739-fa14/blog/2014/09/scaling_memcache_at_facebook.html">student
+reviews of Scaling Memcache at Facebook</a> (source for the ~1% gutter
+pool and the 10-second lease limit)</li>
+<li>Meta Engineering, <a
+href="https://engineering.fb.com/2022/06/08/core-infra/cache-made-consistent/">Cache
+made consistent</a>, June 2022</li>
+<li>Vattani, Chierichetti and Lowenstein, <a
+href="https://mail.vldb.org/pvldb/volumes/8/paper/Optimal%20Probabilistic%20Cache%20Stampede%20Prevention">Optimal
+Probabilistic Cache Stampede Prevention</a>, VLDB 2015</li>
+<li>IETF, RFC 5861, HTTP Cache-Control extensions for stale content</li>
+</ul>
+<p>The Meta and MIT pages were read today. Paper details I could not
+open directly (the original NSDI PDF) are taken from the lecture notes
+and reviews above; general patterns in sections 2 and 6 are standard
+practice rather than from one source.</p>
+
+    </article>
+    <nav class="pager"><a class="prev" href="/reading/starrocks-olap.html"><span>Older</span>StarRocks and how fast OLAP engines work</a><a class="next" href="/reading/postgres-mvcc.html"><span>Newer</span>Postgres MVCC, vacuum and isolation</a></nav>
+  </div></main>
+
+  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+</body>
+</html>

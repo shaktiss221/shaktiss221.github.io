@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Discord&#x27;s messages: Cassandra to ScyllaDB · Shakti&#x27;s Knowledge Base</title>
+  <meta name="description" content="How Discord moved trillions of messages to ScyllaDB, and the data-services layer that stopped hot channels hurting everyone else.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site"><div class="wrap">
+    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/reading/" aria-current="page">Reading</a>
+    </nav>
+  </div></header>
+
+  <main><div class="wrap">
+    <article class="post">
+      <p class="crumb"><a href="/reading/">Reading</a></p>
+      <h1>Discord&#x27;s messages: Cassandra to ScyllaDB</h1>
+      <p class="meta">October 28, 2026 · 16 min read<span class="tag">databases</span><span class="tag">case study</span></p>
+<details class="toc"><summary>Contents</summary>
+<ul>
+<li><a href="#to-2017-from-mongodb-to-cassandra"
+id="toc-to-2017-from-mongodb-to-cassandra">1. 2015 to 2017: from MongoDB
+to Cassandra</a></li>
+<li><a href="#to-2022-what-broke-at-trillions-of-messages"
+id="toc-to-2022-what-broke-at-trillions-of-messages">2. 2017 to 2022:
+what broke at trillions of messages</a></li>
+<li><a href="#the-new-design-data-services-in-front-of-scylladb"
+id="toc-the-new-design-data-services-in-front-of-scylladb">3. The new
+design: data services in front of ScyllaDB</a></li>
+<li><a href="#the-migration-the-results-and-the-lessons"
+id="toc-the-migration-the-results-and-the-lessons">4. The migration, the
+results and the lessons</a></li>
+<li><a href="#discussion-questions"
+id="toc-discussion-questions">Discussion questions</a></li>
+<li><a href="#sources" id="toc-sources">Sources</a></li>
+</ul>
+</details>
+<p>In 2022 Discord moved trillions of messages from a 177-node Cassandra
+cluster to 72 ScyllaDB nodes, cut p99 read latency from as high as 125
+ms to about 15 ms, and copied the data in 9 days. The database swap gets
+the headlines, but the bigger lesson is the layer Discord put in front
+of it, which stopped hot channels from hurting everyone else. This piece
+follows Discord’s two engineering blog posts, from 2017 and 2023, and
+pulls out what applies to other systems. Reading time is about 30
+minutes.</p>
+<h2 id="to-2017-from-mongodb-to-cassandra">1. 2015 to 2017: from MongoDB
+to Cassandra</h2>
+<h3 id="the-starting-point">The starting point</h3>
+<p>Discord launched in 2015 with messages in a single
+<strong>MongoDB</strong> replica set, with a compound index on channel
+ID and creation time. That was a deliberate choice to move fast. By
+November 2015 it held around 100 million messages, and the data and
+indexes no longer fit in RAM, so latencies became unpredictable. The
+team went looking for a database that would scale horizontally and stay
+boring to operate.</p>
+<p>Their requirements, from the 2017 post, are a good template for any
+database choice:</p>
+<ul>
+<li><strong>Linear scalability</strong>: add nodes, get capacity, no
+manual resharding.</li>
+<li><strong>Automatic failover</strong>: the database heals itself at
+night without an on-call engineer.</li>
+<li><strong>Low maintenance</strong> once set up.</li>
+<li><strong>Proven at scale</strong>: not a database they would be the
+first to push this hard.</li>
+<li><strong>Predictable performance</strong>: alert if the API’s p95
+goes over 80 ms, and avoid caching messages in a separate layer.</li>
+<li><strong>Not a blob store</strong>: they write thousands of messages
+per second, so read-modify-write of blobs was out.</li>
+<li><strong>Open source</strong>.</li>
+</ul>
+<p>The workload shape mattered as much. Reads are extremely random,
+because users jump to old messages, search results and mentions across
+many channels, while writes are mostly appends. The read-to-write ratio
+was roughly 50/50. Cassandra fit: a Dynamo-style ring with tunable
+consistency, fast appends through its log-structured storage, and big
+users (Apple, Netflix) at much larger scale.</p>
+<h3 id="the-data-model">The data model</h3>
+<p>Cassandra is a wide-column store: data is grouped into
+<strong>partitions</strong> by a partition key, and rows inside a
+partition are sorted by clustering columns. A query that names one
+partition and a slice of clustering keys is fast; anything else is
+expensive. So the schema had to match the dominant query: <em>fetch the
+most recent messages in a channel, or the messages around a given
+point</em>.</p>
+<p>The obvious design, partition by <code>channel_id</code> and cluster
+by message ID, fails because a busy channel would grow one partition
+without bound, and Cassandra partitions need to stay well under about
+100 MB for good performance. Discord added a time
+<strong>bucket</strong> to the partition key:</p>
+<pre class="sql"><code>CREATE TABLE messages (
+  channel_id bigint,
+  bucket     int,
+  message_id bigint,
+  author_id  bigint,
+  content    text,
+  PRIMARY KEY ((channel_id, bucket), message_id)
+) WITH CLUSTERING ORDER BY (message_id DESC);</code></pre>
+<p>The bucket is a static window of time, <strong>10 days</strong>,
+derived from the message ID itself. Even the busiest channels would then
+stay under the partition size target. To read recent history, the client
+queries the current bucket and walks backwards bucket by bucket until it
+has enough messages. For quiet channels this can mean probing many empty
+buckets, which is acceptable because quiet channels are cheap.</p>
+<h3 id="snowflake-ids">Snowflake IDs</h3>
+<p>Discord uses <strong>Snowflake</strong> IDs, the scheme Twitter
+published in 2010: a 64-bit integer whose top 42 bits are a millisecond
+timestamp (counted from Discord’s own epoch, the first second of 2015),
+followed by worker and process IDs and a per-process sequence number.
+That gives three properties the design relies on:</p>
+<ul>
+<li>IDs are <strong>unique without coordination</strong>, generated by
+any API server.</li>
+<li>IDs <strong>sort by time</strong>, so <code>message_id</code> is
+both the primary key and the chronological order.</li>
+<li>The <strong>timestamp is embedded</strong>, so the bucket can be
+computed from the ID alone:
+<code>bucket = (message_id &gt;&gt; 22) / ten_days_in_ms</code>.</li>
+</ul>
+<h3 id="surprises-in-year-one">Surprises in year one</h3>
+<p>The 2017 post is candid about what bit them:</p>
+<ul>
+<li><strong>Eventual consistency and upserts.</strong> Cassandra writes
+are upserts. If a user edited a message at the same moment another user
+deleted it, the edit could write a row containing only the edited
+columns, leaving a message with no author or content. Their fix was to
+detect such corrupt rows on read and delete them, and to only write the
+columns being changed.</li>
+<li><strong>Tombstones.</strong> A delete in Cassandra writes a
+<strong>tombstone</strong> marker, kept for
+<code>gc_grace_seconds</code> (10 days by default) so deletions
+propagate to replicas that were down. One public server deleted millions
+of messages, leaving almost nothing visible. Reading that channel meant
+scanning millions of tombstones to find a handful of live rows, which
+caused long garbage-collection pauses on the JVM. They reduced the grace
+period to 2 days, matched to their nightly repair schedule, and avoided
+writing null values, since nulls are tombstones too.</li>
+</ul>
+<p>The cluster launched with 12 nodes and replication factor 3. The post
+ended optimistically, noting that the next step might be ScyllaDB, “a
+Cassandra-compatible database written in C++”. Five years later, that is
+what happened.</p>
+<h2 id="to-2022-what-broke-at-trillions-of-messages">2. 2017 to 2022:
+what broke at trillions of messages</h2>
+<p>By early 2022 the <code>cassandra-messages</code> cluster had grown
+to <strong>177 nodes</strong> holding <strong>trillions</strong> of
+messages. The 2023 post describes it as “high-toil”: on-call engineers
+were frequently paged, latency was unpredictable, and maintenance
+operations had become too expensive to run routinely. None of the
+problems were exotic. They were the normal failure modes of a
+log-structured, JVM-based database meeting a skewed workload.</p>
+<h3 id="hot-partitions">Hot partitions</h3>
+<p>Discord’s traffic is extremely skewed. A large server with hundreds
+of thousands of members, during a game launch or a big announcement, can
+generate a burst of reads and writes against a single channel, and
+therefore against one partition, which lives on exactly three nodes
+(replication factor 3).</p>
+<p>What made this painful was the blast radius. When one of those nodes
+slowed down under the hot partition, <em>every</em> query it served
+slowed down, including queries for unrelated quiet channels whose data
+happened to live on it. Because Discord read and wrote at
+<code>QUORUM</code> consistency, a request needs two of three replicas
+to answer, so one slow node in a replica set dragged out requests
+touching that set. Clients and the API then retried or piled up
+concurrent requests, adding load to the slowest node. A single popular
+channel could degrade latency across a large part of the cluster.</p>
+<h3 id="reads-are-expensive-in-an-lsm-tree">Reads are expensive in an
+LSM tree</h3>
+<p>Cassandra stores data in a <strong>log-structured merge tree
+(LSM)</strong>:</p>
+<ol type="1">
+<li>Writes go to a commit log and an in-memory
+<strong>memtable</strong>. That makes writes cheap: an append and a
+memory insert.</li>
+<li>When the memtable fills, it’s flushed to disk as an immutable
+<strong>SSTable</strong>.</li>
+<li>Over time a partition’s rows are spread across many SSTables, so a
+read may have to check the memtable and several SSTables (Bloom filters
+help skip ones that definitely don’t contain the key) and merge the
+results.</li>
+<li>Background <strong>compaction</strong> merges SSTables to keep the
+count per read low and to purge tombstones and overwritten values.</li>
+</ol>
+<p>This is why the 2023 post notes that in Cassandra reads are more
+expensive than writes. A workload with 50/50 reads and writes and highly
+random read patterns, like Discord’s, leans on the expensive side.</p>
+<h3 id="compaction-debt">Compaction debt</h3>
+<p>Compaction is the tax that keeps reads fast, and it competes with
+foreground traffic for disk and CPU. When nodes were busy, compaction
+fell behind. More SSTables per partition meant slower reads, slower
+reads meant more concurrent requests in flight, and that meant even less
+capacity for compaction: a feedback loop.</p>
+<p>The operational workaround Discord describes is telling. Engineers
+would perform what they called a “gossip dance”: take a struggling node
+out of rotation so it received no client traffic, let it compact in
+peace, then put it back. Doing that by hand across a 177-node cluster is
+exactly the kind of toil that burns out an on-call rotation.</p>
+<h3 id="garbage-collection-pauses">Garbage collection pauses</h3>
+<p>Cassandra runs on the JVM. Large heaps, high allocation rates from
+reads, and tombstone-heavy partitions produce <strong>GC pauses</strong>
+that stall a node for hundreds of milliseconds or more. A paused node
+looks, to its peers and to clients, like a slow or briefly dead node,
+which triggers the same quorum-latency and retry effects as a hot
+partition. Discord had spent significant effort on JVM and GC tuning,
+and still saw latency spikes they attributed to GC.</p>
+<h3 id="why-this-combination-is-hard">Why this combination is hard</h3>
+<p>Each problem alone is manageable. Together they compound:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Trigger</th>
+<th>Immediate effect</th>
+<th>Knock-on effect</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Hot partition on 3 nodes</td>
+<td>Those nodes saturate</td>
+<td>Unrelated queries on the same nodes slow down</td>
+</tr>
+<tr class="even">
+<td>Slow node in a quorum</td>
+<td>p99 latency rises for its replica sets</td>
+<td>Retries and queued requests add more load</td>
+</tr>
+<tr class="odd">
+<td>Compaction falls behind</td>
+<td>More SSTables per read</td>
+<td>Reads get slower, leaving less headroom for compaction</td>
+</tr>
+<tr class="even">
+<td>GC pause</td>
+<td>Node stalls</td>
+<td>Looks like a failure to clients and peers</td>
+</tr>
+</tbody>
+</table>
+<p>At this point Discord had a choice: keep tuning Cassandra, or change
+something structural. They changed two things: the database, and, more
+importantly, how traffic reached it.</p>
+<h3 id="why-scylladb">Why ScyllaDB</h3>
+<p>Discord had already moved other clusters to <strong>ScyllaDB</strong>
+and had good experience with it. ScyllaDB is a reimplementation of
+Cassandra’s data model and query protocol (CQL) in C++, built on the
+<strong>Seastar</strong> framework:</p>
+<ul>
+<li><strong>No garbage collector.</strong> Memory is managed manually,
+so there are no stop-the-world pauses.</li>
+<li><strong>Shard-per-core architecture.</strong> Each CPU core owns a
+slice of the node’s data and its own memory, and cores communicate by
+message passing, not locks. A hot partition saturates one core’s shard
+rather than the whole node, and there’s no lock contention.</li>
+<li><strong>Its own I/O and CPU schedulers</strong> that prioritise
+foreground queries over background work like compaction, adjusting
+compaction’s share automatically based on backlog. That targets the
+exact compaction-debt loop above.</li>
+<li><strong>Drop-in compatibility</strong>: the same schema, CQL drivers
+and data model, so the application code barely changed.</li>
+</ul>
+<p>It wasn’t free. Discord’s messages workload relied heavily on
+<strong>reverse queries</strong> (reading a partition in the opposite
+order to its clustering order, to page through history), which ScyllaDB
+at the time didn’t perform well enough for them. The ScyllaDB team
+prioritised improvements to reverse-query performance before the
+migration could go ahead, a reminder that “compatible” doesn’t mean
+“performs the same on your access pattern”.</p>
+<h2 id="the-new-design-data-services-in-front-of-scylladb">3. The new
+design: data services in front of ScyllaDB</h2>
+<p>Swapping Cassandra for ScyllaDB would have removed GC pauses and
+eased compaction, but it wouldn’t fix hot partitions: a channel with
+100,000 people reading at once would still send 100,000 reads to three
+replicas. Discord’s answer was an intermediary layer they call
+<strong>data services</strong>.</p>
+<h3 id="what-a-data-service-is">What a data service is</h3>
+<p>A data service is a small Rust service that sits between Discord’s
+API monolith and the database. It exposes one gRPC endpoint per database
+query (for example, “get messages in channel X before message Y”), and
+contains <strong>no business logic</strong>. Its job is to protect the
+database.</p>
+<p>The 2023 post highlights two features.</p>
+<figure class="diagram"><svg viewBox="0 0 760 316" role="img" aria-label="Hot channels hit the database once, not once per request" font-size="13"><defs><marker id="ds-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="34" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Hot channels hit the database once, not once per request</text><text x="24" y="72" font-size="11.5" fill="var(--cds-text-secondary)">Three reads of channel 123 at once</text><g fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"><path d="M174 106L264 150" marker-end="url(#ds-arrow)"></path><path d="M174 182H264" marker-end="url(#ds-arrow)"></path><path d="M174 258L264 214" marker-end="url(#ds-arrow)"></path><path d="M504 182H568" marker-end="url(#ds-arrow)"></path></g><g><rect x="24" y="84" width="150" height="44" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="99" y="110" text-anchor="middle" fill="var(--cds-text-primary)">API server</text><rect x="24" y="160" width="150" height="44" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="99" y="186" text-anchor="middle" fill="var(--cds-text-primary)">API server</text><rect x="24" y="236" width="150" height="44" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="99" y="262" text-anchor="middle" fill="var(--cds-text-primary)">API server</text></g><g><rect x="264" y="120" width="240" height="124" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.12" stroke="var(--cds-chart-categorical-1)" stroke-width="2"></rect><text x="384" y="146" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Rust data service</text><text x="384" y="168" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">owns channel 123, chosen</text><text x="384" y="184" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">by consistent hash</text><text x="384" y="208" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">one in-flight query per key;</text><text x="384" y="224" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">later callers share its result</text></g><g><rect x="568" y="146" width="168" height="72" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="652" y="174" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">ScyllaDB</text><text x="652" y="194" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">72 nodes</text></g><text x="536" y="174" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">1 query</text><text x="24" y="300" font-size="11.5" fill="var(--cds-text-secondary)">Coalescing turns a burst of reads on a hot channel into a single database read.</text></svg></figure>
+<p>Routing sends every request for a channel to the same data service
+instance, and that instance collapses concurrent identical reads into
+one query.</p>
+<h3 id="feature-1-request-coalescing">Feature 1: request coalescing</h3>
+<p>When several users ask for the same rows at the same moment, which is
+exactly what happens when an <code>@everyone</code> ping goes out in a
+big server, the data service runs the database query
+<strong>once</strong>:</p>
+<ol type="1">
+<li>The first request for a given key spawns a worker task that runs the
+query.</li>
+<li>Requests for the same key that arrive while it’s in flight don’t
+issue their own query. They <strong>subscribe</strong> to the existing
+task.</li>
+<li>When the result returns, every subscriber gets it.</li>
+</ol>
+<p>This pattern is often called <strong>single-flight</strong> (after
+Go’s <code>golang.org/x/sync/singleflight</code> package). It’s not a
+cache: nothing is stored after the query completes, so there’s no
+invalidation problem and no stale data beyond the duration of one query.
+It only removes duplicate work that overlaps in time, which is precisely
+the shape of a hot-channel burst. Rust’s async runtime (Tokio) made the
+many-subscribers-per-task model cheap and safe to write.</p>
+<h3 id="feature-2-routing-by-channel">Feature 2: routing by channel</h3>
+<p>Coalescing only works if concurrent requests for the same channel
+reach the <strong>same</strong> data service instance. If 100 instances
+each received one request for channel 123, each would run its own query.
+So Discord routes requests upstream of the data services by
+<strong>consistent hashing on the channel ID</strong> (the subject of
+yesterday’s piece), so all traffic for a channel lands on one instance.
+Requests for different channels spread evenly across the fleet.</p>
+<p>That’s a neat combination: consistent hashing makes coalescing
+effective, and coalescing caps the database load from any single hot key
+at roughly one query per key per round trip, no matter how many clients
+ask.</p>
+<h3 id="why-put-this-in-a-separate-layer">Why put this in a separate
+layer?</h3>
+<p>Discord could have added coalescing inside the API monolith. A
+separate service has advantages worth copying:</p>
+<ul>
+<li><strong>Language fit.</strong> Rust gave predictable latency (no GC,
+the same reason they wanted ScyllaDB), fearless concurrency for the
+subscriber model, and good performance per core.</li>
+<li><strong>Independent deploys and scaling.</strong> The data layer can
+scale with database traffic, not with API traffic.</li>
+<li><strong>One choke point for database protections.</strong>
+Concurrency limits, timeouts, query shapes and metrics all live in one
+place, rather than in every caller.</li>
+<li><strong>A seam for migrations.</strong> Because all database access
+goes through data services, changing the database underneath becomes a
+change in one service, not hundreds of call sites. This turned out to
+matter a great deal for the migration in the next section.</li>
+</ul>
+<h3 id="storage-underneath">Storage underneath</h3>
+<p>The database nodes themselves also changed. In a separate 2022 post,
+Discord described a “superdisk” setup on Google Cloud: a software RAID
+that mirrors <strong>local NVMe SSDs</strong>, for fast reads, with a
+<strong>persistent network disk</strong> for durability, configured so
+reads are served from the local SSDs and writes go to both. That gave
+them local-disk read latency without losing data when a VM’s local SSDs
+disappear. ScyllaDB nodes in the new cluster each held around 9 TB, more
+than double the Cassandra nodes’ average, which is part of why far fewer
+nodes were needed.</p>
+<h2 id="the-migration-the-results-and-the-lessons">4. The migration, the
+results and the lessons</h2>
+<h3 id="the-plan-they-abandoned">The plan they abandoned</h3>
+<p>The original plan was the textbook one:</p>
+<ol type="1">
+<li>Stand up the new ScyllaDB cluster.</li>
+<li>Start <strong>dual-writing</strong> new messages to both Cassandra
+and ScyllaDB, using a cutover point in time.</li>
+<li>Backfill historical data with ScyllaDB’s <strong>Spark-based
+migrator</strong>.</li>
+<li>Validate, switch reads, decommission Cassandra.</li>
+</ol>
+<p>The estimate for the Spark migration of trillions of messages was
+about <strong>three months</strong>. For a team whose main motivation
+was reducing on-call pain, three months of nursing the old cluster while
+also running a giant batch job was unattractive.</p>
+<h3 id="the-migrator-they-wrote-instead">The migrator they wrote
+instead</h3>
+<p>Discord already had Rust data-service code that read from and wrote
+to Cassandra-compatible databases efficiently. So they extended it into
+a purpose-built migrator:</p>
+<ul>
+<li>It read <strong>token ranges</strong> from Cassandra, so work could
+be split into independent chunks.</li>
+<li>It tracked progress per range in a local <strong>SQLite</strong>
+database as a checkpoint, so it could stop and resume without redoing
+work.</li>
+<li>It wrote into ScyllaDB as fast as the clusters allowed, reaching
+about <strong>3.2 million messages per second</strong>.</li>
+</ul>
+<p>The new estimate was <strong>9 days</strong>. And that’s roughly how
+it went, with one snag at the very end: progress stalled at about
+99.9999%. The stuck token ranges contained enormous runs of tombstones
+that had never been compacted away in Cassandra, so reading through them
+was extremely slow. Compacting those ranges in Cassandra cleared the
+blockage, and the migration completed within seconds afterwards.
+Tombstones, the trouble from 2017, made a final appearance.</p>
+<h3 id="validation-and-cutover">Validation and cutover</h3>
+<p>Before switching reads, they sent a small percentage of reads to
+<strong>both</strong> databases and compared results automatically, a
+technique often called <strong>shadow reads</strong>. Once mismatches
+were explained or fixed and the comparison stayed clean, reads moved to
+ScyllaDB. The cutover happened in May 2022, and the Cassandra cluster
+was decommissioned afterwards. Because all access went through data
+services, cutover was a change in one layer rather than across the
+codebase.</p>
+<h3 id="results">Results</h3>
+<table>
+<thead>
+<tr class="header">
+<th>Measure</th>
+<th>Cassandra (before)</th>
+<th>ScyllaDB + data services (after)</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Nodes</td>
+<td>177</td>
+<td>72</td>
+</tr>
+<tr class="even">
+<td>Disk per node</td>
+<td>about 4 TB average</td>
+<td>about 9 TB</td>
+</tr>
+<tr class="odd">
+<td>p99 read latency (historical messages)</td>
+<td>40 to 125 ms</td>
+<td>about 15 ms</td>
+</tr>
+<tr class="even">
+<td>p99 insert latency</td>
+<td>5 to 70 ms</td>
+<td>steady about 5 ms</td>
+</tr>
+</tbody>
+</table>
+<p>The post also points to an unplanned stress test: the <strong>2022
+FIFA World Cup final</strong> in December, where Argentina beat France
+on penalties. Discord’s message graphs show distinct spikes for each
+goal and for the shootout, and the new stack absorbed them without
+trouble. Fewer nodes, much tighter tail latency, and far less weekend
+firefighting.</p>
+<h3 id="lessons-that-generalise">Lessons that generalise</h3>
+<p><strong>1. Protect the database with a layer you control.</strong>
+The data-services layer did as much for Discord as the database change.
+Request coalescing (single-flight), per-key routing and concurrency
+limits are applicable to any database, including Postgres or DynamoDB.
+If hot keys hurt you today, a single-flight layer in front of the
+database is often the cheapest big win.</p>
+<p><strong>2. Pick the data model for the access pattern, then size the
+partitions.</strong> The <code>(channel_id, bucket)</code> key with
+10-day buckets aged well from billions to trillions of messages.
+Bounding partition size with a time bucket is a reusable trick for any
+wide-column or key-value store.</p>
+<p><strong>3. Prefer predictable latency over peak throughput.</strong>
+Most of Discord’s pain was the <em>tail</em>: GC pauses, compaction
+stalls, one slow replica in a quorum. Both of their main choices
+(ScyllaDB’s no-GC shard-per-core design, and Rust for data services)
+target tail latency rather than average throughput.</p>
+<p><strong>4. Understand the LSM trade-offs you’re buying.</strong>
+Cheap writes, more expensive reads, compaction as an ongoing tax, and
+tombstones that linger. Those trade-offs are shared by Cassandra,
+ScyllaDB, RocksDB-based systems and HBase. Plan deletes carefully, and
+watch compaction backlog as a first-class metric.</p>
+<p><strong>5. Migrations go faster when you build the tool that
+fits.</strong> A resumable, range-based copier with checkpoints and
+shadow-read validation turned a three-month project into nine days. The
+general recipe (split the keyspace, checkpoint progress, verify with
+dual reads, cut over behind an abstraction) applies to most large data
+migrations.</p>
+<p><strong>6. “Compatible” isn’t “equivalent”.</strong> Even a drop-in
+replacement needed upstream work on reverse queries before it could
+carry this workload. Test the new system against your real query mix,
+not a benchmark.</p>
+<h3 id="a-note-on-what-we-cant-see">A note on what we can’t see</h3>
+<p>Engineering blog posts are written after the fact, and they emphasise
+what worked. The posts don’t detail costs, licensing, or how much of the
+latency gain came from the database versus the data services versus the
+new disks. Treat the numbers as directionally reliable and
+Discord-specific, and the patterns as the transferable part.</p>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Discord’s bucket is a fixed 10 days for every channel. What are the
+costs for very quiet and very busy channels, and how would you design
+adaptive bucketing? What would it complicate?</li>
+<li>Request coalescing only helps when identical requests overlap in
+time. Which of your own hot paths have that shape, and which would need
+a real cache instead?</li>
+<li>Routing by consistent hash on <code>channel_id</code> sends a viral
+channel’s traffic to one data-service instance. When does that become a
+problem, and what would you do about it?</li>
+<li>If Discord had kept Cassandra but added the data-services layer, how
+much of the improvement do you think they would have got? Which problems
+would remain?</li>
+<li>Design a migration for a 50 TB table in your stack using the same
+recipe: range-split copy, checkpoints, shadow reads, cutover behind an
+abstraction. Where are the risky steps?</li>
+<li>The 2017 post chose Cassandra partly because it was “proven at
+scale”; the 2023 post moved away after five years. What signals would
+tell you, early, that a database choice is reaching its limits?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<p>Written from the references below. Links were not re-opened while
+writing this piece, so figures are as reported in Discord’s posts.</p>
+<ul>
+<li><a
+href="https://discord.com/blog/how-discord-stores-billions-of-messages">How
+Discord Stores Billions of Messages</a>, Stanislav Vishnevskiy, Discord
+Engineering, 2017</li>
+<li><a
+href="https://discord.com/blog/how-discord-stores-trillions-of-messages">How
+Discord Stores Trillions of Messages</a>, Bo Ingram, Discord
+Engineering, 2023</li>
+<li><a
+href="https://discord.com/blog/how-discord-supercharges-network-disks-for-extreme-low-latency">How
+Discord Supercharges Network Disks for Extreme Low Latency</a>, Discord
+Engineering, 2022</li>
+<li><a
+href="https://blog.x.com/engineering/en_us/a/2010/announcing-snowflake">Announcing
+Snowflake</a>, Twitter Engineering, 2010</li>
+<li><a
+href="https://docs.scylladb.com/manual/stable/architecture/">ScyllaDB
+architecture</a>, ScyllaDB docs, and the <a
+href="https://seastar.io">Seastar</a> framework</li>
+<li><a
+href="https://cassandra.apache.org/doc/latest/cassandra/architecture/storage-engine.html">Apache
+Cassandra: storage engine and compaction</a>, Apache Cassandra docs</li>
+<li><a
+href="https://pkg.go.dev/golang.org/x/sync/singleflight">singleflight
+package</a>, Go documentation (the request-coalescing pattern)</li>
+<li>Martin Kleppmann, <em>Designing Data-Intensive Applications</em>,
+chapter 3 (LSM trees and SSTables)</li>
+</ul>
+
+    </article>
+    <nav class="pager"><a class="prev" href="/reading/consistent-hashing.html"><span>Older</span>Consistent hashing and partitioning</a><span></span></nav>
+  </div></main>
+
+  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+</body>
+</html>

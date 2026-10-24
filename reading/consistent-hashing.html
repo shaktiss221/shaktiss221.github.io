@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Consistent hashing and partitioning · Shakti&#x27;s Knowledge Base</title>
+  <meta name="description" content="The hash ring and its successors (rendezvous, jump and Maglev hashing), range partitioning, and how real systems combine them.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site"><div class="wrap">
+    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/reading/" aria-current="page">Reading</a>
+    </nav>
+  </div></header>
+
+  <main><div class="wrap">
+    <article class="post">
+      <p class="crumb"><a href="/reading/">Reading</a></p>
+      <h1>Consistent hashing and partitioning</h1>
+      <p class="meta">October 27, 2026 · 16 min read<span class="tag">distributed systems</span><span class="tag">databases</span></p>
+<details class="toc"><summary>Contents</summary>
+<ul>
+<li><a href="#why-partition-and-why-mod-n-breaks"
+id="toc-why-partition-and-why-mod-n-breaks">1. Why partition, and why
+mod N breaks</a></li>
+<li><a href="#the-hash-ring-and-virtual-nodes"
+id="toc-the-hash-ring-and-virtual-nodes">2. The hash ring and virtual
+nodes</a></li>
+<li><a
+href="#beyond-the-ring-rendezvous-jump-maglev-bounded-loads-and-slots"
+id="toc-beyond-the-ring-rendezvous-jump-maglev-bounded-loads-and-slots">3.
+Beyond the ring: rendezvous, jump, Maglev, bounded loads and
+slots</a></li>
+<li><a href="#range-partitioning-hot-keys-and-real-systems"
+id="toc-range-partitioning-hot-keys-and-real-systems">4. Range
+partitioning, hot keys and real systems</a></li>
+<li><a href="#discussion-questions"
+id="toc-discussion-questions">Discussion questions</a></li>
+<li><a href="#sources" id="toc-sources">Sources</a></li>
+</ul>
+</details>
+<p>When you add a fifth server to four, <code>hash(key) mod N</code>
+moves about 80% of your keys, while consistent hashing moves only the
+20% that the new server should own. That single property, minimal
+movement when membership changes, is why consistent hashing shows up in
+caches, load balancers and databases. This piece covers the ring, its
+successors (rendezvous, jump and Maglev hashing), the alternative of
+range partitioning, and how real systems combine them. Reading time is
+about 30 minutes.</p>
+<h2 id="why-partition-and-why-mod-n-breaks">1. Why partition, and why
+mod N breaks</h2>
+<h3 id="partitioning-in-one-paragraph">Partitioning in one
+paragraph</h3>
+<p>When data or traffic outgrows one machine, you split it into
+<strong>partitions</strong> (also called shards, or vnodes, or tablets,
+or regions, depending on the system) and spread them across nodes. Every
+request then needs a fast answer to one question: <em>which node owns
+this key?</em> A good partitioning scheme answers it with:</p>
+<ul>
+<li><strong>Balance</strong>: each node gets roughly its fair share of
+keys and load.</li>
+<li><strong>Minimal disruption</strong>: when a node joins or leaves,
+only a small fraction of keys change owner.</li>
+<li><strong>Cheap lookup</strong>: no central directory on the hot path,
+or at most a small one every client can cache.</li>
+<li><strong>Locality, when you need it</strong>: range scans over
+adjacent keys stay on one or a few nodes.</li>
+</ul>
+<p>No single scheme maximises all four. Hash-based schemes are great at
+balance and terrible at locality; range-based schemes are the reverse.
+Consistent hashing is the hash-based family’s answer to the second
+requirement.</p>
+<h3 id="the-obvious-approach-hash-mod-n">The obvious approach: hash mod
+N</h3>
+<p>Hash the key and take the remainder modulo the number of nodes:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">node</mtext><mrow><mo stretchy="true" form="prefix">(</mo><mi>k</mi><mo stretchy="true" form="postfix">)</mo></mrow><mo>=</mo><mi>h</mi><mrow><mo stretchy="true" form="prefix">(</mo><mi>k</mi><mo stretchy="true" form="postfix">)</mo></mrow><mrow><mspace width="0.222em"></mspace><mo>mod</mo><mspace width="0.222em"></mspace><mi>N</mi></mrow></mrow><annotation encoding="application/x-tex">\text{node}(k) = h(k) \bmod N</annotation></semantics></math></p>
+<p>It balances perfectly, needs no directory, and is one CPU
+instruction. It’s what most people write first, and it’s fine as long as
+N never changes.</p>
+<p>Now add a node. A key stays where it is only if
+<code>h(k) mod 4</code> equals <code>h(k) mod 5</code>. For uniformly
+distributed hashes that happens for 1 key in 5. The other <strong>80%
+move</strong>. Going from 10 to 11 nodes moves about 91%. In general,
+nearly every key moves, when the minimum necessary is only the new
+node’s fair share, 1/(N+1).</p>
+<p>For a cache, that means a near-total miss storm the moment you scale:
+every client suddenly looks for its keys on the wrong server, the
+database behind the cache gets hammered, and the outage you added
+capacity to prevent arrives anyway. For a database, it means copying
+almost the entire dataset across the network to add one machine.</p>
+<h3 id="the-goal-stated-precisely">The goal, stated precisely</h3>
+<p>We want a function from keys to nodes such that when a node is added,
+the only keys that move are those that move <strong>to the new
+node</strong>, and when a node is removed, the only keys that move are
+the ones it <strong>owned</strong>. The expected fraction moved is then
+1/N, the theoretical minimum. Karger and colleagues at MIT defined
+exactly this in their 1997 paper “Consistent Hashing and Random Trees”,
+written to spread web-cache load without hot spots. The work became the
+foundation of Akamai, which several of the authors co-founded.</p>
+<p>The next two sections are different ways to achieve that goal, with
+different trade-offs in balance, memory and lookup speed.</p>
+<h2 id="the-hash-ring-and-virtual-nodes">2. The hash ring and virtual
+nodes</h2>
+<h3 id="the-ring">The ring</h3>
+<p>Picture the output space of a hash function, say 0 to 2⁶⁴ − 1, bent
+into a circle. Hash each <strong>node’s</strong> identifier onto the
+circle. Hash each <strong>key</strong> onto the same circle. A key
+belongs to the first node you reach walking clockwise from it.</p>
+<figure class="diagram"><svg viewBox="0 0 760 420" role="img" aria-label="Adding node D moves only the keys between C and D" font-size="13"><text x="24" y="34" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Adding node D moves only the keys between C and D</text><g><circle cx="250" cy="236" r="130" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></circle><path d="M150.41422239453289 319.56238925925015A130 130 0 0 1 150.41422239453283 152.4376107407499" fill="none" stroke="var(--cds-chart-categorical-1)" stroke-width="5" stroke-linecap="round"></path></g><g><circle cx="378.02500789158705" cy="258.5742630967009" r="5" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5"></circle><circle cx="205.53738136766307" cy="358.1600407021681" r="5" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5"></circle><circle cx="121.97499210841295" cy="213.4257369032991" r="5" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5"></circle><circle cx="227.42573690329894" cy="107.97499210841298" r="5" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5"></circle><text x="352.42000631326965" y="258.05941047736076" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">k1</text><text x="214.42990509413045" y="337.7280325617345" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">k2</text><text x="147.57999368673035" y="221.94058952263927" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--cds-text-primary)">k3</text><text x="231.94058952263916" y="137.57999368673038" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">k4</text></g><g><circle cx="333.5623892592501" cy="136.41422239453286" r="9" fill="var(--cds-chart-axis)"></circle><circle cx="315" cy="348.58330249197707" r="9" fill="var(--cds-chart-axis)"></circle><circle cx="150.41422239453289" cy="319.56238925925015" r="9" fill="var(--cds-chart-axis)"></circle><circle cx="150.41422239453283" cy="152.4376107407499" r="9" fill="var(--cds-chart-categorical-1)"></circle><text x="350.2748671111001" y="120.49706687343944" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">A</text><text x="328" y="375.09996299037243" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">B</text><text x="130.49706687343945" y="340.27486711110015" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">C</text><text x="124.4970668734394" y="139.72513288889988" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">D (new)</text></g><g><circle cx="452" cy="112" r="7" fill="var(--cds-chart-axis)"></circle><text x="468" y="116" fill="var(--cds-text-primary)">node, placed at hash(node id)</text><circle cx="452" cy="140" r="5" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5"></circle><text x="468" y="144" fill="var(--cds-text-primary)">key, placed at hash(key)</text><text x="444" y="188" fill="var(--cds-text-primary)">Each key belongs to the first</text><text x="444" y="206" fill="var(--cds-text-primary)">node clockwise from it.</text><text x="444" y="244" fill="var(--cds-text-primary)">When D joins, only the accent arc</text><text x="444" y="262" fill="var(--cds-text-primary)">changes owner: k3 moves from A to D.</text><text x="444" y="300" fill="var(--cds-text-secondary)">k1, k2 and k4 stay where they were.</text></g></svg></figure>
+<p>When a node joins, it takes over only the arc between itself and its
+counter-clockwise neighbour; everything else is untouched.</p>
+<p>That gives exactly the property we wanted:</p>
+<ul>
+<li><strong>Adding a node</strong> splits one arc. Only keys on the part
+of that arc now in front of the new node move, and they all move
+<em>to</em> the new node.</li>
+<li><strong>Removing a node</strong> merges its arc into its clockwise
+neighbour’s. Only its keys move, and they all go to that neighbour.</li>
+</ul>
+<p>Lookup is a binary search over the sorted list of node positions:
+O(log N) with N nodes, usually microseconds even for thousands of
+entries. Every client can hold the full ring, because it’s just a sorted
+array of (position, node) pairs.</p>
+<h3 id="the-balance-problem">The balance problem</h3>
+<p>With only a few nodes placed by random hashes, arcs come out very
+uneven. With N nodes at random positions, the largest arc is typically
+around ln(N) times the average. With 10 nodes, one may own two or three
+times its fair share, while another owns a sliver. Heterogeneous
+hardware makes it worse: a big machine should take more keys, but its
+position on the ring doesn’t know that.</p>
+<p>There’s also a recovery problem. When node A fails, its whole arc
+goes to one neighbour, which suddenly carries double load, exactly when
+the system is already stressed.</p>
+<h3 id="virtual-nodes">Virtual nodes</h3>
+<p>The fix is to place each physical node at <strong>many</strong>
+points on the ring, by hashing <code>A#0</code>, <code>A#1</code>, …,
+<code>A#255</code>. Each point is a <strong>virtual node</strong>
+(vnode), and each owns a small arc.</p>
+<ul>
+<li><strong>Balance improves</strong> with more points per node: with V
+vnodes per node, load imbalance shrinks roughly in proportion to 1/√V.
+Cassandra historically used 256 vnodes per node; with a smarter token
+allocation algorithm, newer versions default to 16 and still balance
+well.</li>
+<li><strong>Weighting is easy.</strong> Give a machine with twice the
+disk twice as many vnodes.</li>
+<li><strong>Failure spreads out.</strong> When a node dies, its hundreds
+of small arcs go to hundreds of different neighbours, so the extra load
+(and the work of re-replicating data) is shared by the whole cluster
+rather than dumped on one machine.</li>
+</ul>
+<p>The cost is memory and lookup size: 100 nodes × 256 vnodes is 25,600
+ring entries, still small, and a larger number of token ranges to track
+during repair and streaming.</p>
+<h3 id="replication-on-the-ring">Replication on the ring</h3>
+<p>The ring also gives a natural replica placement rule, introduced by
+Amazon’s Dynamo paper (2007): store each key on the first node clockwise
+<strong>and the next N−1 distinct physical nodes</strong> after it. That
+list is the key’s <strong>preference list</strong>. With vnodes you skip
+positions belonging to a physical node already in the list, and with
+rack or zone awareness you also skip nodes in a zone already used, so
+the three replicas land in three zones.</p>
+<p>Dynamo-style systems then use quorums: with N = 3 replicas, writes
+wait for W acknowledgements and reads for R, and choosing R + W &gt; N
+(for example 2 + 2) means every read quorum overlaps the latest write
+quorum. Cassandra’s <code>QUORUM</code> and <code>LOCAL_QUORUM</code>
+consistency levels are this idea.</p>
+<h3 id="ring-metadata">Ring metadata</h3>
+<p>Someone has to agree on where the nodes sit. Dynamo and Cassandra
+spread ring membership by <strong>gossip</strong>: every second, each
+node exchanges state with a few random peers, and changes reach the
+whole cluster in O(log N) rounds. Clients either learn the ring
+(Cassandra’s token-aware drivers send each request straight to a
+replica) or talk to any node, which forwards the request as coordinator.
+Newer Cassandra versions are moving membership to a strongly consistent
+transactional metadata log, because gossip-based ring changes were a
+historical source of subtle bugs during concurrent topology changes.</p>
+<h2
+id="beyond-the-ring-rendezvous-jump-maglev-bounded-loads-and-slots">3.
+Beyond the ring: rendezvous, jump, Maglev, bounded loads and slots</h2>
+<p>The ring with vnodes is the classic answer, but it isn’t the only
+one, and for several common situations it isn’t the best one.</p>
+<h3 id="rendezvous-highest-random-weight-hashing">Rendezvous (highest
+random weight) hashing</h3>
+<p>Proposed by Thaler and Ravishankar in the late 1990s, rendezvous
+hashing has no ring at all. For each key, compute a score for
+<strong>every</strong> node, <code>score = h(key, node)</code>, and pick
+the node with the highest score.</p>
+<pre class="python"><code>def owner(key, nodes):
+    return max(nodes, key=lambda n: hash64(f&quot;{n}:{key}&quot;))</code></pre>
+<p>Why it works: when a node is added, a key moves only if the new
+node’s score beats the old winner, which happens for 1/(N+1) of keys,
+and those keys all move to the new node. When a node is removed, only
+the keys it won move, each to its own second-highest scorer, so its load
+spreads evenly across all remaining nodes without any vnodes.</p>
+<ul>
+<li><strong>Replicas come free.</strong> The top k scores give a k-node
+preference list.</li>
+<li><strong>Weights</strong> are supported with a simple transform of
+the score (<code>-w / ln(h)</code> with h normalised to (0,1)).</li>
+<li><strong>The cost is O(N) per lookup.</strong> Fine for tens or a few
+hundred nodes, too slow for thousands without a hierarchy (hash to a
+group, then within it).</li>
+</ul>
+<p>It’s a good default when the node list is small and changes
+occasionally, such as choosing a cache server or a shard owner among a
+few dozen machines.</p>
+<h3 id="jump-consistent-hash">Jump consistent hash</h3>
+<p>Lamping and Veach at Google published jump consistent hash in 2014.
+It maps a key to a bucket number in <code>[0, N)</code> with no memory
+and a few lines of code:</p>
+<pre class="c"><code>int32_t jump_hash(uint64_t key, int32_t num_buckets) {
+    int64_t b = -1, j = 0;
+    while (j &lt; num_buckets) {
+        b = j;
+        key = key * 2862933555777941757ULL + 1;
+        j = (b + 1) * ((double)(1LL &lt;&lt; 31) / (double)((key &gt;&gt; 33) + 1));
+    }
+    return b;
+}</code></pre>
+<p>The idea: as the number of buckets grows from 1 to N, a key “jumps”
+to the newly added bucket with probability 1/n at step n, and the loop
+computes where those jumps land without visiting every step, in O(ln N)
+time. Balance is essentially perfect, and growing from N to N+1 moves
+exactly the expected 1/(N+1) of keys.</p>
+<p>The catch: buckets are <strong>numbered</strong>, and you can only
+add or remove at the end. Removing bucket 3 of 10 isn’t supported. That
+makes jump hash ideal for mapping keys to a fixed set of
+<strong>shards</strong> (which you then replicate and place on machines
+by other means), and a poor fit for mapping directly to servers that
+fail at random.</p>
+<h3 id="maglev-hashing">Maglev hashing</h3>
+<p>Google’s Maglev network load balancer (NSDI 2016) needed something
+else: lookups at line rate for millions of packets per second,
+near-perfect balance across backends, and <em>mostly</em> stable
+assignment so existing TCP connections keep hitting the same
+backend.</p>
+<p>Maglev builds a <strong>lookup table</strong> of fixed prime size M
+(for example 65,537). Each backend derives its own permutation of table
+slots from two hashes of its name (an offset and a skip). The table is
+filled round-robin: each backend in turn claims its next preferred empty
+slot, until the table is full. Lookup is
+<code>table[h(flow) mod M]</code>, a single array access.</p>
+<p>Every backend ends up with almost exactly M/N slots, so balance is
+excellent. When a backend changes, most slots keep their owner, though
+slightly more than the theoretical minimum move. Maglev accepts that
+trade-off and also keeps a connection-tracking table so in-flight
+connections survive. Envoy’s <code>MAGLEV</code> load-balancing policy
+and several eBPF load balancers use the same algorithm.</p>
+<h3 id="consistent-hashing-with-bounded-loads">Consistent hashing with
+bounded loads</h3>
+<p>Even with perfect key balance, <em>request</em> load is not balanced
+if some keys are much hotter. Mirrokni, Thorup and Zadimoghaddam
+(Google, 2016) proposed a simple fix: give every node a capacity of
+<code>(1 + ε)</code> times the average load. Hash as usual, but if the
+chosen node is at capacity, keep walking clockwise to the next node with
+room. With ε = 0.25, no node ever exceeds 125% of average, and keys
+still move only a bounded amount when nodes change.</p>
+<p>Vimeo implemented this in HAProxy in 2016 to route video requests to
+caches; their write-up reported a large drop in cache bandwidth
+imbalance, and the option (<code>hash-balance-factor</code>) is now part
+of HAProxy.</p>
+<h3 id="fixed-slots-plus-a-directory">Fixed slots plus a directory</h3>
+<p>Many databases avoid ring arithmetic entirely: hash keys into a
+<strong>large, fixed number of slots</strong>, and keep a small,
+explicit <strong>slot-to-node map</strong>. Redis Cluster uses 16,384
+slots; Couchbase uses 1,024 vBuckets; Elasticsearch fixes the number of
+primary shards when an index is created.</p>
+<p>Rebalancing then means moving whole slots from one node to another,
+chosen deliberately by an operator or a balancer, not by hash luck. The
+map is small enough for every client to cache. The trade-off is that the
+slot count is fixed up front: too few and you can’t spread across many
+nodes; Elasticsearch’s answer is the split and shrink APIs, which create
+a new index with a multiple or factor of the shard count.</p>
+<h3 id="comparison">Comparison</h3>
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Scheme</th>
+<th>Lookup cost</th>
+<th>Memory</th>
+<th>Balance</th>
+<th>Arbitrary node removal</th>
+<th>Typical use</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Ring + vnodes</td>
+<td>O(log NV)</td>
+<td>N × V entries</td>
+<td>Good with enough vnodes</td>
+<td>Yes</td>
+<td>Dynamo, Cassandra, Riak, memcached clients</td>
+</tr>
+<tr class="even">
+<td>Rendezvous</td>
+<td>O(N)</td>
+<td>Node list</td>
+<td>Very good</td>
+<td>Yes</td>
+<td>Small pools, replica choice</td>
+</tr>
+<tr class="odd">
+<td>Jump hash</td>
+<td>O(ln N)</td>
+<td>None</td>
+<td>Near perfect</td>
+<td>No, append/remove at end only</td>
+<td>Key to shard number</td>
+</tr>
+<tr class="even">
+<td>Maglev</td>
+<td>O(1)</td>
+<td>Table of M entries</td>
+<td>Near perfect</td>
+<td>Yes, slightly more churn</td>
+<td>L4/L7 load balancers</td>
+</tr>
+<tr class="odd">
+<td>Bounded loads</td>
+<td>Ring + walk</td>
+<td>Ring + load counts</td>
+<td>Capped at (1+ε)× average</td>
+<td>Yes</td>
+<td>Caches with hot keys</td>
+</tr>
+<tr class="even">
+<td>Fixed slots + map</td>
+<td>O(1)</td>
+<td>Slot map</td>
+<td>Controlled by balancer</td>
+<td>Yes, by moving slots</td>
+<td>Redis Cluster, Couchbase, Elasticsearch</td>
+</tr>
+</tbody>
+</table>
+<h2 id="range-partitioning-hot-keys-and-real-systems">4. Range
+partitioning, hot keys and real systems</h2>
+<h3 id="range-partitioning-the-other-family">Range partitioning: the
+other family</h3>
+<p>Hashing destroys key order: <code>user:1000</code> and
+<code>user:1001</code> land on unrelated nodes, so a range scan has to
+ask every partition. When queries need order (time ranges, prefix scans,
+“next page after X”), systems partition by <strong>key range</strong>
+instead: partition 1 holds <code>a</code> to <code>f</code>, partition 2
+holds <code>f</code> to <code>m</code>, and so on.</p>
+<p>This is how Bigtable (tablets), HBase (regions), Spanner (splits),
+CockroachDB (ranges) and TiKV (regions) work. A small, strongly
+consistent metadata table maps ranges to nodes, and clients cache it.
+Ranges are not fixed in advance; they <strong>split</strong> when they
+grow past a size threshold (CockroachDB’s default is 512 MiB) or when
+they get too much load, and adjacent small ranges
+<strong>merge</strong>. A background balancer moves ranges, or their
+Raft leaders, between nodes to even out disk and traffic.</p>
+<p>Range partitioning brings back the problem hashing solved:
+<strong>skew from key order</strong>. If keys increase monotonically
+(timestamps, auto-increment IDs, time-ordered UUIDs such as UUIDv7 or
+ULIDs), every new write lands in the last range, so one node takes all
+inserts while the rest sit idle. Splitting doesn’t help, because the new
+right-hand range immediately becomes the hot one. Spanner’s schema
+guidance explicitly warns against monotonically increasing primary keys
+for this reason. Common fixes:</p>
+<ul>
+<li><strong>Prefix with a hash or shard number</strong>:
+<code>(hash(user_id) % 16, timestamp)</code> spreads writes over 16
+ranges, at the cost of fanning out range reads across 16.</li>
+<li><strong>Bit-reverse sequential IDs</strong> so consecutive values
+land far apart.</li>
+<li><strong>Use random IDs</strong> (UUIDv4) where scans by ID aren’t
+needed, accepting worse index locality in B-tree storage.</li>
+</ul>
+<p>MongoDB lets you choose per collection: a ranged shard key for
+locality or a <strong>hashed shard key</strong> for even writes, which
+is a nice illustration that the choice is about your query pattern, not
+about which algorithm is better.</p>
+<h3 id="hot-keys-when-balance-by-key-isnt-balance-by-load">Hot keys:
+when balance by key isn’t balance by load</h3>
+<p>All the schemes above balance <strong>keys</strong>. Real traffic
+follows something like a Zipf distribution, so one key (a celebrity’s
+profile, a flash-sale product, a global counter) can receive more
+traffic than an entire node can serve. No partitioning function can
+split a single key. The options:</p>
+<ul>
+<li><strong>Cache it.</strong> Put a short-TTL cache, or even an
+in-process cache, in front of hot reads. Many “hot partition” problems
+disappear here.</li>
+<li><strong>Replicate reads.</strong> Serve reads for hot keys from all
+replicas, not just the leader, if staleness is acceptable.</li>
+<li><strong>Split the key.</strong> Write to <code>counter#0</code>
+through <code>counter#9</code> chosen at random and sum them on read.
+Writes spread across ten partitions; reads fan out to ten. Only worth it
+for keys you know are hot.</li>
+<li><strong>Let the platform adapt.</strong> DynamoDB’s adaptive
+capacity and automatic splitting for heat (covered in the DynamoDB piece
+earlier this month) do a version of this automatically, though they
+can’t split one item.</li>
+<li><strong>Bound the load</strong> with consistent hashing with bounded
+loads (section 3) for caches, so a hot range spills to neighbours.</li>
+</ul>
+<h3 id="rebalancing-without-hurting-yourself">Rebalancing without
+hurting yourself</h3>
+<p>Martin Kleppmann’s <em>Designing Data-Intensive Applications</em>
+groups rebalancing approaches into three:</p>
+<ol type="1">
+<li><strong>A fixed number of partitions</strong>, many more than nodes,
+moved whole (Redis Cluster, Couchbase, Elasticsearch, Riak). Simple and
+predictable; pick the count carefully up front.</li>
+<li><strong>Dynamic partitioning</strong> by splitting and merging
+ranges (HBase, CockroachDB, Spanner, MongoDB). Adapts to data volume;
+needs a metadata service.</li>
+<li><strong>Partitions proportional to nodes</strong>, each new node
+taking a share of existing ranges (Cassandra with vnodes).</li>
+</ol>
+<p>Whichever you use, be careful with fully automatic rebalancing
+triggered by failure detection. A node that is slow rather than dead
+gets declared failed, its data starts streaming elsewhere, the extra
+streaming load slows other nodes, and they get declared failed too. Many
+operators prefer automation that proposes moves and a human or a
+rate-limited controller that applies them, and every system that moves
+data throttles the streaming rate.</p>
+<h3 id="how-real-systems-choose">How real systems choose</h3>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>System</th>
+<th>Partitioning</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Amazon Dynamo (2007 paper)</td>
+<td>Ring with vnodes, preference lists, gossip</td>
+<td>The paper that popularised the approach for databases</td>
+</tr>
+<tr class="even">
+<td>Amazon DynamoDB</td>
+<td>Hash of partition key to partitions, split by size and heat,
+metadata-driven</td>
+<td>Not a gossip ring; partitions managed by a central control
+plane</td>
+</tr>
+<tr class="odd">
+<td>Apache Cassandra / ScyllaDB</td>
+<td>Ring of tokens (Murmur3), vnodes; ScyllaDB moving to tablets</td>
+<td>Token-aware drivers route directly to replicas</td>
+</tr>
+<tr class="even">
+<td>Redis Cluster / Valkey</td>
+<td>CRC16 to 16,384 fixed slots, slot map</td>
+<td>Slots moved explicitly; hash tags co-locate keys</td>
+</tr>
+<tr class="odd">
+<td>Memcached clients</td>
+<td>Ketama-style ring in the client library</td>
+<td>Servers know nothing about each other</td>
+</tr>
+<tr class="even">
+<td>Apache Kafka</td>
+<td><code>murmur2(key) mod partitions</code></td>
+<td>Adding partitions remaps keys and breaks per-key ordering: the mod N
+problem in the wild</td>
+</tr>
+<tr class="odd">
+<td>Spanner, CockroachDB, TiKV</td>
+<td>Range partitioning with automatic split and merge</td>
+<td>Each range is a Raft or Paxos group</td>
+</tr>
+<tr class="even">
+<td>MongoDB</td>
+<td>Ranged or hashed shard key, chunks moved by a balancer</td>
+<td>The choice is per collection</td>
+</tr>
+<tr class="odd">
+<td>Envoy, Google Maglev</td>
+<td>Ring hash or Maglev for request routing</td>
+<td>Session affinity for stateful backends</td>
+</tr>
+</tbody>
+</table>
+<p>The Kafka row deserves a second look, because it catches teams
+regularly. Kafka’s default partitioner is plain hash mod N, so
+increasing a topic from 12 to 16 partitions sends most keys to a
+different partition. Consumers that relied on all events for one key
+arriving in order on one partition may see them interleaved during the
+transition. The usual advice is to over-provision partitions at
+creation, or create a new topic and migrate.</p>
+<h3 id="summary">Summary</h3>
+<p>Use hash partitioning when access is by key and you need even load;
+reach for a ring with vnodes or rendezvous when nodes come and go, jump
+hash when mapping to numbered shards, and Maglev when lookups must be
+O(1). Use range partitioning when queries need order, and design keys so
+writes don’t all land at the end. In every case, plan separately for hot
+keys, because no hash function can split one.</p>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Work out by hand what fraction of keys move when a mod-N cache
+cluster grows from 8 to 9 nodes, and what fraction should move. What
+would that difference mean for your database during a traffic
+spike?</li>
+<li>You have 6 cache servers that rarely change and a client library you
+control. Would you choose a ring with vnodes, rendezvous hashing or jump
+hash? What would change your answer if servers failed several times a
+day?</li>
+<li>Your Kafka topic has 12 partitions and you need 48. Consumers rely
+on per-key ordering. Design the migration.</li>
+<li>A time-series table in a range-partitioned database uses
+<code>(timestamp, device_id)</code> as its primary key, and one node is
+at 100% CPU. Explain why, and compare two key designs that fix it,
+including what each costs at read time.</li>
+<li>One product page receives 30% of all reads during a sale. Which of
+the hot-key techniques would you apply, in what order, and why doesn’t
+better partitioning help?</li>
+<li>Automatic rebalancing triggered by failure detection can cascade.
+Sketch the guardrails you would put around a rebalancer for a 50-node
+cluster.</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<p>Written from the references below. Links were not re-opened while
+writing this piece.</p>
+<ul>
+<li>David Karger et al., <a
+href="https://dl.acm.org/doi/10.1145/258533.258660">“Consistent Hashing
+and Random Trees”</a>, STOC 1997</li>
+<li>Giuseppe DeCandia et al., <a
+href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf">“Dynamo:
+Amazon’s Highly Available Key-value Store”</a>, SOSP 2007</li>
+<li>David Thaler and Chinya Ravishankar, “Using Name-Based Mappings to
+Increase Hit Rates”, IEEE/ACM Transactions on Networking, 1998
+(rendezvous hashing)</li>
+<li>John Lamping and Eric Veach, <a
+href="https://arxiv.org/abs/1406.2294">“A Fast, Minimal Memory,
+Consistent Hash Algorithm”</a>, 2014 (jump hash)</li>
+<li>Daniel Eisenbud et al., <a
+href="https://research.google/pubs/maglev-a-fast-and-reliable-software-network-load-balancer/">“Maglev:
+A Fast and Reliable Software Network Load Balancer”</a>, NSDI 2016</li>
+<li>Vahab Mirrokni, Mikkel Thorup and Morteza Zadimoghaddam, <a
+href="https://arxiv.org/abs/1608.01350">“Consistent Hashing with Bounded
+Loads”</a>, 2016</li>
+<li><a
+href="https://medium.com/vimeo-engineering-blog/improving-load-balancing-with-a-new-consistent-hashing-algorithm-9f1bd75709ed">Improving
+load balancing with a new consistent-hashing algorithm</a>, Vimeo
+Engineering, 2016</li>
+<li><a
+href="https://dgryski.medium.com/consistent-hashing-algorithmic-tradeoffs-ef6b8e2fcae8">Consistent
+Hashing: Algorithmic Tradeoffs</a>, Damian Gryski, 2018</li>
+<li><a
+href="https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/">Redis
+cluster specification</a>, redis.io</li>
+<li><a href="https://cloud.google.com/spanner/docs/schema-design">Schema
+design best practices</a>, Google Cloud Spanner docs (hotspots and key
+choice)</li>
+<li>Martin Kleppmann, <em>Designing Data-Intensive Applications</em>,
+chapter 6 (Partitioning)</li>
+</ul>
+
+    </article>
+    <nav class="pager"><a class="prev" href="/reading/secrets-management.html"><span>Older</span>Secrets management: Vault, KMS and envelope encryption</a><a class="next" href="/reading/discord-scylladb.html"><span>Newer</span>Discord&#x27;s messages: Cassandra to ScyllaDB</a></nav>
+  </div></main>
+
+  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+</body>
+</html>

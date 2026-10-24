@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Exactly-once delivery: what it really means · Shakti&#x27;s Knowledge Base</title>
+  <meta name="description" content="Why no network delivers exactly once, and the patterns that make the effect happen once anyway: idempotent consumers, the outbox and Kafka transactions.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site"><div class="wrap">
+    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/reading/" aria-current="page">Reading</a>
+    </nav>
+  </div></header>
+
+  <main><div class="wrap">
+    <article class="post">
+      <p class="crumb"><a href="/reading/">Reading</a></p>
+      <h1>Exactly-once delivery: what it really means</h1>
+      <p class="meta">October 23, 2026 · 18 min read<span class="tag">distributed systems</span><span class="tag">messaging</span></p>
+<details class="toc"><summary>Contents</summary>
+<ul>
+<li><a href="#why-delivery-cant-be-exactly-once"
+id="toc-why-delivery-cant-be-exactly-once">1. Why delivery can’t be
+exactly once</a></li>
+<li><a href="#idempotent-consumers" id="toc-idempotent-consumers">2.
+Idempotent consumers</a></li>
+<li><a href="#the-dual-write-problem-and-the-transactional-outbox"
+id="toc-the-dual-write-problem-and-the-transactional-outbox">3. The
+dual-write problem and the transactional outbox</a></li>
+<li><a href="#how-kafka-does-exactly-once"
+id="toc-how-kafka-does-exactly-once">4. How Kafka does
+exactly-once</a></li>
+<li><a href="#other-systems-and-choosing-an-approach"
+id="toc-other-systems-and-choosing-an-approach">5. Other systems, and
+choosing an approach</a></li>
+<li><a href="#discussion-questions"
+id="toc-discussion-questions">Discussion questions</a></li>
+<li><a href="#sources" id="toc-sources">Sources</a></li>
+</ul>
+</details>
+<p>No network can deliver a message exactly once, but a system can make
+the <em>effect</em> of processing happen exactly once. Every working
+“exactly-once” system, from Kafka transactions to Stripe’s API, does the
+same thing underneath: at-least-once delivery plus deduplication or
+atomic commits. This piece explains why, then walks through the patterns
+you can use: idempotent consumers, the transactional outbox, and Kafka’s
+transactional machinery. Reading time is about 30 minutes.</p>
+<h2 id="why-delivery-cant-be-exactly-once">1. Why delivery can’t be
+exactly once</h2>
+<h3 id="three-guarantees">Three guarantees</h3>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Guarantee</th>
+<th>Sender behaviour</th>
+<th>Failure mode</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>At most once</td>
+<td>Send, never retry</td>
+<td>A lost message is gone for good</td>
+</tr>
+<tr class="even">
+<td>At least once</td>
+<td>Retry until acknowledged</td>
+<td>A lost <em>acknowledgement</em> causes a duplicate</td>
+</tr>
+<tr class="odd">
+<td>Exactly once</td>
+<td>?</td>
+<td>Requires telling “lost message” from “lost ack”</td>
+</tr>
+</tbody>
+</table>
+<p>Consider a producer sending a message to a broker. It sends, then
+waits for an ack. The ack doesn’t arrive within the timeout. Two very
+different things could have happened:</p>
+<ol type="1">
+<li>The message never reached the broker.</li>
+<li>The broker stored the message, but the ack was lost, or the broker
+crashed just after storing it, or the ack is simply slow.</li>
+</ol>
+<p>From the producer’s side these look identical. If it retries, case 2
+yields a duplicate. If it doesn’t, case 1 loses the message. No timeout
+value or protocol trick changes this, because the producer has no way to
+observe the broker’s state except through messages that can themselves
+be lost. This is a close cousin of the <strong>Two Generals’
+Problem</strong>: two parties communicating over an unreliable channel
+can never both be certain they agree.</p>
+<p>The same ambiguity repeats at every hop. A consumer reads a message,
+processes it, and then commits its offset (or deletes it from the queue,
+or acks it). If it crashes between processing and committing, the
+message is delivered again on restart. If it commits first and then
+crashes before processing, the message is lost. So the order of “do the
+work” and “record that I did it” decides whether you get at-least-once
+or at-most-once. There is no third order.</p>
+<h3 id="what-exactly-once-actually-promises">What “exactly once”
+actually promises</h3>
+<p>When a vendor says exactly-once, read it as one of these, and ask
+which:</p>
+<ul>
+<li><strong>Exactly-once processing within one system.</strong> Kafka
+Streams reading from Kafka and writing to Kafka can commit outputs and
+input offsets in one atomic transaction. Inside that closed loop, each
+input affects the output exactly once.</li>
+<li><strong>Effectively-once.</strong> Messages may be delivered and
+even processed more than once, but the observable effect (a row in a
+database, a charge on a card) happens once, because the processing is
+idempotent or deduplicated.</li>
+<li><strong>Deduplication within a window.</strong> SQS FIFO drops a
+repeat of the same deduplication ID within 5 minutes. A retry after 6
+minutes is a new message.</li>
+</ul>
+<p>None of these extend automatically to side effects outside the
+system. If your Kafka Streams app sends an email in the middle of
+processing, the email can go out twice, because Kafka’s transaction
+cannot roll back an SMTP call. Tyler Treat’s well-known 2015 post put it
+bluntly: you cannot have exactly-once delivery, and anyone claiming it
+is redefining terms.</p>
+<h3 id="the-practical-rule">The practical rule</h3>
+<p>Design for <strong>at-least-once delivery and idempotent
+processing</strong>. Make retries safe, then retry freely. Every pattern
+in the rest of this piece is a way to implement that rule.</p>
+<h2 id="idempotent-consumers">2. Idempotent consumers</h2>
+<p>An operation is <strong>idempotent</strong> if doing it twice has the
+same effect as doing it once. If every consumer is idempotent,
+duplicates stop mattering, and at-least-once delivery becomes
+effectively-once. There are four main ways to get there, from cheapest
+to most general.</p>
+<h3 id="option-1-make-the-operation-naturally-idempotent">Option 1: make
+the operation naturally idempotent</h3>
+<p>Some operations already are. <code>SET balance = 100</code> is
+idempotent; <code>balance = balance + 10</code> is not.
+<code>PUT /users/42 {...}</code> is; <code>POST /users</code> usually is
+not. Deleting a row by primary key is; appending to a log is not.</p>
+<p>So the first design question is whether the message can carry
+<strong>state instead of a delta</strong>. An event that says “order 981
+status is now SHIPPED” can be applied any number of times. An event that
+says “increment shipped count” cannot. Upserts help here:
+<code>INSERT ... ON CONFLICT (order_id) DO UPDATE</code> in Postgres, or
+a <code>PutItem</code> in DynamoDB keyed by a business ID, turn a create
+into something safe to repeat.</p>
+<p>State-carrying events have a catch: <strong>ordering</strong>. If
+“status = SHIPPED” is redelivered after a later “status = DELIVERED”,
+replaying it moves the order backwards. Fix that with a version
+number.</p>
+<h3 id="option-2-version-or-sequence-numbers-per-entity">Option 2:
+version or sequence numbers per entity</h3>
+<p>Give each entity a monotonically increasing version, and have the
+producer stamp it on every event. The consumer applies an event only if
+its version is newer than what it has stored:</p>
+<pre class="sql"><code>UPDATE orders
+   SET status = :status, version = :version
+ WHERE order_id = :id
+   AND version &lt; :version;</code></pre>
+<p>A duplicate or stale event matches zero rows and is silently dropped.
+This handles both duplicates and reordering in one conditional write.
+DynamoDB’s <code>ConditionExpression</code>, Cassandra’s lightweight
+transactions and Elasticsearch’s external versioning all offer the same
+primitive. It works best when one producer owns each entity’s history,
+so versions are easy to assign.</p>
+<h3 id="option-3-a-deduplication-table-the-inbox-pattern">Option 3: a
+deduplication table (the inbox pattern)</h3>
+<p>When the operation is not naturally idempotent, record which messages
+you have processed. Every message needs a unique, stable ID assigned by
+the <em>producer</em>, not by the broker, so a retry of the same logical
+message carries the same ID.</p>
+<p>The consumer then does its work and records the ID <strong>in the
+same database transaction</strong>:</p>
+<pre class="sql"><code>BEGIN;
+INSERT INTO processed_messages (message_id, processed_at)
+     VALUES (:msg_id, now());          -- fails on duplicate key
+UPDATE accounts SET balance = balance + :amount
+ WHERE account_id = :acct;
+COMMIT;</code></pre>
+<p>If the insert hits a unique-key violation, the message was already
+processed; roll back and ack it. If the process crashes anywhere before
+<code>COMMIT</code>, neither the effect nor the record exists, and the
+redelivery runs cleanly. If it crashes after <code>COMMIT</code> but
+before acking the broker, the redelivery hits the unique key and is
+skipped. This is sometimes called the <strong>idempotent
+receiver</strong> or <strong>inbox</strong> pattern.</p>
+<p>The essential property is that the dedup record and the business
+effect commit atomically. A common mistake is to keep the dedup set
+somewhere else, such as Redis:</p>
+<ol type="1">
+<li><code>SETNX msg:123</code> succeeds.</li>
+<li>The consumer updates Postgres.</li>
+<li>The consumer crashes before acking.</li>
+</ol>
+<p>On redelivery <code>SETNX</code> fails, so the message is skipped.
+That is fine. But reverse steps 1 and 2, or let step 2 fail after step
+1, and you either double-apply or drop the message. Two stores cannot be
+updated atomically without a distributed transaction. Redis-based dedup
+is acceptable as a fast pre-filter, not as the source of truth.</p>
+<p>The dedup table grows forever unless you prune it. Keep IDs at least
+as long as a duplicate could plausibly arrive: the broker’s maximum
+redelivery window, plus producer retry time, plus margin. Many teams
+keep 7 to 30 days and delete older rows in batches.</p>
+<h3 id="option-4-push-the-key-downstream">Option 4: push the key
+downstream</h3>
+<p>When the side effect lives in another service, you can’t share its
+transaction. Instead, pass a deterministic <strong>idempotency
+key</strong> derived from the message ID, and let the downstream service
+dedupe. Stripe’s API is the reference design: every <code>POST</code>
+accepts an <code>Idempotency-Key</code> header. Stripe stores the first
+response for that key (for 24 hours) and returns the same response to
+any retry with the same key, even if the first request is still in
+flight, in which case the retry gets a conflict error rather than a
+second charge.</p>
+<p>The chain only holds if every hop keeps the same key. A consumer that
+generates a fresh UUID for each attempt defeats the whole scheme. Derive
+keys from the input: <code>charge-for-order-981</code> or
+<code>hash(message_id + step_name)</code>.</p>
+<h3 id="side-effects-you-cant-make-idempotent">Side effects you can’t
+make idempotent</h3>
+<p>Some actions cannot be deduplicated by the receiver: sending an SMS
+through a provider that ignores idempotency keys, or calling a legacy
+system. The options are limited:</p>
+<ul>
+<li>Record intent first (“SMS for order 981 pending”) and the result
+after, and have a reconciler check pending items rather than blindly
+resend.</li>
+<li>Accept rare duplicates where the cost is low (a second notification
+email) and say so in the design doc.</li>
+<li>Put a human or a manual review step in front of anything where a
+duplicate is expensive and can’t be reconciled.</li>
+</ul>
+<h2 id="the-dual-write-problem-and-the-transactional-outbox">3. The
+dual-write problem and the transactional outbox</h2>
+<p>The hardest exactly-once bug is on the <em>producer</em> side: a
+service that must update its database <strong>and</strong> publish an
+event. Doing both reliably without a distributed transaction is the job
+of the transactional outbox.</p>
+<h3 id="why-dual-writes-break">Why dual writes break</h3>
+<p>An order service handles <code>POST /orders</code>. It inserts a row
+into <code>orders</code> and publishes <code>OrderCreated</code> to
+Kafka. Whichever order you do them in, a crash in between leaves the
+system inconsistent:</p>
+<ul>
+<li><strong>Write DB, then publish.</strong> If the process dies after
+the commit but before the publish, the order exists and nobody
+downstream ever hears about it. Inventory is never reserved; the
+customer is never emailed.</li>
+<li><strong>Publish, then write DB.</strong> If the DB write fails
+(constraint violation, deadlock, crash), downstream services act on an
+order that does not exist.</li>
+<li><strong>Publish inside the DB transaction, before commit.</strong>
+The publish can’t be rolled back if the commit then fails, so this is
+the second case in disguise.</li>
+</ul>
+<p>Retries don’t help, because after a crash nothing remembers that the
+publish was still owed. Two-phase commit (XA) across the database and
+the broker would solve it in theory, but most brokers don’t support XA,
+and where they do it is slow and couples the availability of both
+systems.</p>
+<h3 id="the-outbox-pattern">The outbox pattern</h3>
+<p>The fix is to stop writing to two systems. Write to one, and derive
+the other from it.</p>
+<figure class="diagram"><svg viewBox="0 0 760 384" role="img" aria-label="The outbox turns a dual write into one local commit" font-size="13"><defs><marker id="outbox-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="34" font-size="15" font-weight="600" fill="var(--cds-text-primary)">The outbox turns a dual write into one local commit</text><g fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"><path d="M174 134H214" marker-end="url(#outbox-arrow)"></path><path d="M464 134H504" marker-end="url(#outbox-arrow)"></path><path d="M620 170V264" marker-end="url(#outbox-arrow)"></path><path d="M504 300H464" marker-end="url(#outbox-arrow)"></path></g><g><rect x="24" y="98" width="150" height="72" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="99" y="126" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Order service</text><text x="99" y="146" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">handles the request</text></g><g><rect x="214" y="60" width="250" height="160" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.12" stroke="var(--cds-chart-categorical-1)" stroke-width="2"></rect><text x="339" y="84" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">One DB transaction</text><rect x="230" y="100" width="218" height="44" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="339" y="127" text-anchor="middle" fill="var(--cds-text-primary)">orders: new row</text><rect x="230" y="156" width="218" height="44" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="339" y="183" text-anchor="middle" fill="var(--cds-text-primary)">outbox: event row</text></g><g><rect x="504" y="98" width="232" height="72" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="620" y="122" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Outbox relay</text><text x="620" y="142" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">polls the table, or</text><text x="620" y="158" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">tails the WAL (CDC)</text></g><g><rect x="504" y="264" width="232" height="72" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="620" y="292" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Message broker</text><text x="620" y="312" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">at-least-once delivery</text></g><g><rect x="214" y="264" width="250" height="72" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="339" y="292" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Consumers</text><text x="339" y="312" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">dedupe by event ID (inbox)</text></g><text x="632" y="222" font-size="11.5" fill="var(--cds-text-secondary)">publish, then mark sent</text><text x="24" y="366" font-size="11.5" fill="var(--cds-text-secondary)">A crash between publish and mark-sent republishes the event, so consumers must still dedupe.</text></svg></figure>
+<p>The service writes the business row and an event row in one local
+transaction; a separate relay ships committed events to the broker.</p>
+<ol type="1">
+<li>In the same transaction as the business change, insert a row into an
+<code>outbox</code> table: event ID, aggregate type and ID, event type,
+payload, created time.</li>
+<li>Commit. The order and its event now either both exist or both don’t.
+This is plain single-database ACID.</li>
+<li>A separate <strong>relay</strong> process reads unsent outbox rows,
+publishes them to the broker, and marks them sent (or deletes
+them).</li>
+</ol>
+<p>The relay is at-least-once by construction. If it publishes and then
+crashes before marking the row, it publishes again on restart. That’s
+why consumers still need the idempotency patterns from section 2, keyed
+on the outbox event ID. The outbox guarantees <em>no lost events</em>;
+the inbox guarantees <em>no double effects</em>. Together they give
+effectively-once end to end.</p>
+<h3 id="polling-relay-vs-change-data-capture">Polling relay vs change
+data capture</h3>
+<p>There are two ways to build the relay.</p>
+<p><strong>Polling.</strong> A loop runs
+<code>SELECT ... FROM outbox WHERE sent_at IS NULL ORDER BY id LIMIT 500</code>,
+publishes, then updates <code>sent_at</code>. It is simple and works on
+any database. The costs are polling latency (often 100 ms to 1 s), load
+on the database, and care with concurrency: two relay instances must not
+grab the same rows, which <code>SELECT ... FOR UPDATE SKIP LOCKED</code>
+in Postgres and MySQL 8 handles neatly.</p>
+<p><strong>Change data capture (CDC).</strong> Instead of querying the
+table, tail the database’s replication log (the Postgres WAL via logical
+decoding, or the MySQL binlog). <strong>Debezium</strong> is the common
+tool and ships an “outbox event router” transform that turns outbox
+inserts into Kafka messages routed by aggregate type. CDC has lower
+latency, no polling load, and preserves commit order. The cost is
+operational: a Kafka Connect cluster, replication slots to monitor (an
+abandoned Postgres slot retains WAL until the disk fills), and schema
+handling.</p>
+<h3 id="ordering-and-the-outbox">Ordering and the outbox</h3>
+<p>If downstream consumers need events for one entity in order, publish
+with the aggregate ID as the partition key so all events for order 981
+land in one partition. A single-threaded relay that reads in commit
+order (CDC does this naturally) then preserves per-entity order. A
+polling relay ordered by an auto-increment ID can still misorder events,
+because IDs are assigned at insert time, not commit time: transaction A
+takes ID 10, transaction B takes ID 11 and commits first, and a poll in
+between sees 11 without 10. Per-aggregate version numbers in the payload
+let consumers detect and handle this.</p>
+<h3 id="related-patterns">Related patterns</h3>
+<ul>
+<li><strong>Listen to yourself.</strong> The service publishes the event
+first and updates its own database only when it consumes its own event.
+The log becomes the source of truth. This works, but read-your-writes
+becomes eventual for the service itself.</li>
+<li><strong>Event sourcing.</strong> The event log <em>is</em> the
+database, so there is no dual write at all. Powerful, but a much larger
+architectural commitment.</li>
+<li><strong>Sagas</strong> chain local transactions across services,
+each publishing through an outbox, with compensating actions to undo
+earlier steps if a later one fails.</li>
+</ul>
+<h2 id="how-kafka-does-exactly-once">4. How Kafka does exactly-once</h2>
+<p>Kafka added exactly-once semantics (EOS) in version 0.11 in 2017,
+through KIP-98. It is the best-known exactly-once implementation, and it
+is built from three pieces: an idempotent producer, transactions across
+partitions, and consumers that can skip uncommitted data. Each piece
+solves one failure from section 1.</p>
+<h3 id="piece-1-the-idempotent-producer">Piece 1: the idempotent
+producer</h3>
+<p>Problem: the producer sends a batch, the broker writes it, the ack is
+lost, the producer retries, and the partition now holds the batch
+twice.</p>
+<p>Fix: on startup the producer gets a <strong>producer ID
+(PID)</strong> from the broker. Every batch it sends carries the PID, a
+<strong>producer epoch</strong>, and a <strong>sequence number</strong>
+per partition, starting at 0 and increasing by one per record. The
+broker remembers the last sequence numbers it accepted from each PID for
+each partition (enough to cover the last 5 in-flight batches). A retry
+with a sequence it has already written is acknowledged but not appended.
+A gap in sequence numbers means something was lost, and the broker
+rejects the batch with an out-of-order error.</p>
+<p>This costs almost nothing, so since Kafka 3.0
+<code>enable.idempotence=true</code> and <code>acks=all</code> are the
+producer defaults. It also preserves ordering with up to 5 batches in
+flight, which previously required
+<code>max.in.flight.requests.per.connection=1</code>.</p>
+<p>The limit: dedup is per producer session and per partition. If the
+producer process restarts without a stable identity, it gets a new PID,
+and an application-level retry of the same message is a new message to
+Kafka.</p>
+<h3 id="piece-2-transactions">Piece 2: transactions</h3>
+<p>Problem: a stream processor reads from topic A, writes results to
+topics B and C, and commits its offset on A. A crash in the middle
+leaves some outputs written and the offset uncommitted, so the input is
+reprocessed and the outputs duplicated.</p>
+<p>Fix: make all of it one atomic transaction.</p>
+<pre class="java"><code>producer.initTransactions();          // registers transactional.id, fences zombies
+while (true) {
+  ConsumerRecords&lt;K, V&gt; in = consumer.poll(Duration.ofMillis(100));
+  producer.beginTransaction();
+  for (var r : in) producer.send(transform(r));
+  producer.sendOffsetsToTransaction(offsets(in), consumer.groupMetadata());
+  producer.commitTransaction();         // or abortTransaction() on error
+}</code></pre>
+<p>Under the hood:</p>
+<ul>
+<li>The producer is configured with a stable
+<strong><code>transactional.id</code></strong>. A broker acting as
+<strong>transaction coordinator</strong> for that ID keeps state in an
+internal <code>__transaction_state</code> topic.</li>
+<li><code>initTransactions()</code> bumps the producer epoch for that
+<code>transactional.id</code>. Any older instance still running with the
+same ID (a “zombie”, say one paused by a long GC that the group already
+replaced) now has a stale epoch, and its writes are rejected. This
+<strong>fencing</strong> is what stops two copies of the same worker
+from both committing.</li>
+<li>As the transaction writes to partitions, the coordinator records
+which partitions are involved. Consumer offsets are just writes to the
+<code>__consumer_offsets</code> topic, so they join the transaction like
+any other partition.</li>
+<li>On commit, the coordinator runs a two-phase commit: it writes
+PREPARE_COMMIT to its log, then writes a <strong>commit marker</strong>
+(a control record) into every involved partition, then writes
+COMPLETE_COMMIT. Once PREPARE_COMMIT is durable, the commit will finish
+even if the coordinator fails over.</li>
+</ul>
+<h3 id="piece-3-read_committed-consumers">Piece 3: read_committed
+consumers</h3>
+<p>Transactional records are written to partitions <em>before</em> the
+commit decision, interleaved with other data. A consumer with the
+default <code>isolation.level=read_uncommitted</code> sees them
+immediately, including ones that will later be aborted.</p>
+<p>With <code>isolation.level=read_committed</code>, a consumer reads
+only up to the <strong>last stable offset (LSO)</strong>: the earliest
+offset of any still-open transaction in that partition. Records from
+aborted transactions are filtered out using an index of aborted
+transactions that the broker keeps alongside each log segment. The cost
+is latency: a downstream consumer can’t see anything past an open
+transaction, so long transactions delay everyone reading that partition.
+A “hanging” transaction that never completes (historically possible
+after some client bugs) stalls the LSO until it times out, which is what
+later work such as KIP-890 hardened against on the server side.</p>
+<h3 id="kafka-streams-and-eos-v2">Kafka Streams and EOS v2</h3>
+<p>Kafka Streams wraps all of this behind one setting,
+<code>processing.guarantee=exactly_once_v2</code>. The first version
+created one transactional producer per input partition (task), which was
+expensive with thousands of partitions. KIP-447 (Kafka 2.6) changed
+fencing to use consumer group generation, allowing one producer per
+stream thread. Confluent’s measurements put the throughput cost of EOS
+at a few percent with reasonable commit intervals (the default is 100 ms
+under EOS); very short transactions cost more.</p>
+<h3 id="where-kafkas-guarantee-ends">Where Kafka’s guarantee ends</h3>
+<p>Kafka’s EOS covers <strong>read from Kafka, process, write to
+Kafka</strong>. It does not cover:</p>
+<ul>
+<li><strong>External side effects</strong> during processing: HTTP
+calls, emails, writes to Postgres. An aborted and retried transaction
+repeats them.</li>
+<li><strong>Sinks outside Kafka.</strong> Kafka Connect sink connectors
+get exactly-once only if the sink is idempotent (upsert by key) or
+stores offsets atomically with the data, for example writing the Kafka
+offset into the same Postgres transaction as the rows.</li>
+<li><strong>Producers that are not Kafka-aware.</strong> An upstream
+service that retries an HTTP request to your producer creates a new
+message, unless you dedupe with a business key.</li>
+</ul>
+<p>Source connectors gained exactly-once support in Kafka 3.3 (KIP-618),
+by writing source offsets transactionally with the records. The general
+lesson stands: Kafka gives you an atomic commit within its own log, and
+you extend it outward with idempotency.</p>
+<h2 id="other-systems-and-choosing-an-approach">5. Other systems, and
+choosing an approach</h2>
+<h3 id="how-other-brokers-and-engines-frame-it">How other brokers and
+engines frame it</h3>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>System</th>
+<th>What it offers</th>
+<th>The fine print</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Amazon SQS FIFO</td>
+<td>Drops a message whose <code>MessageDeduplicationId</code> (or
+content hash) was seen in the last 5 minutes</td>
+<td>A retry after 5 minutes is a new message. Consumers can still get a
+message twice if processing outlasts the visibility timeout.</td>
+</tr>
+<tr class="even">
+<td>Amazon SQS Standard</td>
+<td>At-least-once, best-effort ordering</td>
+<td>Duplicates are expected; consumers must be idempotent</td>
+</tr>
+<tr class="odd">
+<td>RabbitMQ</td>
+<td>At-least-once with publisher confirms and manual consumer acks</td>
+<td>No built-in broker-side dedup in the core; redelivered messages
+carry a <code>redelivered</code> flag as a hint</td>
+</tr>
+<tr class="even">
+<td>NATS JetStream</td>
+<td>Dedup on a <code>Nats-Msg-Id</code> header within a configurable
+window (2 minutes by default), plus double-ack for consumers</td>
+<td>Window-bound, like SQS FIFO</td>
+</tr>
+<tr class="odd">
+<td>Apache Pulsar</td>
+<td>Broker-side dedup by producer name and sequence ID; transactions
+across topics since 2.8</td>
+<td>Similar shape to Kafka’s idempotent producer and transactions</td>
+</tr>
+<tr class="even">
+<td>Apache Flink</td>
+<td>Exactly-once <em>state</em> via checkpoints; exactly-once
+<em>sinks</em> via two-phase commit</td>
+<td>The sink must support transactions or be idempotent</td>
+</tr>
+</tbody>
+</table>
+<p>Flink’s approach is worth a closer look, because it shows the same
+idea in a different shape. Flink periodically injects <strong>checkpoint
+barriers</strong> into the input streams. When an operator has seen the
+barrier on all inputs, it snapshots its state. Once every operator has
+checkpointed, the checkpoint is complete. After a failure, Flink rewinds
+all sources to the offsets saved in the last checkpoint and restores all
+operator state to match, so internal state reflects each input exactly
+once even though records are replayed.</p>
+<p>For output, Flink’s two-phase commit sinks open a transaction per
+checkpoint (for Kafka, a Kafka transaction), pre-commit when the barrier
+arrives, and commit only when the checkpoint is confirmed complete.
+Downstream <code>read_committed</code> readers therefore see output in
+checkpoint-sized steps, which adds latency equal to the checkpoint
+interval.</p>
+<h3 id="a-decision-guide">A decision guide</h3>
+<p>Work through these in order, and stop at the first that fits:</p>
+<ol type="1">
+<li><strong>Can the message carry state, not a delta?</strong> Then use
+upserts, plus per-entity version numbers if order matters. Cheapest and
+most robust.</li>
+<li><strong>Does the consumer write to a transactional
+database?</strong> Then use an inbox table: record the message ID in the
+same transaction as the effect.</li>
+<li><strong>Does the producer update a database and publish an
+event?</strong> Then use the transactional outbox, with CDC if you need
+low latency or strict per-entity ordering, polling if you want minimal
+infrastructure.</li>
+<li><strong>Is the whole pipeline Kafka in, Kafka out?</strong> Then
+turn on Kafka transactions or Kafka Streams
+<code>exactly_once_v2</code>, and make sure downstream consumers use
+<code>read_committed</code>.</li>
+<li><strong>Does the effect live in another service?</strong> Then pass
+a deterministic idempotency key and require the service to honour
+it.</li>
+<li><strong>None of the above?</strong> Accept at-least-once, make
+duplicates detectable, and reconcile.</li>
+</ol>
+<p>Across all six, three habits pay off:</p>
+<ul>
+<li><strong>Assign IDs at the source.</strong> The message ID must exist
+before the first send attempt and survive every retry. IDs generated by
+the broker or per attempt can’t deduplicate anything.</li>
+<li><strong>Commit the dedup record with the effect.</strong> If they
+live in different stores, you have reintroduced the dual-write
+problem.</li>
+<li><strong>Test the crash points.</strong> Kill the consumer between
+processing and acking, and the producer between commit and publish, in
+an integration test. Duplicate handling that has never been exercised
+usually doesn’t work.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>A teammate proposes deduplicating payment events using Redis
+<code>SETNX</code> with a 24-hour TTL before writing to Postgres. Walk
+through the crash scenarios. What would you change?</li>
+<li>Your outbox relay uses polling ordered by an auto-increment ID.
+Describe how two concurrent transactions could produce out-of-order
+events, and how a consumer could detect it.</li>
+<li>Kafka fences “zombie” producers using the epoch tied to a
+<code>transactional.id</code>. What could go wrong if two different
+workers were accidentally configured with the same
+<code>transactional.id</code>?</li>
+<li>SQS FIFO deduplicates within 5 minutes. Design a scenario where a
+duplicate still gets through, and say which layer should catch it.</li>
+<li>Why does <code>read_committed</code> increase end-to-end latency,
+and how would you size transaction or checkpoint intervals for a
+pipeline with a 2-second freshness target?</li>
+<li>Pick a workflow you know (sign-up, checkout, refunds). Which steps
+are naturally idempotent, which need keys, and which side effect would
+be hardest to make safe?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<p>Written from the references below. Links were not re-opened while
+writing this piece.</p>
+<ul>
+<li><a
+href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging">KIP-98:
+Exactly Once Delivery and Transactional Messaging</a>, Apache Kafka</li>
+<li><a
+href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-447%3A+Producer+scalability+for+exactly+once+semantics">KIP-447:
+Producer scalability for exactly once semantics</a>, Apache Kafka</li>
+<li><a
+href="https://www.confluent.io/blog/exactly-once-semantics-are-possible-heres-how-apache-kafka-does-it/">Exactly-once
+Semantics are Possible: Here’s How Kafka Does it</a>, Neha Narkhede,
+Confluent, 2017</li>
+<li><a
+href="https://www.confluent.io/blog/transactions-apache-kafka/">Transactions
+in Apache Kafka</a>, Apurva Mehta and Jason Gustafson, Confluent</li>
+<li><a
+href="https://bravenewgeek.com/you-cannot-have-exactly-once-delivery/">You
+Cannot Have Exactly-Once Delivery</a>, Tyler Treat, 2015</li>
+<li><a
+href="https://microservices.io/patterns/data/transactional-outbox.html">Pattern:
+Transactional outbox</a>, Chris Richardson</li>
+<li><a
+href="https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html">Outbox
+Event Router</a>, Debezium docs</li>
+<li><a href="https://stripe.com/blog/idempotency">Designing robust and
+predictable APIs with idempotency</a>, Brandur Leach, Stripe, 2017</li>
+<li><a
+href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/using-messagededuplicationid-property.html">Using
+the message deduplication ID in Amazon SQS</a>, AWS docs</li>
+<li><a
+href="https://flink.apache.org/2018/02/28/an-overview-of-end-to-end-exactly-once-processing-in-apache-flink-with-apache-kafka-too/">An
+overview of end-to-end exactly-once processing in Apache Flink</a>,
+Apache Flink blog, 2018</li>
+</ul>
+
+    </article>
+    <nav class="pager"><a class="prev" href="/reading/redis-internals.html"><span>Older</span>Redis internals: one thread, many tricks</a><a class="next" href="/reading/starrocks-olap.html"><span>Newer</span>StarRocks and how fast OLAP engines work</a></nav>
+  </div></main>
+
+  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+</body>
+</html>

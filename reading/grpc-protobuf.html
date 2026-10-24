@@ -1,0 +1,704 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>gRPC and Protobuf in production · Shakti&#x27;s Knowledge Base</title>
+  <meta name="description" content="Why field numbers and HTTP/2 streams explain Protobuf&#x27;s schema rules, gRPC streaming and its load-balancing quirks.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site"><div class="wrap">
+    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/reading/" aria-current="page">Reading</a>
+    </nav>
+  </div></header>
+
+  <main><div class="wrap">
+    <article class="post">
+      <p class="crumb"><a href="/reading/">Reading</a></p>
+      <h1>gRPC and Protobuf in production</h1>
+      <p class="meta">October 25, 2026 · 17 min read<span class="tag">networking</span><span class="tag">APIs</span></p>
+<details class="toc"><summary>Contents</summary>
+<ul>
+<li><a href="#the-protobuf-wire-format"
+id="toc-the-protobuf-wire-format">1. The Protobuf wire format</a></li>
+<li><a href="#schema-evolution-the-rules-that-keep-you-compatible"
+id="toc-schema-evolution-the-rules-that-keep-you-compatible">2. Schema
+evolution: the rules that keep you compatible</a></li>
+<li><a href="#grpc-on-top-of-http2" id="toc-grpc-on-top-of-http2">3.
+gRPC on top of HTTP/2</a></li>
+<li><a href="#running-grpc-in-production"
+id="toc-running-grpc-in-production">4. Running gRPC in
+production</a></li>
+<li><a href="#discussion-questions"
+id="toc-discussion-questions">Discussion questions</a></li>
+<li><a href="#sources" id="toc-sources">Sources</a></li>
+</ul>
+</details>
+<p>Protobuf identifies fields by number instead of by name, and gRPC
+carries those bytes over HTTP/2 streams. Those two facts explain almost
+everything about the pair: why messages are small, why the schema rules
+are what they are, why streaming is cheap, and why load balancing needs
+special care. Reading time is about 30 minutes.</p>
+<h2 id="the-protobuf-wire-format">1. The Protobuf wire format</h2>
+<h3 id="a-message-is-a-list-of-field-number-value-pairs">A message is a
+list of (field number, value) pairs</h3>
+<p>Take this schema:</p>
+<pre class="protobuf"><code>syntax = &quot;proto3&quot;;
+
+message User {
+  int32  id    = 1;
+  string name  = 2;
+  repeated int32 roles = 3;
+}</code></pre>
+<p>The names <code>id</code>, <code>name</code> and <code>roles</code>
+never appear on the wire. Only the numbers 1, 2 and 3 do. A serialized
+message is a flat sequence of <strong>records</strong>, each made of a
+<strong>tag</strong> followed by a value. The tag packs the field number
+and a 3-bit <strong>wire type</strong> into one varint:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">tag</mtext><mo>=</mo><mrow><mo stretchy="true" form="prefix">(</mo><mtext mathvariant="normal">field_number</mtext><mo>≪</mo><mn>3</mn><mo stretchy="true" form="postfix">)</mo></mrow><mspace width="0.278em"></mspace><mo stretchy="false" form="prefix">|</mo><mspace width="0.278em"></mspace><mtext mathvariant="normal">wire_type</mtext></mrow><annotation encoding="application/x-tex">\text{tag} = (\text{field\_number} \ll 3) \;|\; \text{wire\_type}</annotation></semantics></math></p>
+<p>There are only a handful of wire types, because the wire only needs
+to know how to <em>skip</em> a field, not what it means:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Wire type</th>
+<th>ID</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>VARINT</td>
+<td>0</td>
+<td>int32, int64, uint32, uint64, sint32, sint64, bool, enum</td>
+</tr>
+<tr class="even">
+<td>I64</td>
+<td>1</td>
+<td>fixed64, sfixed64, double</td>
+</tr>
+<tr class="odd">
+<td>LEN</td>
+<td>2</td>
+<td>string, bytes, nested messages, packed repeated fields</td>
+</tr>
+<tr class="even">
+<td>I32</td>
+<td>5</td>
+<td>fixed32, sfixed32, float</td>
+</tr>
+</tbody>
+</table>
+<p>(Types 3 and 4 were start-group and end-group, deprecated long
+ago.)</p>
+<h3 id="varints">Varints</h3>
+<p>Integers are encoded as <strong>base-128 varints</strong>: 7 bits of
+payload per byte, with the high bit set on every byte except the last,
+least significant group first. Small numbers take one byte; a full
+64-bit value takes up to ten.</p>
+<p>Worked example: <code>User { id: 150 }</code>.</p>
+<ul>
+<li>Tag: field 1, wire type 0 → <code>(1 &lt;&lt; 3) | 0 = 8</code> →
+byte <code>08</code>.</li>
+<li>Value 150 in binary is <code>1001 0110</code>. Split into 7-bit
+groups from the low end: <code>0010110</code> and <code>0000001</code>.
+The first group gets the continuation bit: <code>1001 0110</code> =
+<code>96</code>. The last doesn’t: <code>0000 0001</code> =
+<code>01</code>.</li>
+<li>Result: <code>08 96 01</code>. Three bytes. The JSON
+<code>{"id":150}</code> is ten.</li>
+</ul>
+<p>Adding <code>name: "ann"</code> appends tag
+<code>(2 &lt;&lt; 3) | 2 = 18</code> = <code>12</code>, a length
+<code>03</code>, then the UTF-8 bytes <code>61 6e 6e</code>. Six more
+bytes.</p>
+<h3 id="consequences-worth-remembering">Consequences worth
+remembering</h3>
+<ul>
+<li><strong>Field numbers 1 to 15 fit in a one-byte tag</strong>; 16 to
+2047 need two bytes. Put your most frequent fields in 1 to 15.</li>
+<li><strong>Negative numbers are expensive in
+<code>int32</code>/<code>int64</code>.</strong> They are sign-extended
+to 64 bits, so <code>-1</code> takes ten bytes. If a field is often
+negative, use <code>sint32</code>/<code>sint64</code>, which apply
+<strong>ZigZag encoding</strong> (0 → 0, -1 → 1, 1 → 2, -2 → 3) so small
+magnitudes stay small.</li>
+<li><strong>Fixed types win for large or random values.</strong> A hash
+or a random 64-bit ID is usually above 2⁵⁶, so a varint would use 9 or
+10 bytes; <code>fixed64</code> always uses 8.</li>
+<li><strong>Repeated scalars are packed</strong> in proto3 by default:
+one tag, one length, then the values back to back.
+<code>roles: [1, 2, 3]</code> is <code>1a 03 01 02 03</code>.</li>
+<li><strong>Default values are not sent.</strong> In proto3, a field
+equal to its zero value (0, empty string, false) is simply omitted.
+That’s compact, but it means the receiver can’t tell “set to 0” from
+“not set” unless the field has explicit presence (section 2).</li>
+<li><strong>Field order is not guaranteed and duplicates are
+legal.</strong> For a scalar, the last value wins; for a nested message,
+duplicates are merged. This is what makes concatenating two serialized
+messages equivalent to merging them.</li>
+<li><strong>The wire is not self-describing.</strong> Without the
+schema, a decoder sees <code>field 1: varint 150</code> and can’t know
+whether that’s an <code>int32</code>, an <code>enum</code> or a
+<code>bool</code>. <code>protoc --decode_raw</code> shows exactly this
+view and is handy for debugging.</li>
+</ul>
+<h3 id="unknown-fields">Unknown fields</h3>
+<p>When a parser meets a field number not in its schema, it uses the
+wire type to skip the right number of bytes and, in current
+implementations, <strong>keeps the raw bytes</strong> as unknown fields.
+If the message is re-serialized, those bytes are written back out. So an
+old service that reads a message, changes one field and forwards it
+doesn’t silently strip fields added by a newer producer. (Proto3 briefly
+dropped unknown fields in its early releases; preservation was restored
+in 3.5.)</p>
+<p>This skip-and-preserve behaviour is the mechanical basis of forward
+and backward compatibility, which the next section turns into rules.</p>
+<h3 id="is-it-actually-faster-than-json">Is it actually faster than
+JSON?</h3>
+<p>Usually smaller (often 3 to 10 times for numeric-heavy payloads, less
+for text-heavy ones) and cheaper to parse, because there’s no
+tokenizing, no quoting or escaping, and no field-name string matching.
+The gap narrows if JSON is compressed and the payload is mostly long
+strings. The bigger practical win is often not raw speed but having one
+schema that generates typed clients in a dozen languages.</p>
+<h2 id="schema-evolution-the-rules-that-keep-you-compatible">2. Schema
+evolution: the rules that keep you compatible</h2>
+<p>In a real system, producers and consumers deploy at different times.
+For a while, new code reads old messages (<strong>backward
+compatibility</strong>) and old code reads new messages (<strong>forward
+compatibility</strong>). Protobuf supports both, as long as you follow
+rules that all come from one principle: <strong>a field number is a
+permanent contract for one meaning and one wire type.</strong></p>
+<h3 id="safe-changes">Safe changes</h3>
+<ul>
+<li><strong>Add a field</strong> with a new, never-used number. Old
+readers skip it as unknown (and preserve it); new readers see the zero
+value when reading old messages.</li>
+<li><strong>Remove a field</strong>, provided you
+<strong>reserve</strong> its number and name so nobody reuses them:</li>
+</ul>
+<pre class="protobuf"><code>message User {
+  reserved 4, 7 to 9;
+  reserved &quot;email&quot;, &quot;legacy_flags&quot;;
+  int32  id   = 1;
+  string name = 2;
+}</code></pre>
+<ul>
+<li><strong>Rename a field.</strong> The name isn’t on the wire, so
+binary compatibility is unaffected. But renames <em>do</em> break the
+JSON mapping (which uses names), generated code that references the old
+name, and any field masks stored as strings. Treat a rename as an API
+change for anything other than binary Protobuf.</li>
+<li><strong>Add enum values</strong>, with care: an old reader that
+receives an unknown value keeps the number (proto3 enums are “open”),
+but its code probably has no branch for it. Always define a zero value
+like <code>ROLE_UNSPECIFIED = 0</code>, and write code that handles
+unknown values.</li>
+<li><strong>Some type changes</strong> where the wire type and encoding
+match: <code>int32</code>, <code>uint32</code>, <code>int64</code>,
+<code>uint64</code> and <code>bool</code> are all varints and
+interconvert, with truncation if values don’t fit. <code>string</code>
+and <code>bytes</code> are compatible if the bytes are valid UTF-8. An
+embedded message and <code>bytes</code> holding its serialized form are
+compatible.</li>
+<li><strong>Move a single field into a new <code>oneof</code></strong>
+is safe; moving several existing fields into one is not, because old
+writers could set more than one.</li>
+</ul>
+<h3 id="breaking-changes">Breaking changes</h3>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Change</th>
+<th>Why it breaks</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Reusing a deleted field number</td>
+<td>Old messages in queues, logs and caches get decoded as the new field
+with the wrong meaning. This has caused real data corruption.</td>
+</tr>
+<tr class="even">
+<td>Changing a field’s number</td>
+<td>Equivalent to delete plus add; existing data stops mapping to
+it</td>
+</tr>
+<tr class="odd">
+<td>Changing wire-incompatible types (<code>int32</code> to
+<code>string</code>, <code>sint32</code> to <code>int32</code>)</td>
+<td>Different encoding; values are misread or rejected</td>
+</tr>
+<tr class="even">
+<td>Changing <code>repeated</code> to singular for messages, or similar
+shape changes</td>
+<td>Parsers merge or take the last value; data silently lost</td>
+</tr>
+<tr class="odd">
+<td>Changing a field’s default meaning (“0 now means unlimited”)</td>
+<td>Not detectable by any tool, but old and new code disagree</td>
+</tr>
+</tbody>
+</table>
+<p>The first row is the important one. Messages live far longer than
+code: in Kafka topics, in databases as blobs, in caches, in backups.
+Google’s own guidance treats reusing a field number as one of the few
+true sins of Protobuf.</p>
+<h3 id="presence-zero-versus-not-set">Presence: “zero” versus “not
+set”</h3>
+<p>In proto2, every singular field had <strong>explicit
+presence</strong>: generated code had <code>has_name()</code>. Proto3
+initially dropped it for scalars, so <code>age: 0</code> and “age not
+provided” were indistinguishable. That turned out to be painful,
+especially for partial updates (“set this field to 0” versus “don’t
+touch it”).</p>
+<p>The fixes, in order of history:</p>
+<ol type="1">
+<li><strong>Wrapper types</strong> such as
+<code>google.protobuf.Int32Value</code>. A message field always has
+presence, so a null wrapper means unset. Verbose but works
+everywhere.</li>
+<li><strong><code>optional</code></strong>** in proto3** (stable since
+protoc 3.15, in 2021). <code>optional int32 age = 5;</code> gives you
+<code>has_age()</code> again.</li>
+<li><strong>Editions</strong> (Edition 2023 onward), the successor to
+<code>syntax = "proto2"</code> and <code>"proto3"</code>. Instead of two
+dialects, each behaviour (field presence, enum openness, packed
+encoding, UTF-8 validation) becomes a <strong>feature</strong> with a
+file-wide default that can be overridden per field. Edition 2023
+defaults to explicit presence.</li>
+</ol>
+<p>For partial updates, the standard Google API pattern is a
+<strong><code>FieldMask</code></strong>: the request carries the new
+resource plus a list of paths to change
+(<code>update_mask: { paths: ["display_name", "address.city"] }</code>).
+Only listed fields are written, which separates “set to empty” from
+“leave alone” without relying on presence at all.</p>
+<h3 id="enforcing-the-rules-buf">Enforcing the rules: Buf</h3>
+<p>Rules that rely on people remembering them get broken.
+<strong>Buf</strong> is the common tool for enforcing them in CI:</p>
+<ul>
+<li><code>buf lint</code> checks style and structure (naming, package
+layout, every enum has a zero <code>UNSPECIFIED</code> value, request
+and response messages are unique per RPC).</li>
+<li><code>buf breaking --against '.git#branch=main'</code> compares the
+schema to a previous version and fails the build on changes that break
+wire, JSON or generated-code compatibility, at a level you choose
+(<code>FILE</code>, <code>PACKAGE</code>, <code>WIRE_JSON</code>,
+<code>WIRE</code>).</li>
+<li>The <strong>Buf Schema Registry</strong> hosts versioned modules and
+generates client SDKs, so consumers pull a package rather than copying
+<code>.proto</code> files around.</li>
+</ul>
+<p>A simple, effective policy: every <code>.proto</code> change goes
+through <code>buf breaking</code> against <code>main</code>, deleted
+fields must be reserved in the same change, and any intentional break
+requires a new package version (<code>acme.user.v2</code>) instead of
+modifying <code>v1</code>.</p>
+<h3 id="versioning-packages">Versioning packages</h3>
+<p>Google’s API design guide recommends putting the major version in the
+package (<code>google.pubsub.v1</code>) and keeping each major version
+compatible forever. New, incompatible versions get new packages and can
+be served side by side, with the server translating between them. That
+mirrors REST URL versioning, but the compiler and
+<code>buf breaking</code> enforce it.</p>
+<h2 id="grpc-on-top-of-http2">3. gRPC on top of HTTP/2</h2>
+<p>gRPC is a thin convention layered on HTTP/2: each RPC is one HTTP/2
+<strong>stream</strong>, the method name is the URL path, messages
+travel in DATA frames, and the result comes back in
+<strong>trailers</strong>. Google open-sourced it in 2015 as the public
+successor to its internal RPC system, Stubby.</p>
+<h3 id="defining-a-service">Defining a service</h3>
+<pre class="protobuf"><code>service Users {
+  rpc GetUser(GetUserRequest) returns (User);                       // unary
+  rpc ListUsers(ListUsersRequest) returns (stream User);            // server streaming
+  rpc ImportUsers(stream User) returns (ImportSummary);             // client streaming
+  rpc Chat(stream ChatMessage) returns (stream ChatMessage);        // bidirectional
+}</code></pre>
+<p><code>protoc</code> (or <code>buf generate</code>) produces a client
+<strong>stub</strong> and a server interface in each target language.
+Calling <code>client.GetUser(ctx, req)</code> looks like a local
+function call, which is both the appeal and, as section 4 explains, a
+trap.</p>
+<h3 id="what-a-call-looks-like-on-the-wire">What a call looks like on
+the wire</h3>
+<figure class="diagram"><svg viewBox="0 0 760 392" role="img" aria-label="A unary gRPC call is one HTTP/2 stream that ends in trailers" font-size="13"><defs><marker id="grpc-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--cds-chart-axis)"></path></marker><marker id="grpc-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--cds-chart-categorical-1)"></path></marker></defs><text x="24" y="32" font-size="15" font-weight="600" fill="var(--cds-text-primary)">A unary gRPC call is one HTTP/2 stream that ends in trailers</text><g><rect x="70" y="52" width="160" height="36" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="150" y="75" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Client stub</text><line x1="150" y1="88" x2="150" y2="344" stroke="var(--cds-chart-grid)" stroke-width="1.25"></line></g><g><rect x="530" y="52" width="160" height="36" rx="8" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="610" y="75" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Server</text><line x1="610" y1="88" x2="610" y2="344" stroke="var(--cds-chart-grid)" stroke-width="1.25"></line></g><g fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"><path d="M150 126H610" marker-end="url(#grpc-arrow)"></path><path d="M150 176H610" marker-end="url(#grpc-arrow)"></path><path d="M610 226H150" marker-end="url(#grpc-arrow)"></path><path d="M610 276H150" marker-end="url(#grpc-arrow)"></path><path d="M610 326H150" stroke="var(--cds-chart-categorical-1)" stroke-width="2" marker-end="url(#grpc-arrow-accent)"></path></g><text x="380" y="118" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">HEADERS: POST /acme.user.v1.Users/GetUser, grpc-timeout 2S</text><text x="380" y="168" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">DATA: 5-byte prefix + Protobuf request, END_STREAM</text><text x="380" y="218" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">HEADERS: :status 200, content-type application/grpc</text><text x="380" y="268" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">DATA: 5-byte prefix + Protobuf response</text><text x="380" y="318" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--cds-text-primary)">TRAILERS: grpc-status 0 (OK), END_STREAM</text><text x="24" y="376" font-size="11.5" fill="var(--cds-text-secondary)">The call&#x27;s real outcome is in the trailers; HTTP status 200 only means the stream was set up.</text></svg></figure>
+<p>A unary call is five frames on a single stream: request headers and
+body, then response headers, body and trailers.</p>
+<p>The pieces:</p>
+<ul>
+<li><strong>Request headers.</strong> <code>:method POST</code>,
+<code>:path /acme.user.v1.Users/GetUser</code> (package, service,
+method), <code>content-type: application/grpc</code> (or
+<code>application/grpc+proto</code>), <code>te: trailers</code>, an
+optional <code>grpc-timeout</code> (the deadline, for example
+<code>2S</code> or <code>150m</code> for milliseconds),
+<code>grpc-encoding</code> for compression, and any custom
+<strong>metadata</strong> such as <code>authorization</code> or a trace
+ID. Binary metadata keys end in <code>-bin</code> and are
+base64-encoded.</li>
+<li><strong>Length-prefixed messages.</strong> Each message in a DATA
+frame is preceded by 5 bytes: a 1-byte compressed flag and a 4-byte
+big-endian length. That framing is what lets a stream carry many
+messages, independent of how HTTP/2 splits DATA frames.</li>
+<li><strong>Trailers.</strong> The final HEADERS frame carries
+<code>grpc-status</code> (0 means OK), an optional
+<code>grpc-message</code>, and optionally
+<code>grpc-status-details-bin</code> with a serialized
+<code>google.rpc.Status</code> holding rich error details. The HTTP
+status is 200 even for application errors, because the HTTP layer
+succeeded. A call that fails before any response can send a
+“trailers-only” response with everything in one HEADERS frame.</li>
+</ul>
+<p>Trailers are why gRPC needs end-to-end HTTP/2 support. Many proxies,
+CDNs and browsers historically dropped or ignored HTTP trailers, which
+is one reason gRPC doesn’t work directly from a browser (section 4).</p>
+<h3 id="why-http2-matters">Why HTTP/2 matters</h3>
+<ul>
+<li><strong>Multiplexing.</strong> Many concurrent RPCs share one TCP
+connection as independent streams, so there’s no connection-per-request
+cost and no head-of-line blocking at the HTTP layer. (TCP-level
+head-of-line blocking remains; one lost packet stalls every stream on
+that connection.)</li>
+<li><strong>Header compression (HPACK).</strong> Repeated headers like
+<code>:path</code>, <code>content-type</code> and auth tokens shrink to
+a few bytes after the first request.</li>
+<li><strong>Flow control</strong> per stream and per connection, using
+WINDOW_UPDATE frames. A slow consumer of a streaming RPC pushes back on
+the sender instead of buffering without limit. Most implementations use
+dynamic window sizing based on the measured bandwidth-delay
+product.</li>
+<li><strong>Long-lived connections</strong> with PING frames for
+keepalive. That’s efficient, but it complicates load balancing, as
+section 4 explains.</li>
+</ul>
+<h3 id="the-four-call-types-in-practice">The four call types in
+practice</h3>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Type</th>
+<th>Good for</th>
+<th>Watch out for</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Unary</td>
+<td>Most request/response APIs</td>
+<td>Nothing special; it’s the default</td>
+</tr>
+<tr class="even">
+<td>Server streaming</td>
+<td>Large result sets, change feeds, progress updates, LLM token
+streams</td>
+<td>Consumers must handle a stream that ends with an error after partial
+results</td>
+</tr>
+<tr class="odd">
+<td>Client streaming</td>
+<td>Uploads, batching telemetry from a device</td>
+<td>The server only replies at the end; plan for partial failure</td>
+</tr>
+<tr class="even">
+<td>Bidirectional</td>
+<td>Chat, collaborative sessions, interactive protocols</td>
+<td>Long-lived streams pin a client to one backend; reconnect logic and
+backpressure are your job</td>
+</tr>
+</tbody>
+</table>
+<p>One practical rule: a stream is not a durable queue. If a connection
+drops mid-stream, nothing is redelivered automatically. Design streaming
+APIs so clients can resume, for example by passing the last sequence
+number or a resume token on reconnect.</p>
+<h3 id="interceptors">Interceptors</h3>
+<p>Most gRPC libraries offer <strong>interceptors</strong> (middleware)
+on both client and server, for unary and streaming calls. They’re where
+cross-cutting concerns live: authentication from metadata, deadline
+propagation, logging, metrics, OpenTelemetry tracing, retries on the
+client, and panic recovery on the server.</p>
+<h2 id="running-grpc-in-production">4. Running gRPC in production</h2>
+<h3 id="deadlines-not-timeouts">Deadlines, not timeouts</h3>
+<p>gRPC’s guidance is blunt: <strong>always set a deadline.</strong> A
+deadline is an absolute point in time by which the whole call must
+finish. The client sends it as <code>grpc-timeout</code>, and servers in
+most languages expose it through the request context
+(<code>ctx.Deadline()</code> in Go,
+<code>context.time_remaining()</code> in Python).</p>
+<p>The key property is <strong>propagation</strong>. If service A has 2
+seconds left and calls B, B should pass on its <em>remaining</em>
+budget, minus a little, to C. When the deadline passes, every hop can
+stop work immediately instead of computing an answer nobody is waiting
+for. Without deadlines, one slow dependency leaves threads and
+connections hanging at every layer above it, which is how small
+slowdowns become cascading outages. A call without a deadline
+effectively has an infinite one.</p>
+<p>Cancellation propagates the same way: if a client cancels or
+disconnects, the server’s context is cancelled, and well-written
+handlers check it and stop.</p>
+<h3 id="status-codes">Status codes</h3>
+<p>gRPC defines 17 status codes (0 to 16). The ones you’ll handle
+most:</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Code</th>
+<th>Name</th>
+<th>Meaning</th>
+<th>Retry?</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>0</td>
+<td>OK</td>
+<td>Success</td>
+<td>n/a</td>
+</tr>
+<tr class="even">
+<td>3</td>
+<td>INVALID_ARGUMENT</td>
+<td>The request is bad regardless of system state</td>
+<td>No</td>
+</tr>
+<tr class="odd">
+<td>4</td>
+<td>DEADLINE_EXCEEDED</td>
+<td>Ran out of time; the operation may or may not have happened</td>
+<td>Only if idempotent</td>
+</tr>
+<tr class="even">
+<td>5</td>
+<td>NOT_FOUND</td>
+<td>Resource doesn’t exist</td>
+<td>No</td>
+</tr>
+<tr class="odd">
+<td>7</td>
+<td>PERMISSION_DENIED</td>
+<td>Caller identified but not allowed</td>
+<td>No</td>
+</tr>
+<tr class="even">
+<td>8</td>
+<td>RESOURCE_EXHAUSTED</td>
+<td>Quota or rate limit hit, or a message too large</td>
+<td>Later, with backoff</td>
+</tr>
+<tr class="odd">
+<td>9</td>
+<td>FAILED_PRECONDITION</td>
+<td>System not in the required state (e.g. directory not empty)</td>
+<td>Not until state changes</td>
+</tr>
+<tr class="even">
+<td>10</td>
+<td>ABORTED</td>
+<td>Concurrency conflict, such as a transaction abort</td>
+<td>Yes, at a higher level (re-read, then retry)</td>
+</tr>
+<tr class="odd">
+<td>13</td>
+<td>INTERNAL</td>
+<td>A server-side invariant broke</td>
+<td>Usually no</td>
+</tr>
+<tr class="even">
+<td>14</td>
+<td>UNAVAILABLE</td>
+<td>Transient: server down, connection reset, overloaded</td>
+<td>Yes, with backoff</td>
+</tr>
+<tr class="odd">
+<td>16</td>
+<td>UNAUTHENTICATED</td>
+<td>Missing or invalid credentials</td>
+<td>After refreshing credentials</td>
+</tr>
+</tbody>
+</table>
+<p>Pick codes carefully on the server, because clients and proxies make
+retry decisions from them. Returning <code>INTERNAL</code> for a
+validation error, or <code>UNAVAILABLE</code> for a bug, will either
+hide problems or trigger useless retry storms. For richer errors,
+Google’s <code>google.rpc</code> error model attaches typed details
+(<code>BadRequest</code> with field violations, <code>RetryInfo</code>
+with a suggested delay, <code>QuotaFailure</code>) in the trailers.</p>
+<h3 id="retries-and-hedging">Retries and hedging</h3>
+<p>gRPC clients support declarative retries through the <strong>service
+config</strong>, which can be set in code or delivered by the name
+resolver:</p>
+<pre class="json"><code>{
+  &quot;methodConfig&quot;: [{
+    &quot;name&quot;: [{ &quot;service&quot;: &quot;acme.user.v1.Users&quot; }],
+    &quot;timeout&quot;: &quot;2s&quot;,
+    &quot;retryPolicy&quot;: {
+      &quot;maxAttempts&quot;: 4,
+      &quot;initialBackoff&quot;: &quot;0.1s&quot;,
+      &quot;maxBackoff&quot;: &quot;1s&quot;,
+      &quot;backoffMultiplier&quot;: 2,
+      &quot;retryableStatusCodes&quot;: [&quot;UNAVAILABLE&quot;]
+    }
+  }],
+  &quot;retryThrottling&quot;: { &quot;maxTokens&quot;: 10, &quot;tokenRatio&quot;: 0.1 }
+}</code></pre>
+<p>Retries use jittered exponential backoff and stay within the overall
+deadline. <strong>Retry throttling</strong> is a client-side token
+bucket: each failure costs a token, each success earns back a fraction,
+and retries stop when tokens fall below half. This keeps a struggling
+backend from being hit with three or four times its normal load exactly
+when it can least handle it.</p>
+<p><strong>Hedging</strong> is the alternative policy for
+latency-sensitive, idempotent reads: send the request, and if no reply
+arrives within a short delay (say the p95 latency), send a second copy
+to another backend and take whichever answers first. It trades a few
+percent of extra load for a much better tail latency, the idea
+popularised by Jeff Dean and Luiz Barroso’s “The Tail at Scale”.</p>
+<h3 id="load-balancing-the-classic-grpc-trap">Load balancing: the
+classic gRPC trap</h3>
+<p>Because gRPC multiplexes every call over one long-lived HTTP/2
+connection, a traditional <strong>L4 (TCP) load balancer</strong>
+balances <em>connections</em>, not <em>requests</em>. A client opens one
+connection, gets routed to one backend, and sends all its traffic there
+for hours. Add three new pods during a traffic spike and they get almost
+nothing, because existing connections never move. In Kubernetes, a plain
+<code>ClusterIP</code> Service shows exactly this behaviour.</p>
+<p>Three standard fixes:</p>
+<ol type="1">
+<li><strong>An L7 proxy that understands HTTP/2</strong>, such as Envoy,
+Linkerd, Istio’s sidecars or a cloud L7 load balancer. The proxy
+terminates the client’s connection and balances individual streams
+across backends.</li>
+<li><strong>Client-side load balancing.</strong> The client resolves all
+backend addresses (for example, a Kubernetes headless Service returns
+every pod IP via DNS), opens a connection to each, and spreads calls
+with a policy like <code>round_robin</code>. Modern gRPC can also get
+endpoints and policies from an <strong>xDS</strong> control plane, the
+same API Envoy uses, giving “proxyless service mesh” behaviour without a
+sidecar.</li>
+<li><strong>Force reconnection</strong> with the server option
+<code>MAX_CONNECTION_AGE</code> (plus a grace period). Clients
+periodically reconnect and get rebalanced. Crude, but it works with any
+L4 balancer.</li>
+</ol>
+<h3 id="browsers-rest-and-grpc-web">Browsers, REST and gRPC-Web</h3>
+<p>Browsers don’t expose HTTP/2 framing or trailers to JavaScript, so
+they can’t speak native gRPC. Options:</p>
+<ul>
+<li><strong>gRPC-Web</strong>: a variant that moves trailers into the
+response body, requiring a translating proxy (Envoy has a filter for
+it). It supports unary and server streaming only.</li>
+<li><strong>The Connect protocol</strong> from Buf: a simpler protocol
+that works over HTTP/1.1 or HTTP/2, supports plain JSON or Protobuf
+bodies, lets you call a method with <code>curl</code>, and is served by
+the same handlers that serve gRPC and gRPC-Web.</li>
+<li><strong>HTTP/JSON transcoding</strong>: annotate RPCs with
+<code>google.api.http</code> options
+(<code>get: "/v1/users/{id}"</code>), and a gateway (grpc-gateway,
+Envoy, or Google Cloud Endpoints) exposes a REST API backed by the gRPC
+service.</li>
+</ul>
+<h3 id="when-not-to-choose-grpc">When not to choose gRPC</h3>
+<p>gRPC shines for internal service-to-service calls in a polyglot
+fleet, streaming, and high request rates. It is a weaker fit for public
+APIs consumed from browsers or by third parties who expect
+<code>curl</code> and JSON, for APIs that benefit from HTTP caching
+(gRPC calls are POSTs, so CDNs won’t cache them), and for teams without
+tooling for debugging binary traffic. If you do adopt it, enable
+<strong>server reflection</strong> and use <code>grpcurl</code> or a GUI
+client so engineers can still poke at services by hand. Finally,
+remember that a stub that looks like a local function hides a network
+call: every gRPC call still needs a deadline, an error-handling path,
+and a retry decision.</p>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Encode <code>User { id: 300, name: "bo" }</code> by hand, byte by
+byte. Then explain why a field holding <code>-1</code> would be ten
+bytes as <code>int32</code> and one byte as <code>sint32</code>.</li>
+<li>A teammate deletes field 4 (<code>email</code>) from a message
+stored in Kafka with 30-day retention, and a month later someone adds
+<code>phone = 4</code>. Describe exactly what consumers will see, and
+which tool or rule should have stopped it.</li>
+<li>You need a PATCH-style <code>UpdateUser</code> RPC where clients can
+set <code>age</code> to 0 or leave it unchanged. Compare
+<code>optional</code>, wrapper types and <code>FieldMask</code>. Which
+would you choose, and why?</li>
+<li>Your gRPC service runs on Kubernetes behind a <code>ClusterIP</code>
+Service, and after scaling from 3 to 10 pods, CPU stays pinned on the
+original 3. Explain why, and rank three fixes by effort and side
+effects.</li>
+<li>Service A has a 1-second deadline and calls B, which calls C with
+its own hard-coded 5-second timeout. What goes wrong under load, and how
+should the code change?</li>
+<li>For a new public API used by third-party developers and a web front
+end, would you expose gRPC, Connect, REST via transcoding, or plain
+REST? What would tip the decision?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<p>Written from the references below. Links were not re-opened while
+writing this piece.</p>
+<ul>
+<li><a
+href="https://protobuf.dev/programming-guides/encoding/">Encoding</a>,
+Protocol Buffers documentation</li>
+<li><a href="https://protobuf.dev/programming-guides/proto3/">Language
+Guide (proto 3)</a>, including “Updating a Message Type”</li>
+<li><a href="https://protobuf.dev/best-practices/dos-donts/">Proto Best
+Practices</a> and <a
+href="https://protobuf.dev/programming-guides/field_presence/">Field
+Presence</a>, Protocol Buffers documentation</li>
+<li><a href="https://protobuf.dev/editions/overview/">Protobuf Editions
+overview</a>, Protocol Buffers documentation</li>
+<li><a
+href="https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md">gRPC
+over HTTP2</a>, gRPC protocol specification</li>
+<li><a href="https://grpc.io/docs/guides/status-codes/">Status codes and
+their use in gRPC</a>, <a
+href="https://grpc.io/docs/guides/deadlines/">Deadlines</a> and <a
+href="https://grpc.io/docs/guides/retry/">Retry</a>, grpc.io guides</li>
+<li><a href="https://grpc.io/blog/grpc-load-balancing/">gRPC Load
+Balancing</a>, grpc.io blog</li>
+<li><a href="https://buf.build/docs/breaking/">Breaking change
+detection</a>, Buf documentation</li>
+<li><a href="https://connectrpc.com/docs/protocol/">Connect protocol
+reference</a>, connectrpc.com</li>
+<li><a href="https://google.aip.dev/">Google API Improvement
+Proposals</a>, especially AIP-134 (update methods and field masks) and
+AIP-193 (errors)</li>
+<li>Jeffrey Dean and Luiz André Barroso, “The Tail at Scale”,
+Communications of the ACM, 2013</li>
+</ul>
+
+    </article>
+    <nav class="pager"><a class="prev" href="/reading/postgres-mvcc.html"><span>Older</span>Postgres MVCC, vacuum and isolation</a><a class="next" href="/reading/secrets-management.html"><span>Newer</span>Secrets management: Vault, KMS and envelope encryption</a></nav>
+  </div></main>
+
+  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+</body>
+</html>

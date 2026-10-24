@@ -66,3 +66,56 @@ pre { background: var(--code); padding: 14px 16px; border-radius: 8px; overflow-
 pre code { background: none; padding: 0; }
 blockquote { margin: 20px 0; padding: 2px 18px; border-left: 3px solid var(--line); color: var(--muted); }
 footer.site { border-top: 1px solid var(--line); padding: 24px 0; color: var(--muted); font-size: 14px; }
+
+/* Lists of reads */
+ul.list .meta-line { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
+ul.list .meta-line .tag { margin-left: 6px; }
+.topics { display: flex; flex-wrap: wrap; gap: 6px; margin: -12px 0 8px; }
+.topics .tag { margin: 0; font-size: 13px; padding: 2px 10px; }
+.more { margin-top: 20px; }
+
+/* Article pages */
+.crumb { margin: 0 0 8px; font-size: 14px; }
+.post h1 { margin-bottom: 8px; }
+.post .meta .tag { margin-left: 6px; }
+.post h2 { padding-top: 8px; border-top: 1px solid var(--line); margin-top: 48px; }
+.post h3 { margin-top: 32px; }
+.post p, .post li { overflow-wrap: anywhere; }
+.post li + li { margin-top: 6px; }
+.post code { overflow-wrap: anywhere; }
+.post pre code { overflow-wrap: normal; }
+.post table {
+  display: block; overflow-x: auto; border-collapse: collapse;
+  font-size: 15px; margin: 20px 0; max-width: 100%;
+}
+.post th, .post td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; min-width: 110px; }
+.post th { background: var(--code); font-weight: 600; }
+.post math[display="block"] { display: block; overflow-x: auto; overflow-y: hidden; margin: 20px 0; padding: 8px 0; font-size: 1.1em; }
+.toc {
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px 16px;
+  margin: 0 0 28px; background: var(--card); font-size: 15px;
+}
+.toc summary { cursor: pointer; font-weight: 600; }
+.toc ul { padding-left: 18px; margin: 8px 0 4px; }
+.toc li + li { margin-top: 4px; }
+figure.diagram { margin: 24px 0; }
+figure.diagram svg { width: 100%; height: auto; display: block; }
+.pager {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+  margin-top: 56px; padding-top: 24px; border-top: 1px solid var(--line);
+}
+.pager a { display: block; color: var(--fg); font-weight: 600; font-size: 15px; }
+.pager a span { display: block; color: var(--muted); font-weight: 400; font-size: 13px; }
+.pager .next { text-align: right; }
+
+/* Diagram tokens: the SVGs come from Claude Docs and use its variable names. */
+figure.diagram {
+  --cds-chart-axis: var(--muted);
+  --cds-chart-grid: var(--line);
+  --cds-chart-categorical-1: var(--accent);
+  --cds-text-primary: var(--fg);
+  --cds-text-secondary: var(--muted);
+  --cds-chart-reference-tint: color-mix(in srgb, var(--accent) 5%, transparent);
+  --cds-chart-status-critical: #d4483b;
+  margin: 28px 0; font-family: inherit;
+}

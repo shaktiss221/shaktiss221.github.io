@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Postgres MVCC, vacuum and isolation · Shakti&#x27;s Knowledge Base</title>
+  <meta name="description" content="Row versions, snapshots, vacuum and transaction ID wraparound: how Postgres lets readers and writers never block each other.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site"><div class="wrap">
+    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/reading/" aria-current="page">Reading</a>
+    </nav>
+  </div></header>
+
+  <main><div class="wrap">
+    <article class="post">
+      <p class="crumb"><a href="/reading/">Reading</a></p>
+      <h1>Postgres MVCC, vacuum and isolation</h1>
+      <p class="meta">October 24, 2026 · 16 min read<span class="tag">databases</span></p>
+<details class="toc"><summary>Contents</summary>
+<ul>
+<li><a href="#how-postgres-stores-row-versions"
+id="toc-how-postgres-stores-row-versions">1. How Postgres stores row
+versions</a></li>
+<li><a href="#isolation-levels-in-practice"
+id="toc-isolation-levels-in-practice">2. Isolation levels in
+practice</a></li>
+<li><a href="#the-cost-of-mvcc-bloat-hot-and-vacuum"
+id="toc-the-cost-of-mvcc-bloat-hot-and-vacuum">3. The cost of MVCC:
+bloat, HOT and vacuum</a></li>
+<li><a href="#transaction-id-wraparound-and-freezing"
+id="toc-transaction-id-wraparound-and-freezing">4. Transaction ID
+wraparound and freezing</a></li>
+<li><a href="#discussion-questions"
+id="toc-discussion-questions">Discussion questions</a></li>
+<li><a href="#sources" id="toc-sources">Sources</a></li>
+</ul>
+</details>
+<p>Postgres never overwrites a row in place: every <code>UPDATE</code>
+writes a new copy, and every reader picks the copy its snapshot is
+allowed to see. That one design choice explains why readers never block
+writers, why tables bloat, why vacuum exists, and why a 32-bit
+transaction counter can take a database offline. Reading time is about
+30 minutes.</p>
+<h2 id="how-postgres-stores-row-versions">1. How Postgres stores row
+versions</h2>
+<h3 id="tuples-xmin-and-xmax">Tuples, xmin and xmax</h3>
+<p>A table in Postgres is a <strong>heap</strong>: a file of 8 KB pages,
+each holding row versions called <strong>tuples</strong>. Every tuple
+has a 23-byte header. The two fields that matter most here are:</p>
+<ul>
+<li><strong><code>xmin</code></strong>: the ID of the transaction that
+created this version.</li>
+<li><strong><code>xmax</code></strong>: the ID of the transaction that
+deleted or replaced it (0 if none).</li>
+</ul>
+<p>Every transaction that writes gets a <strong>transaction ID
+(XID)</strong>, a 32-bit counter that increases over time. You can see
+the hidden columns directly:
+<code>SELECT xmin, xmax, ctid, * FROM accounts;</code>.</p>
+<p>The three write operations map onto these fields simply:</p>
+<ul>
+<li><strong>INSERT</strong> writes a new tuple with <code>xmin</code> =
+my XID, <code>xmax</code> = 0.</li>
+<li><strong>DELETE</strong> doesn’t remove anything. It sets
+<code>xmax</code> = my XID on the current tuple.</li>
+<li><strong>UPDATE</strong> is a delete plus an insert: set
+<code>xmax</code> on the old tuple, write a new tuple with
+<code>xmin</code> = my XID, and point the old tuple’s
+<strong><code>ctid</code></strong> (its physical address, page and slot)
+at the new one, forming a version chain.</li>
+</ul>
+<figure class="diagram"><svg viewBox="0 0 760 372" role="img" aria-label="An UPDATE writes a new row version, and each snapshot picks one" font-size="13"><defs><marker id="mvcc-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="34" font-size="15" font-weight="600" fill="var(--cds-text-primary)">An UPDATE writes a new row version, and each snapshot picks one</text><text x="24" y="56" font-size="11.5" fill="var(--cds-text-secondary)">One row of accounts, updated by transactions 205 and 310, all three versions in the heap</text><g fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"><path d="M224 124H280" marker-end="url(#mvcc-arrow)"></path><path d="M480 124H536" marker-end="url(#mvcc-arrow)"></path><path d="M380 248V164" marker-end="url(#mvcc-arrow)"></path></g><g><rect x="24" y="84" width="200" height="80" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="124" y="108" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Version 1 (dead)</text><text x="124" y="128" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">xmin 100, xmax 205</text><text x="124" y="146" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">balance = 50</text></g><g><rect x="280" y="84" width="200" height="80" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.12" stroke="var(--cds-chart-categorical-1)" stroke-width="2"></rect><text x="380" y="108" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Version 2</text><text x="380" y="128" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">xmin 205, xmax 310</text><text x="380" y="146" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">balance = 80</text></g><g><rect x="536" y="84" width="200" height="80" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="636" y="108" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Version 3 (uncommitted)</text><text x="636" y="128" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">xmin 310, xmax none</text><text x="636" y="146" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">balance = 95</text></g><g><rect x="280" y="248" width="200" height="80" rx="8" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="380" y="272" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Reader&#x27;s snapshot</text><text x="380" y="292" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">205 has committed,</text><text x="380" y="308" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">310 is still running</text></g><text x="252" y="116" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">ctid</text><text x="508" y="116" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">ctid</text><text x="390" y="212" font-size="11.5" fill="var(--cds-text-secondary)">sees only this version</text><text x="24" y="356" font-size="11.5" fill="var(--cds-text-secondary)">Vacuum can remove version 1 once no running snapshot is old enough to need it.</text></svg></figure>
+<p>Two updates leave three versions of one row in the heap; the reader’s
+snapshot decides that version 2 is the one it sees.</p>
+<h3 id="snapshots">Snapshots</h3>
+<p>A <strong>snapshot</strong> records which transactions’ work is
+visible. It is essentially three things:</p>
+<ul>
+<li><code>xmin</code>: the oldest transaction still running when the
+snapshot was taken. Everything older is finished.</li>
+<li><code>xmax</code>: the next XID to be assigned. Everything at or
+above it started after the snapshot and is invisible.</li>
+<li><code>xip</code>: the list of XIDs between those two that were still
+in progress.</li>
+</ul>
+<p>You can look at one with <code>SELECT pg_current_snapshot();</code>,
+which returns something like <code>100:104:100,102</code>.</p>
+<h3 id="the-visibility-rule">The visibility rule</h3>
+<p>A tuple is visible to a snapshot if, roughly:</p>
+<ol type="1">
+<li>Its <code>xmin</code> transaction <strong>committed</strong> and is
+not in the snapshot’s in-progress set (the creator finished before I
+looked), <strong>and</strong></li>
+<li>Its <code>xmax</code> is 0, or the <code>xmax</code> transaction
+<strong>aborted</strong>, or is still in progress from my snapshot’s
+point of view (the deleter hadn’t finished when I looked).</li>
+</ol>
+<p>A transaction always sees its own changes, which adds a few special
+cases involving command IDs (<code>cmin</code>/<code>cmax</code>) so a
+statement doesn’t see rows it inserted earlier in the same
+statement.</p>
+<p>To check whether an XID committed or aborted, Postgres looks it up in
+the <strong>commit log</strong> (<code>pg_xact</code>, formerly
+<code>pg_clog</code>): two bits per transaction. Looking that up for
+every tuple would be slow, so the first reader to learn a tuple’s
+creator committed sets <strong>hint bits</strong> in the tuple header
+(<code>HEAP_XMIN_COMMITTED</code> and friends). This is why a plain
+<code>SELECT</code> on freshly loaded data can generate writes: it is
+setting hint bits and dirtying pages.</p>
+<h3 id="why-this-design">Why this design</h3>
+<p>The payoff is concurrency. A long report reading a table doesn’t
+block an <code>UPDATE</code> to it, and the update doesn’t block the
+report: each sees its own consistent version. Writers still block other
+writers on the <strong>same row</strong> (the second updater waits on a
+row lock until the first commits or aborts), but there are no read locks
+at all.</p>
+<p>Other databases do MVCC differently. <strong>MySQL InnoDB</strong>
+and <strong>Oracle</strong> update rows in place and keep old versions
+in a separate <strong>undo log</strong>; readers that need an old
+version reconstruct it from undo. That keeps the main table compact, but
+long-running reads make the undo grow, and Oracle’s famous “snapshot too
+old” error is what happens when the undo was recycled first. Postgres
+keeps old versions in the table itself, so it pays the cleanup cost
+later, through vacuum.</p>
+<p>That trade-off is the subject of the next three sections.</p>
+<h2 id="isolation-levels-in-practice">2. Isolation levels in
+practice</h2>
+<p>In Postgres, isolation levels differ mainly in <strong>when the
+snapshot is taken</strong> and <strong>what happens when two
+transactions touch the same data</strong>. Postgres implements three
+distinct levels; asking for <code>READ UNCOMMITTED</code> gives you
+<code>READ COMMITTED</code>, because MVCC has no reason to show
+uncommitted data.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Level</th>
+<th>Snapshot taken</th>
+<th>Prevents</th>
+<th>Still allows</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Read committed (default)</td>
+<td>At the start of each statement</td>
+<td>Dirty reads</td>
+<td>Non-repeatable reads, phantoms, lost updates in read-modify-write
+code, write skew</td>
+</tr>
+<tr class="even">
+<td>Repeatable read</td>
+<td>At the first statement of the transaction</td>
+<td>The above, plus phantoms (stricter than the SQL standard
+requires)</td>
+<td>Write skew</td>
+</tr>
+<tr class="odd">
+<td>Serializable</td>
+<td>Same as repeatable read, plus conflict tracking</td>
+<td>All of the above</td>
+<td>Nothing, at the cost of retries</td>
+</tr>
+</tbody>
+</table>
+<h3 id="read-committed-a-fresh-snapshot-per-statement">Read committed: a
+fresh snapshot per statement</h3>
+<p>Each statement sees everything committed before it began. Two
+<code>SELECT</code>s in the same transaction can return different
+results if another transaction commits in between. That is usually fine
+for web requests that run one or two statements.</p>
+<p>The subtle part is concurrent <code>UPDATE</code>s. Suppose two
+sessions both run
+<code>UPDATE accounts SET balance = balance - 10 WHERE id = 1</code>.
+The second blocks on the row lock until the first commits. Then, instead
+of failing, read committed <strong>re-evaluates</strong> the row: it
+fetches the newest committed version, re-checks the <code>WHERE</code>
+clause, and applies its update to that version. So both decrements land,
+and the result is correct.</p>
+<p>The trap is application-side read-modify-write:</p>
+<pre class="sql"><code>-- both sessions, concurrently
+SELECT balance FROM accounts WHERE id = 1;   -- both read 100
+-- application computes 100 - 10
+UPDATE accounts SET balance = 90 WHERE id = 1;</code></pre>
+<p>Both write 90, and one withdrawal vanishes: a <strong>lost
+update</strong>. Fixes, in order of preference: do the arithmetic in SQL
+(<code>balance = balance - 10</code>), lock the row when reading
+(<code>SELECT ... FOR UPDATE</code>), or use optimistic concurrency with
+a version column (<code>UPDATE ... WHERE id = 1 AND version = 7</code>,
+and retry if zero rows matched).</p>
+<h3
+id="repeatable-read-one-snapshot-for-the-whole-transaction">Repeatable
+read: one snapshot for the whole transaction</h3>
+<p>Under repeatable read, the snapshot is taken at the transaction’s
+first statement and reused. Every query sees the database as of that
+moment, which is ideal for reports and consistent exports
+(<code>pg_dump</code> uses it).</p>
+<p>If this transaction tries to update a row that another transaction
+changed and committed after the snapshot, Postgres can’t apply the
+update to a version it can’t see, so it raises
+<code>ERROR: could not serialize access due to concurrent update</code>
+(SQLSTATE <code>40001</code>). The application must retry the whole
+transaction. This turns the lost update from the previous example into
+an error, which is the right trade.</p>
+<p>What repeatable read (snapshot isolation) still allows is
+<strong>write skew</strong>. The classic example: a hospital requires at
+least one doctor on call. Alice and Bob are both on call, and both feel
+ill at the same time.</p>
+<ol type="1">
+<li>Alice’s transaction counts on-call doctors: 2. Fine to leave.</li>
+<li>Bob’s transaction counts on-call doctors: 2. Fine to leave.</li>
+<li>Alice sets her own row to off-call. Bob sets his own row to
+off-call.</li>
+<li>Both commit. Nobody is on call.</li>
+</ol>
+<p>They updated <strong>different rows</strong>, so there was no
+write-write conflict to detect. Each transaction’s decision was based on
+data the other changed.</p>
+<h3
+id="serializable-snapshot-isolation-plus-conflict-detection">Serializable:
+snapshot isolation plus conflict detection</h3>
+<p>Since Postgres 9.1, <code>SERIALIZABLE</code> uses
+<strong>Serializable Snapshot Isolation (SSI)</strong>, based on
+research by Michael Cahill and colleagues (2008) and implemented by Dan
+Ports and Kevin Grittner (described in their VLDB 2012 paper). It runs
+exactly like repeatable read, but also tracks what each transaction
+<em>read</em> using lightweight <strong>SIRead locks</strong> (on
+tuples, pages or whole relations). These locks block nothing; they only
+record dependencies.</p>
+<p>SSI watches for <strong>read-write antidependencies</strong>:
+transaction T1 read something that T2 later wrote. Theory shows that
+every non-serializable execution under snapshot isolation contains a
+“dangerous structure”: two consecutive such edges, T1 → T2 → T3, where
+T2 is the pivot. When Postgres spots one, it aborts a transaction with
+<code>ERROR: could not serialize access due to read/write dependencies among transactions</code>
+(also <code>40001</code>). In the doctors example, one of the two
+commits fails, and its retry sees only one doctor on call.</p>
+<p>Practical notes on serializable:</p>
+<ul>
+<li><strong>Retries are mandatory.</strong> Wrap every serializable
+transaction in a retry loop on SQLSTATE <code>40001</code>. Without it,
+the level just turns bugs into errors.</li>
+<li><strong>False positives happen.</strong> SSI is conservative,
+especially when locks are promoted from tuple to page to relation
+granularity. Good indexes keep reads (and therefore SIRead locks)
+narrow.</li>
+<li><strong>Mark read-only transactions</strong> as
+<code>READ ONLY</code> (and <code>DEFERRABLE</code> for long reports),
+so Postgres can skip tracking or wait for a safe snapshot that can never
+fail.</li>
+<li><strong>Throughput cost</strong> is usually modest, often reported
+in the single-digit to low-double-digit percent range, much cheaper than
+strict two-phase locking.</li>
+</ul>
+<h3 id="choosing">Choosing</h3>
+<p>Most applications run read committed and handle the dangerous spots
+explicitly with <code>FOR UPDATE</code>, atomic SQL, or constraints.
+Teams with many invariants that span rows (balances, quotas, scheduling)
+increasingly choose serializable plus a generic retry wrapper, which is
+easier to reason about than auditing every query for write skew.</p>
+<h2 id="the-cost-of-mvcc-bloat-hot-and-vacuum">3. The cost of MVCC:
+bloat, HOT and vacuum</h2>
+<p>Every update and delete leaves a <strong>dead tuple</strong> behind.
+Until something reclaims it, it takes space in the heap and in every
+index that points to it. That something is <code>VACUUM</code>, and
+keeping it ahead of your write rate is the main ongoing job of running
+Postgres.</p>
+<h3 id="what-dead-means">What “dead” means</h3>
+<p>A tuple is dead when its <code>xmax</code> transaction committed
+<strong>and</strong> no running transaction could still need it. The
+second condition is the important one. Postgres computes an <strong>xmin
+horizon</strong>: the oldest XID that any open snapshot might still
+treat as in progress. Tuples deleted after that horizon must be kept,
+even if the deleting transaction committed hours ago.</p>
+<p>Anything that holds the horizon back blocks cleanup across the whole
+database:</p>
+<ul>
+<li>a long-running query or report,</li>
+<li>a session sitting <strong>idle in transaction</strong> (an
+application that ran <code>BEGIN</code> and forgot to commit),</li>
+<li>an abandoned <strong>prepared transaction</strong>
+(<code>PREPARE TRANSACTION</code>),</li>
+<li>a <strong>replication slot</strong> whose consumer is gone or
+lagging,</li>
+<li>a standby with <code>hot_standby_feedback = on</code> running long
+queries.</li>
+</ul>
+<p>The first check in any bloat investigation is
+<code>SELECT pid, state, xact_start, backend_xmin FROM pg_stat_activity ORDER BY age(backend_xmin) DESC;</code>,
+plus <code>pg_replication_slots</code> and
+<code>pg_prepared_xacts</code>. A single forgotten session can let a
+busy table grow from 10 GB to 100 GB over a weekend. Setting
+<code>idle_in_transaction_session_timeout</code> is cheap insurance.</p>
+<h3 id="what-vacuum-does">What VACUUM does</h3>
+<p>A plain <code>VACUUM</code> (no <code>FULL</code>):</p>
+<ol type="1">
+<li>Scans heap pages that might contain dead tuples, skipping pages the
+<strong>visibility map</strong> marks as all-visible.</li>
+<li>Collects dead tuple IDs, then removes the index entries that point
+to them, one pass per index.</li>
+<li>Marks the space in the heap as reusable and records it in the
+<strong>free space map</strong>, so future inserts and updates fill
+it.</li>
+<li>Sets visibility-map bits for pages where every tuple is now visible
+to everyone. Those bits let later vacuums skip the page and let
+<strong>index-only scans</strong> avoid visiting the heap.</li>
+<li>Freezes old tuples (section 4).</li>
+</ol>
+<p>It runs alongside normal reads and writes. It does
+<strong>not</strong> return space to the operating system, except for
+empty pages at the very end of the file. A table that bloated to 100 GB
+stays 100 GB on disk, but new rows will reuse the free space inside
+it.</p>
+<p><code>VACUUM FULL</code> rewrites the table into a new compact file,
+but holds an <code>ACCESS EXCLUSIVE</code> lock for the duration,
+blocking even reads. On large production tables, the extension
+<strong>pg_repack</strong> (or <code>pg_squeeze</code>) does the same
+rewrite online, taking only brief locks at the start and end. Index
+bloat can be fixed separately with <code>REINDEX CONCURRENTLY</code>
+(Postgres 12+).</p>
+<h3 id="hot-updates-avoiding-index-churn">HOT updates: avoiding index
+churn</h3>
+<p>By default, an update creates a new tuple at a new location, so
+<strong>every index</strong> on the table needs a new entry pointing at
+it, even indexes on columns that didn’t change. A table with 8 indexes
+pays 9 writes per updated row. This write amplification was one of the
+reasons Uber gave for moving from Postgres to MySQL in 2016.</p>
+<p><strong>Heap-only tuple (HOT)</strong> updates avoid this when two
+conditions hold:</p>
+<ol type="1">
+<li>The update changes <strong>no indexed column</strong>.</li>
+<li>The new version <strong>fits on the same page</strong> as the old
+one.</li>
+</ol>
+<p>Then the new tuple is linked from the old one inside the page, and
+indexes keep pointing at the original slot. Any page access can later
+<strong>prune</strong> the chain, reclaiming dead HOT versions without a
+full vacuum. Two practical consequences:</p>
+<ul>
+<li>Avoid indexing columns that change often (such as
+<code>updated_at</code>) unless you query by them.</li>
+<li>Lower the <strong>fillfactor</strong> on update-heavy tables
+(<code>ALTER TABLE t SET (fillfactor = 80)</code>) to leave room on each
+page for new versions. Check the effect with <code>n_tup_hot_upd</code>
+versus <code>n_tup_upd</code> in <code>pg_stat_user_tables</code>.</li>
+</ul>
+<p>Postgres 14 added <strong>bottom-up index deletion</strong>, which
+removes index entries for dead versions when a B-tree page is about to
+split, cutting index bloat for workloads that can’t use HOT.</p>
+<h3 id="autovacuum-and-its-defaults">Autovacuum and its defaults</h3>
+<p>Autovacuum launches workers that vacuum and analyze tables based on
+how much has changed. A table is vacuumed when:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">dead tuples</mtext><mo>&gt;</mo><mtext mathvariant="monospace">𝚊𝚞𝚝𝚘𝚟𝚊𝚌𝚞𝚞𝚖_𝚟𝚊𝚌𝚞𝚞𝚖_𝚝𝚑𝚛𝚎𝚜𝚑𝚘𝚕𝚍</mtext><mo>+</mo><mtext mathvariant="monospace">𝚊𝚞𝚝𝚘𝚟𝚊𝚌𝚞𝚞𝚖_𝚟𝚊𝚌𝚞𝚞𝚖_𝚜𝚌𝚊𝚕𝚎_𝚏𝚊𝚌𝚝𝚘𝚛</mtext><mo>×</mo><mtext mathvariant="normal">rows</mtext></mrow><annotation encoding="application/x-tex">\text{dead tuples} &gt; \texttt{autovacuum\_vacuum\_threshold} + \texttt{autovacuum\_vacuum\_scale\_factor} \times \text{rows}</annotation></semantics></math></p>
+<p>With defaults of 50 and 0.2, that’s 20% of the table. Fine for a
+10,000-row table; terrible for a 500-million-row table, which collects
+100 million dead tuples before cleanup begins. Since Postgres 13,
+inserts also trigger vacuum
+(<code>autovacuum_vacuum_insert_scale_factor</code>), so append-only
+tables get their visibility map set and get frozen gradually.</p>
+<p>Autovacuum is deliberately throttled so it doesn’t hurt foreground
+traffic: each worker accumulates “cost” for pages read and dirtied and
+sleeps when it hits a limit (<code>autovacuum_vacuum_cost_limit</code>,
+which inherits 200 from <code>vacuum_cost_limit</code>, with a 2 ms
+delay since Postgres 12). On modern SSDs those defaults are often too
+gentle. Common tuning:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Setting</th>
+<th>Default</th>
+<th>Typical change for busy systems</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>autovacuum_vacuum_scale_factor</code> (per big table)</td>
+<td>0.2</td>
+<td>0.01 to 0.05, or 0 with a fixed threshold</td>
+</tr>
+<tr class="even">
+<td><code>autovacuum_vacuum_cost_limit</code></td>
+<td>200 (inherited)</td>
+<td>1000 to 2000 or higher on fast storage</td>
+</tr>
+<tr class="odd">
+<td><code>autovacuum_max_workers</code></td>
+<td>3</td>
+<td>5 to 10 with many large tables (the cost limit is shared, so raise
+it too)</td>
+</tr>
+<tr class="even">
+<td><code>maintenance_work_mem</code> /
+<code>autovacuum_work_mem</code></td>
+<td>64 MB</td>
+<td>1 GB or more, so dead-TID lists fit and indexes are scanned
+once</td>
+</tr>
+</tbody>
+</table>
+<p>Postgres 17 replaced the dead-tuple array with a compact radix-tree
+store and removed the old 1 GB cap on that memory, so a single vacuum
+pass now handles far more dead tuples before it must rescan indexes.</p>
+<p>Watch <code>n_dead_tup</code>, <code>last_autovacuum</code> and
+<code>autovacuum_count</code> in <code>pg_stat_user_tables</code>, and
+look for tables where vacuum runs constantly yet dead tuples keep
+rising: that usually means the xmin horizon is stuck, not that
+autovacuum is too slow.</p>
+<h2 id="transaction-id-wraparound-and-freezing">4. Transaction ID
+wraparound and freezing</h2>
+<p>Transaction IDs are 32 bits, so there are about 4.2 billion of them.
+A busy system consuming 10,000 write transactions per second uses that
+up in under 5 days. Postgres handles this by treating XIDs as a circle
+and by <strong>freezing</strong> old rows, and if freezing falls behind,
+Postgres stops accepting writes to protect your data.</p>
+<h3 id="the-circle">The circle</h3>
+<p>Postgres compares XIDs using modulo-2³² arithmetic: for any XID, the
+2.1 billion IDs “behind” it are in the past and the 2.1 billion “ahead”
+are in the future. That works as long as no live tuple is more than 2.1
+billion transactions old. If one were, its <code>xmin</code> would
+suddenly look like it was in the future, and the row would vanish from
+every query. That is <strong>wraparound</strong>, and it would be silent
+data loss.</p>
+<h3 id="freezing">Freezing</h3>
+<p>The fix is to mark tuples that are old enough as
+<strong>frozen</strong>: visible to every transaction, past and future,
+regardless of <code>xmin</code>. Since Postgres 9.4, freezing sets a
+flag combination in the tuple header rather than overwriting
+<code>xmin</code>, which keeps the original XID for forensics.</p>
+<p>Each table tracks <code>relfrozenxid</code>: every tuple older than
+this is frozen. Each database tracks <code>datfrozenxid</code>, the
+minimum over its tables. The <strong>age</strong> of these values, how
+many XIDs have been used since, is what you monitor:</p>
+<pre class="sql"><code>SELECT datname, age(datfrozenxid) FROM pg_database ORDER BY 2 DESC;
+
+SELECT c.oid::regclass AS table_name, age(c.relfrozenxid) AS xid_age,
+       pg_size_pretty(pg_total_relation_size(c.oid)) AS size
+  FROM pg_class c
+ WHERE c.relkind IN (&#39;r&#39;, &#39;m&#39;, &#39;t&#39;)
+ ORDER BY 2 DESC LIMIT 20;</code></pre>
+<p>The thresholds that drive freezing:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Setting</th>
+<th>Default</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>vacuum_freeze_min_age</code></td>
+<td>50 million</td>
+<td>A normal vacuum freezes tuples older than this on pages it
+visits</td>
+</tr>
+<tr class="even">
+<td><code>vacuum_freeze_table_age</code></td>
+<td>150 million</td>
+<td>Above this table age, vacuum runs in <strong>aggressive</strong>
+mode, visiting every page not already marked all-frozen</td>
+</tr>
+<tr class="odd">
+<td><code>autovacuum_freeze_max_age</code></td>
+<td>200 million</td>
+<td>Above this, autovacuum forces an <strong>anti-wraparound</strong>
+vacuum on the table, even if autovacuum is disabled</td>
+</tr>
+<tr class="even">
+<td><code>vacuum_failsafe_age</code> (PG 14+)</td>
+<td>1.6 billion</td>
+<td>Emergency mode: skip index cleanup and ignore cost throttling to
+finish freezing as fast as possible</td>
+</tr>
+</tbody>
+</table>
+<p>Since Postgres 9.6, the visibility map has an
+<strong>all-frozen</strong> bit per page, so aggressive vacuums skip
+pages already frozen. Before that, every anti-wraparound vacuum read the
+entire table, which on multi-terabyte tables could take days.</p>
+<h3 id="the-danger-zone">The danger zone</h3>
+<p>If freezing can’t keep up, Postgres escalates:</p>
+<ol type="1">
+<li>At about 40 million XIDs before the limit, it logs warnings on every
+transaction:
+<code>WARNING: database "app" must be vacuumed within 39985967 transactions</code>.</li>
+<li>At about 3 million before the limit, it <strong>refuses to assign
+new XIDs</strong>. Reads still work, but every write fails with an error
+telling you to vacuum. The database is effectively down for writes.</li>
+<li>Recovery means running <code>VACUUM</code> (in recent versions, in
+normal multi-user mode; older guidance said single-user mode) on the
+oldest tables, which may take hours on large ones.</li>
+</ol>
+<p>This has happened to well-known companies. Sentry wrote up a 2015
+outage where a large table hit the limit, and Mailchimp’s Mandrill had a
+multi-day outage in 2019 traced to XID wraparound on a sharded Postgres
+setup. The common causes are the same ones that cause bloat: a stuck
+xmin horizon (anti-wraparound vacuum can’t freeze tuples that an old
+snapshot might still need), anti-wraparound vacuums being throttled too
+hard, and very large tables where nobody watched
+<code>age(relfrozenxid)</code> climb.</p>
+<p>A related limit applies to <strong>multixact IDs</strong>, used when
+several transactions lock the same row at once (for example, many
+<code>SELECT ... FOR SHARE</code> or foreign-key checks). They have
+their own counter, their own <code>relminmxid</code>, and their own
+wraparound, governed by
+<code>autovacuum_multixact_freeze_max_age</code>.</p>
+<h3 id="a-production-checklist">A production checklist</h3>
+<ul>
+<li>Alert on <code>age(datfrozenxid)</code> crossing about 500 million,
+well before forced shutdown at about 2.1 billion. Alert on the oldest
+<code>backend_xmin</code> and on inactive replication slots.</li>
+<li>Set <code>idle_in_transaction_session_timeout</code> and a sensible
+<code>statement_timeout</code> for application roles.</li>
+<li>Tune autovacuum per table for your largest, busiest tables; don’t
+rely on the 20% scale factor.</li>
+<li>Let anti-wraparound autovacuums run. They are not auto-cancelled by
+conflicting locks the way normal autovacuums are, and killing them by
+hand just restarts the clock.</li>
+<li>Schedule a manual <code>VACUUM (FREEZE)</code> during quiet hours on
+huge, mostly static tables, so the forced one doesn’t arrive at
+peak.</li>
+<li>Partition very large append-heavy tables, so old partitions get
+frozen once and then skipped.</li>
+</ul>
+<p>There has been long-running community work toward 64-bit transaction
+IDs, which would make wraparound practically impossible, but as of the
+latest major releases Postgres still uses 32-bit XIDs on disk, so
+freezing remains part of every operator’s job.</p>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Postgres keeps old versions in the heap; InnoDB and Oracle keep them
+in undo. For a workload of frequent small updates plus occasional
+hour-long analytical queries, which design hurts less, and where does
+each one feel the pain?</li>
+<li>Your <code>orders</code> table has 9 indexes, one of them on
+<code>updated_at</code>, and <code>n_tup_hot_upd</code> is near zero.
+What would you change, and how would you measure the effect?</li>
+<li>Rewrite the doctors-on-call write-skew example so it is safe under
+read committed without using serializable. Then compare that fix with
+simply switching to serializable plus a retry loop.</li>
+<li>A table’s dead tuples keep rising even though autovacuum runs every
+few minutes. List the four most likely causes and the query you would
+run to confirm each.</li>
+<li>Your busiest database burns about 300 million XIDs a day. With
+default settings, how often will anti-wraparound vacuums hit your
+largest tables, and what would you change before that becomes a
+problem?</li>
+<li>Why can a plain <code>SELECT</code> on a freshly bulk-loaded table
+cause a burst of disk writes, and what could you do right after a bulk
+load to avoid it?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<p>Written from the references below. Links were not re-opened while
+writing this piece, so check the current docs for defaults in your
+Postgres version.</p>
+<ul>
+<li><a
+href="https://www.postgresql.org/docs/current/mvcc.html">Concurrency
+Control</a>, PostgreSQL documentation (chapter on MVCC and transaction
+isolation)</li>
+<li><a
+href="https://www.postgresql.org/docs/current/routine-vacuuming.html">Routine
+Vacuuming</a>, PostgreSQL documentation (includes preventing XID
+wraparound)</li>
+<li><a
+href="https://www.postgresql.org/docs/current/storage-hot.html">Heap-Only
+Tuples (HOT)</a>, PostgreSQL documentation</li>
+<li><a href="https://drkp.net/papers/ssi-vldb12.pdf">Serializable
+Snapshot Isolation in PostgreSQL</a>, Dan R. K. Ports and Kevin
+Grittner, VLDB 2012</li>
+<li>Michael J. Cahill, Uwe Röhm, Alan D. Fekete, “Serializable Isolation
+for Snapshot Databases”, SIGMOD 2008</li>
+<li><a href="https://www.interdb.jp/pg/">The Internals of
+PostgreSQL</a>, Hironobu Suzuki (chapters 5 and 6 on concurrency control
+and vacuum)</li>
+<li><a href="https://www.uber.com/blog/postgres-to-mysql-migration/">Why
+Uber Engineering Switched from Postgres to MySQL</a>, Uber Engineering,
+2016</li>
+<li><a
+href="https://blog.sentry.io/transaction-id-wraparound-in-postgres/">Transaction
+ID Wraparound in Postgres</a>, Sentry, 2015</li>
+<li>Martin Kleppmann, <em>Designing Data-Intensive Applications</em>,
+chapter 7 (Transactions)</li>
+</ul>
+
+    </article>
+    <nav class="pager"><a class="prev" href="/reading/caching-memcache.html"><span>Older</span>Caching at scale: lessons from Facebook&#x27;s memcache</a><a class="next" href="/reading/grpc-protobuf.html"><span>Newer</span>gRPC and Protobuf in production</a></nav>
+  </div></main>
+
+  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+</body>
+</html>
