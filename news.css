@@ -1,0 +1,115 @@
+/* AI News in the Modernist design: Archivo throughout, a near-mono red on a
+   light ground, zero radius, strong 2px rules and a visible grid. Loaded after
+   style.css on news pages only (body.mod), so it remaps the site's variables
+   and restyles the shared header and footer to match. */
+body.mod {
+  --color-bg: #f3f2f2;
+  --color-surface: #eae9e9;
+  --color-text: #201e1d;
+  --color-accent: #ec3013;
+  --color-accent-600: #dd2b0f;
+  --color-accent-700: #ae1800;
+  --color-divider: color-mix(in srgb, #201e1d 40%, transparent);
+  --font-heading: "Archivo", system-ui, sans-serif;
+  --font-body: "Archivo", system-ui, sans-serif;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-6: 24px; --space-8: 32px;
+
+  --bg: var(--color-bg); --surface: var(--color-surface); --ink: var(--color-text);
+  --muted: color-mix(in srgb, var(--color-text) 60%, transparent);
+  --rule: color-mix(in srgb, var(--color-text) 18%, transparent);
+  --accent: var(--color-accent);
+  --serif: var(--font-heading); --sans: var(--font-body); --mono: var(--font-body);
+  font-family: var(--font-body);
+}
+/* Night, picked in the Aa menu or from the system: ink ground, the accent one step lighter. */
+:root[data-theme="night"] body.mod {
+  --color-bg: #1b1918; --color-surface: #262322; --color-text: #efecea;
+  --color-accent: #ff563c; --color-accent-600: #ff9783; --color-accent-700: #ff9783;
+  --color-divider: color-mix(in srgb, #efecea 45%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) body.mod {
+    --color-bg: #1b1918; --color-surface: #262322; --color-text: #efecea;
+    --color-accent: #ff563c; --color-accent-600: #ff9783; --color-accent-700: #ff9783;
+    --color-divider: color-mix(in srgb, #efecea 45%, transparent);
+  }
+}
+
+.mod h1, .mod h2, .mod h3 { font-family: var(--font-heading); font-weight: 800; letter-spacing: -0.015em; }
+.mod :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.mod ::selection { background: color-mix(in srgb, var(--color-accent) 30%, transparent); }
+
+/* Header and footer: flat, ruled, no blur, no rounding. */
+.mod .hdr { background: var(--color-bg); backdrop-filter: none; -webkit-backdrop-filter: none; border-bottom: 2px solid var(--color-divider); }
+.mod .brand { font-weight: 800; font-size: 20px; letter-spacing: -0.02em; }
+.mod .nav a { font-weight: 600; color: var(--muted); border-bottom-width: 2px; }
+.mod .nav a[aria-current="page"] { color: var(--ink); border-color: var(--color-accent); }
+.mod .icon-btn, .mod .pop, .mod .seg, .mod .seg button, .mod .swatch { border-radius: 0; }
+.mod .icon-btn { font-family: var(--font-heading); font-weight: 800; }
+.mod .pop { box-shadow: 0 12px 32px color-mix(in srgb, #2d2b2b 22%, transparent); border: 2px solid var(--color-divider); }
+.mod .ftr { border-top: 2px solid var(--color-divider); }
+.mod .ftr .name { font-weight: 800; }
+
+/* Buttons: square, labels flush left, the accent ramp for hover and press. */
+.mod .btn { border-radius: 0; justify-content: flex-start; font-weight: 800; padding: 9px 14px; transition: none; }
+.mod .btn-line { border: 1px solid var(--color-divider); color: var(--ink); }
+.mod .btn-line:hover { border-color: var(--color-accent); color: var(--color-accent); text-decoration: none; }
+.mod .btn-line:active { color: var(--color-accent-700); border-color: var(--color-accent-700); }
+
+/* Page opening. */
+.mod .news-page { max-width: 1180px; padding-top: 48px; padding-bottom: 120px; }
+.mod .news-hd { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; padding-bottom: 24px; border-bottom: 2px solid var(--color-divider); }
+.mod .kicker { font-family: var(--font-body); font-weight: 600; font-size: 12px; letter-spacing: .08em; }
+.mod .page-title { font-size: clamp(40px, 6.4vw, 80px); line-height: 1; letter-spacing: -0.03em; margin-top: 12px; }
+
+/* Stat row: one equal-width cell per section, the counts set large. */
+.mod .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); border-bottom: 2px solid var(--color-divider); }
+.mod .stat { display: flex; flex-direction: column; gap: 4px; padding: 20px 20px 22px 0; color: var(--ink); }
+.mod .stat + .stat { padding-left: 20px; border-left: 1px solid var(--rule); }
+.mod .stat .num { font-weight: 800; font-size: 44px; line-height: 1; letter-spacing: -0.03em; }
+.mod .stat .lbl { font-size: 13px; font-weight: 600; color: var(--muted); }
+.mod a.stat:hover { text-decoration: none; }
+.mod a.stat:hover .num { color: var(--color-accent); }
+
+/* Sections: a 2px rule, a numbered heading row, then a grid of story cells. */
+.mod .news-sec { margin-top: 56px; scroll-margin-top: 80px; }
+.mod .sec-hd { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; align-items: baseline; gap: 16px; padding-bottom: 14px; border-bottom: 2px solid var(--color-divider); }
+.mod .sec-n { font-weight: 800; font-size: 14px; color: var(--color-accent); }
+.mod .sec-hd h2 { font-size: 32px; line-height: 1.1; margin: 0; }
+.mod .sec-c { font-size: 13px; font-weight: 600; color: var(--muted); }
+.mod .cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.mod .news-cell { display: flex; flex-direction: column; gap: 10px; padding: 24px 24px 28px; border-bottom: 1px solid var(--rule); border-left: 1px solid var(--rule); }
+.mod .news-cell:nth-child(3n + 1) { border-left: 0; padding-left: 0; }
+.mod .news-cell .n { font-weight: 800; font-size: 13px; color: var(--color-accent); }
+.mod .news-cell h3 { font-size: 21px; line-height: 1.2; margin: 0; }
+.mod .news-cell .sum { font-size: 15px; line-height: 1.6; color: color-mix(in srgb, var(--ink) 85%, var(--bg)); }
+.mod .news-cell .sum a, .mod .news-cell .why a { color: var(--color-accent-700); text-decoration: underline; text-underline-offset: 3px; }
+.mod .news-cell .why { font-size: 14px; color: var(--muted); }
+.mod .news-cell .why b { color: var(--ink); }
+.mod .news-cell .src { margin-top: auto; padding-top: 6px; font-size: 13px; font-weight: 600; color: var(--color-accent-700); }
+.mod .news-cell .src:hover { color: var(--color-accent); }
+
+/* Earlier digests: ruled rows, no hover slide. */
+.mod .earlier .row-item { grid-template-columns: 140px minmax(0, 1fr); border-bottom: 1px solid var(--rule); }
+.mod .earlier .row-item:hover { padding-left: 0; }
+.mod .earlier .row-item h3 { font-size: 19px; }
+.mod .earlier .mono { font-size: 13px; font-weight: 600; letter-spacing: 0; }
+
+@media (max-width: 960px) {
+  .mod .cells { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mod .news-cell:nth-child(3n + 1) { border-left: 1px solid var(--rule); padding-left: 24px; }
+  .mod .news-cell:nth-child(2n + 1) { border-left: 0; padding-left: 0; }
+}
+@media (max-width: 640px) {
+  .mod .news-page { padding-top: 32px; }
+  .mod .cells { grid-template-columns: minmax(0, 1fr); }
+  .mod .news-cell, .mod .news-cell:nth-child(3n + 1) { border-left: 0; padding-left: 0; padding-right: 0; }
+  .mod .sec-hd { grid-template-columns: 36px minmax(0, 1fr); }
+  .mod .sec-c { display: none; }
+  .mod .sec-hd h2 { font-size: 26px; }
+  .mod .stat .num { font-size: 34px; }
+  .mod .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mod .stat:nth-child(odd) { padding-left: 0; border-left: 0; }
+  .mod .stat:nth-child(n + 3) { border-top: 1px solid var(--rule); }
+  .mod .earlier .row-item { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+}

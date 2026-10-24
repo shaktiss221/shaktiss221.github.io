@@ -25,3 +25,5 @@ One-paragraph summary. Links like [this](https://example.com) are allowed.
 ```
 
 Each story starts with `## Title`; `category`, `source` (`Name | URL`, URL optional) and `why` are optional.
+Stories are grouped on the page by `category` in the order they first appear (the daily brief uses Top stories, Built with AI, AI giants).
+The AI News pages use the Modernist design via `news.css`, loaded on top of `style.css`.

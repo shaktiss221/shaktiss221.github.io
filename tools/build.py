@@ -32,6 +32,13 @@ TOPIC_BLURBS = {
     'case study': 'How one real company solved one real problem.',
 }
 
+# AI News pages wear the Modernist design (Archivo, 2px rules, one red accent) on top of style.css.
+SKINS = {
+    '': '',
+    'mod': ('\n  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap">'
+            '\n  <link rel="stylesheet" href="/news.css">'),
+}
+
 ICONS = {
     'right': '<path d="M5 12h14M13 6l6 6-6 6"/>',
     'left': '<path d="M19 12H5M11 6l-6 6 6 6"/>',
@@ -52,7 +59,7 @@ def slugify(s):
     return re.sub(r'[^a-z0-9]+', '-', s.lower()).strip('-')
 
 
-def page(title, body, current, has_news, description=SITE_DESC):
+def page(title, body, current, has_news, description=SITE_DESC, skin=''):
     nav = [('/', 'Today'), ('/reading/', 'Archive'), ('/topics/', 'Topics')]
     if has_news:
         nav.append(('/news/', 'AI News'))
@@ -78,9 +85,9 @@ def page(title, body, current, has_news, description=SITE_DESC):
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="{FONTS}">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/style.css">{SKINS[skin]}
 </head>
-<body>
+<body{f' class="{skin}"' if skin else ''}>
   <header class="hdr"><div class="wrap hdr-in">
       <a class="brand" href="/">{SITE_TITLE}<i>.</i></a>
       <nav class="nav" aria-label="Sections">
@@ -321,48 +328,58 @@ def build():
     </div>'''
         write(f'topics/{slugify(t)}.html', page(topic_name(t), body, '/topics/', has_news, TOPIC_BLURBS.get(t.lower(), SITE_DESC)))
 
-    # AI news digests.
+    # AI news digests: stories grouped by category, each group a ruled grid of cells.
     shutil.rmtree(os.path.join(ROOT, 'news'), ignore_errors=True)
     for i, d in enumerate(digests):
         newer = digests[i - 1] if i > 0 else None
         older = digests[i + 1] if i + 1 < len(digests) else None
-        items = '\n      '.join(
-            f'<article class="news-item"><span class="n">{n + 1}</span><div>'
-            f'<div class="kicker">{esc(it["category"])}</div><h3>{esc(it["title"])}</h3>'
-            f'<p class="sum">{inline_md(it["summary"])}</p>'
-            + (f'<div class="why"><b>Why it matters</b><span class="muted">{inline_md(it["why"])}</span></div>' if it['why'] else '')
-            + (f'<div class="mono muted" style="margin-top:12px">Source: '
-               + (f'<a href="{esc(it["url"])}" rel="noopener">{esc(it["source"])} ↗</a>' if it['url'] else esc(it['source']))
-               + '</div>' if it['source'] else '')
-            + '</div></article>'
-            for n, it in enumerate(d['items']))
+        groups = {}
+        for it in d['items']:
+            groups.setdefault(it['category'] or 'Stories', []).append(it)
+
+        def cell(n, it):
+            src = ''
+            if it['source']:
+                src = (f'<a class="src" href="{esc(it["url"])}" rel="noopener">{esc(it["source"])} ↗</a>' if it['url']
+                       else f'<span class="src">{esc(it["source"])}</span>')
+            why = f'<p class="why"><b>Why it matters</b> {inline_md(it["why"])}</p>' if it['why'] else ''
+            return (f'<article class="news-cell"><span class="n">{n:02d}</span><h3>{esc(it["title"])}</h3>'
+                    f'<p class="sum">{inline_md(it["summary"])}</p>{why}{src}</article>')
+
+        secs = ''
+        stats = ''
+        for g, (name, its) in enumerate(groups.items()):
+            slug = slugify(name)
+            stats += f'<a class="stat" href="#{slug}"><span class="num">{len(its):02d}</span><span class="lbl">{esc(name)}</span></a>'
+            secs += (f'<section class="news-sec" id="{slug}"><div class="sec-hd"><span class="sec-n">{g + 1:02d}</span>'
+                         f'<h2>{esc(name)}</h2><span class="sec-c">{len(its)} stories</span></div>'
+                         f'<div class="cells">{"".join(cell(n + 1, it) for n, it in enumerate(its))}</div></section>')
         prev_btn = (f'<a class="btn btn-line" href="/news/{older["date"]}.html">{icon("left")}{fmt_date(older["date"], "short")}</a>'
-                    if older else f'<span class="btn btn-line off">{icon("left")}</span>')
+                    if older else f'<span class="btn btn-line off">{icon("left")}Oldest</span>')
         next_btn = (f'<a class="btn btn-line" href="/news/{"" if i == 1 else newer["date"] + ".html"}">{fmt_date(newer["date"], "short")}{icon("right")}</a>'
                     if newer else f'<span class="btn btn-line off">Latest{icon("right")}</span>')
         earlier = ''
         if i == 0 and len(digests) > 1:
-            earlier = ('<section class="group"><div class="section-hd"><span class="kicker">Earlier digests</span></div>'
+            earlier = ('<section class="news-sec"><div class="sec-hd"><span class="sec-n">—</span><h2>Earlier digests</h2>'
+                       f'<span class="sec-c">{len(digests) - 1} days</span></div><div class="earlier">'
                        + ''.join(f'<a class="row-item" href="/news/{e["date"]}.html"><span class="mono muted">{fmt_date(e["date"], "row")}</span>'
                                  f'<div><h3>{esc(e["items"][0]["title"]) if e["items"] else ""}</h3>'
-                                 f'<div class="mono muted sub">{len(e["items"])} stories</div></div></a>' for e in digests[1:15])
-                       + '</section>')
-        body = f'''    <div class="news-page">
+                                 f'<div class="mono muted sub">{len(e["items"])} stories</div></div></a>' for e in digests[1:30])
+                       + '</div></section>')
+        body = f'''    <div class="wrap news-page">
     <div class="news-hd">
       <div><div class="kicker acc">AI News · daily digest</div>
       <h1 class="page-title">{fmt_date(d["date"], "long")}</h1></div>
       <div class="pager-btns">{prev_btn}{next_btn}</div>
     </div>
-    <p class="muted" style="margin-top:14px">{len(d["items"])} stories · about {math.ceil(len(d["items"]) * 0.6)} min</p>
-    <div class="news-list">
-      {items}
-    </div>
+    <div class="stats">{stats}<div class="stat"><span class="num">{math.ceil(len(d["items"]) * 0.6)}</span><span class="lbl">Minutes to read</span></div></div>
+    {secs}
     {earlier}
     </div>'''
         title = f'AI News, {fmt_date(d["date"], "full")}'
-        write(f'news/{d["date"]}.html', page(title, body, '/news/', has_news))
+        write(f'news/{d["date"]}.html', page(title, body, '/news/', has_news, skin='mod'))
         if i == 0:
-            write('news/index.html', page('AI News', body, '/news/', has_news))
+            write('news/index.html', page('AI News', body, '/news/', has_news, skin='mod'))
 
     # Front page: the newest deep dive, the latest news (or topics), then earlier reads.
     lead = articles[0]
