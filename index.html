@@ -3,35 +3,65 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Shakti&#x27;s Knowledge Base</title>
-  <meta name="description" content="Long-form notes on how real systems work: databases, distributed systems, networking and security.">
+  <title>The Daily Commit</title>
+  <meta name="description" content="Deep dives on how real systems work: databases, distributed systems, networking and security.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header class="site"><div class="wrap">
-    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
-    <nav>
-      <a href="/" aria-current="page">Home</a>
-      <a href="/reading/">Reading</a>
-    </nav>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/" aria-current="page">Today</a>
+        <a href="/reading/">Archive</a>
+        <a href="/topics/">Topics</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
   </div></header>
 
-  <main><div class="wrap">
-    <h1>Notes on how systems really work</h1>
-    <p class="lede">A public notebook of long reads on databases, distributed systems, networking and security, each built around real papers and engineering write-ups.</p>
-    <p class="topics"><span class="tag">databases · 6</span><span class="tag">distributed systems · 5</span><span class="tag">APIs · 2</span><span class="tag">caching · 2</span><span class="tag">networking · 2</span><span class="tag">security · 2</span><span class="tag">analytics · 1</span><span class="tag">case study · 1</span><span class="tag">infrastructure · 1</span><span class="tag">messaging · 1</span></p>
+  <main>
+    <div class="wrap page">
+    <div class="kicker" style="margin-bottom:28px">Wednesday, October 28</div>
+    <div class="front-grid">
+      <article class="lead">
+        <div class="kicker acc" style="margin-bottom:16px">Latest deep dive · Databases · 16 min read</div>
+        <h1><a href="/reading/discord-scylladb.html">Discord&#x27;s messages: Cassandra to ScyllaDB</a></h1>
+        <p class="dek">How Discord moved trillions of messages to ScyllaDB, and the data-services layer that stopped hot channels hurting everyone else.</p>
+        <div style="margin-top:28px"><a class="btn btn-solid" href="/reading/discord-scylladb.html">Start reading <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></div>
+        <div class="in-doc"><div class="kicker" style="margin-bottom:14px">In this deep dive</div><ol><li><span class="n">01</span><a href="/reading/discord-scylladb.html#to-2017-from-mongodb-to-cassandra">2015 to 2017: from MongoDB
+to Cassandra</a></li><li><span class="n">02</span><a href="/reading/discord-scylladb.html#to-2022-what-broke-at-trillions-of-messages">2017 to 2022:
+what broke at trillions of messages</a></li><li><span class="n">03</span><a href="/reading/discord-scylladb.html#the-new-design-data-services-in-front-of-scylladb">The new
+design: data services in front of ScyllaDB</a></li><li><span class="n">04</span><a href="/reading/discord-scylladb.html#the-migration-the-results-and-the-lessons">The migration, the
+results and the lessons</a></li><li><span class="n">05</span><a href="/reading/discord-scylladb.html#discussion-questions">Discussion questions</a></li><li><span class="n">06</span><a href="/reading/discord-scylladb.html#sources">Sources</a></li></ol></div>
+      </article>
+      <aside class="rail"><div class="section-hd" style="border-bottom:0;padding-bottom:0"><span class="kicker acc">Browse by topic</span><span class="mono muted">12 deep dives</span></div><a class="rail-item" href="/topics/databases.html"><div class="kicker" style="font-size:10.5px">6 deep dives</div><div class="t">Databases</div><div class="d">Storage engines, indexing, transactions and the systems built on them.</div></a><a class="rail-item" href="/topics/distributed-systems.html"><div class="kicker" style="font-size:10.5px">5 deep dives</div><div class="t">Distributed Systems</div><div class="d">Replication, partitioning, failure and getting many machines to agree.</div></a><a class="rail-item" href="/topics/apis.html"><div class="kicker" style="font-size:10.5px">2 deep dives</div><div class="t">APIs</div><div class="d">The contracts between services, and how they hold up under load.</div></a><a class="rail-item" href="/topics/caching.html"><div class="kicker" style="font-size:10.5px">2 deep dives</div><div class="t">Caching</div><div class="d">Keeping hot data close, and keeping it correct.</div></a><a class="rail-item" href="/topics/networking.html"><div class="kicker" style="font-size:10.5px">2 deep dives</div><div class="t">Networking</div><div class="d">Protocols on the wire, from handshakes to streams.</div></a><a class="rail-item" href="/topics/security.html"><div class="kicker" style="font-size:10.5px">2 deep dives</div><div class="t">Security</div><div class="d">Cryptography in practice, secrets and trust.</div></a><a class="link-btn" href="/topics/" style="margin-top:18px">All topics <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></aside>
+    </div>
+    <section class="rows">
+      <div class="section-hd"><span class="kicker">Earlier</span><a class="link-btn" href="/reading/">Full archive <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></div>
+      <a class="row-item" href="/reading/consistent-hashing.html"><span class="mono muted">Oct 27</span><div><h3>Consistent hashing and partitioning</h3><div class="mono muted sub">Distributed Systems · 16 min</div></div></a>
+      <a class="row-item" href="/reading/secrets-management.html"><span class="mono muted">Oct 26</span><div><h3>Secrets management: Vault, KMS and envelope encryption</h3><div class="mono muted sub">Security · 17 min</div></div></a>
+      <a class="row-item" href="/reading/grpc-protobuf.html"><span class="mono muted">Oct 25</span><div><h3>gRPC and Protobuf in production</h3><div class="mono muted sub">Networking · 17 min</div></div></a>
+      <a class="row-item" href="/reading/postgres-mvcc.html"><span class="mono muted">Oct 24</span><div><h3>Postgres MVCC, vacuum and isolation</h3><div class="mono muted sub">Databases · 16 min</div></div></a>
+      <a class="row-item" href="/reading/caching-memcache.html"><span class="mono muted">Oct 24</span><div><h3>Caching at scale: lessons from Facebook&#x27;s memcache</h3><div class="mono muted sub">Caching · 14 min</div></div></a>
+      <a class="row-item" href="/reading/starrocks-olap.html"><span class="mono muted">Oct 23</span><div><h3>StarRocks and how fast OLAP engines work</h3><div class="mono muted sub">Databases · 15 min</div></div></a>
+    </section>
+    </div>
+  </main>
 
-    <h2>Latest reads</h2>
-    <ul class="list">
-      <li><a class="title" href="/reading/discord-scylladb.html">Discord&#x27;s messages: Cassandra to ScyllaDB</a><span class="desc">How Discord moved trillions of messages to ScyllaDB, and the data-services layer that stopped hot channels hurting everyone else.</span><span class="meta-line">October 28, 2026 · 16 min read<span class="tag">databases</span><span class="tag">case study</span></span></li>
-      <li><a class="title" href="/reading/consistent-hashing.html">Consistent hashing and partitioning</a><span class="desc">The hash ring and its successors (rendezvous, jump and Maglev hashing), range partitioning, and how real systems combine them.</span><span class="meta-line">October 27, 2026 · 16 min read<span class="tag">distributed systems</span><span class="tag">databases</span></span></li>
-      <li><a class="title" href="/reading/secrets-management.html">Secrets management: Vault, KMS and envelope encryption</a><span class="desc">From passwords in config files to dynamic credentials and workload identity, with envelope encryption underneath.</span><span class="meta-line">October 26, 2026 · 17 min read<span class="tag">security</span><span class="tag">infrastructure</span></span></li>
-      <li><a class="title" href="/reading/grpc-protobuf.html">gRPC and Protobuf in production</a><span class="desc">Why field numbers and HTTP/2 streams explain Protobuf&#x27;s schema rules, gRPC streaming and its load-balancing quirks.</span><span class="meta-line">October 25, 2026 · 17 min read<span class="tag">networking</span><span class="tag">APIs</span></span></li>
-      <li><a class="title" href="/reading/postgres-mvcc.html">Postgres MVCC, vacuum and isolation</a><span class="desc">Row versions, snapshots, vacuum and transaction ID wraparound: how Postgres lets readers and writers never block each other.</span><span class="meta-line">October 24, 2026 · 16 min read<span class="tag">databases</span></span></li>
-    </ul>
-    <p class="more"><a href="/reading/">All 12 reads →</a></p>
-  </div></main>
-
-  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how real systems work.</span>
+  </div></footer>
+  <script src="/site.js"></script>
 </body>
 </html>

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Topics · The Daily Commit</title>
+  <meta name="description" content="Deep dives on how real systems work: databases, distributed systems, networking and security.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/">Archive</a>
+        <a href="/topics/" aria-current="page">Topics</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="wrap page">
+    <div class="kicker">Topics</div>
+    <h1 class="page-title">Browse by topic</h1>
+    <div class="tcards">
+      <a class="tcard" href="/topics/databases.html"><span class="mono muted">6 deep dives</span><h3>Databases</h3><span>Storage engines, indexing, transactions and the systems built on them.</span></a>
+      <a class="tcard" href="/topics/distributed-systems.html"><span class="mono muted">5 deep dives</span><h3>Distributed Systems</h3><span>Replication, partitioning, failure and getting many machines to agree.</span></a>
+      <a class="tcard" href="/topics/apis.html"><span class="mono muted">2 deep dives</span><h3>APIs</h3><span>The contracts between services, and how they hold up under load.</span></a>
+      <a class="tcard" href="/topics/caching.html"><span class="mono muted">2 deep dives</span><h3>Caching</h3><span>Keeping hot data close, and keeping it correct.</span></a>
+      <a class="tcard" href="/topics/networking.html"><span class="mono muted">2 deep dives</span><h3>Networking</h3><span>Protocols on the wire, from handshakes to streams.</span></a>
+      <a class="tcard" href="/topics/security.html"><span class="mono muted">2 deep dives</span><h3>Security</h3><span>Cryptography in practice, secrets and trust.</span></a>
+      <a class="tcard" href="/topics/analytics.html"><span class="mono muted">1 deep dive</span><h3>Analytics</h3><span>Engines built to scan billions of rows fast.</span></a>
+      <a class="tcard" href="/topics/case-study.html"><span class="mono muted">1 deep dive</span><h3>Case Study</h3><span>How one real company solved one real problem.</span></a>
+      <a class="tcard" href="/topics/infrastructure.html"><span class="mono muted">1 deep dive</span><h3>Infrastructure</h3><span>The platform pieces every service leans on.</span></a>
+      <a class="tcard" href="/topics/messaging.html"><span class="mono muted">1 deep dive</span><h3>Messaging</h3><span>Queues, logs and delivery guarantees.</span></a>
+    </div>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how real systems work.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+</body>
+</html>

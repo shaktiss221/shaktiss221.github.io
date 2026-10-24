@@ -3,45 +3,52 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Exactly-once delivery: what it really means · Shakti&#x27;s Knowledge Base</title>
+  <title>Exactly-once delivery: what it really means · The Daily Commit</title>
   <meta name="description" content="Why no network delivers exactly once, and the patterns that make the effect happen once anyway: idempotent consumers, the outbox and Kafka transactions.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header class="site"><div class="wrap">
-    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
-    <nav>
-      <a href="/">Home</a>
-      <a href="/reading/" aria-current="page">Reading</a>
-    </nav>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
   </div></header>
 
-  <main><div class="wrap">
-    <article class="post">
-      <p class="crumb"><a href="/reading/">Reading</a></p>
-      <h1>Exactly-once delivery: what it really means</h1>
-      <p class="meta">October 23, 2026 · 18 min read<span class="tag">distributed systems</span><span class="tag">messaging</span></p>
-<details class="toc"><summary>Contents</summary>
-<ul>
-<li><a href="#why-delivery-cant-be-exactly-once"
-id="toc-why-delivery-cant-be-exactly-once">1. Why delivery can’t be
-exactly once</a></li>
-<li><a href="#idempotent-consumers" id="toc-idempotent-consumers">2.
-Idempotent consumers</a></li>
-<li><a href="#the-dual-write-problem-and-the-transactional-outbox"
-id="toc-the-dual-write-problem-and-the-transactional-outbox">3. The
-dual-write problem and the transactional outbox</a></li>
-<li><a href="#how-kafka-does-exactly-once"
-id="toc-how-kafka-does-exactly-once">4. How Kafka does
-exactly-once</a></li>
-<li><a href="#other-systems-and-choosing-an-approach"
-id="toc-other-systems-and-choosing-an-approach">5. Other systems, and
-choosing an approach</a></li>
-<li><a href="#discussion-questions"
-id="toc-discussion-questions">Discussion questions</a></li>
-<li><a href="#sources" id="toc-sources">Sources</a></li>
-</ul>
-</details>
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Exactly-once delivery: what it really means</span>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>18 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#why-delivery-cant-be-exactly-once">Why delivery can’t be
+exactly once</a><a href="#idempotent-consumers">Idempotent consumers</a><a href="#the-dual-write-problem-and-the-transactional-outbox">The
+dual-write problem and the transactional outbox</a><a href="#how-kafka-does-exactly-once">How Kafka does exactly-once</a><a href="#other-systems-and-choosing-an-approach">Other systems, and
+choosing an approach</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 18 min left</div>
+      </nav>
+      <article class="article" data-minutes="18">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/distributed-systems.html">Distributed Systems</a> · October 23, 2026 · 18 min</div>
+        <h1>Exactly-once delivery: what it really means</h1>
+        <p class="dek">Why no network delivers exactly once, and the patterns that make the effect happen once anyway: idempotent consumers, the outbox and Kafka transactions.</p>
 <p>No network can deliver a message exactly once, but a system can make
 the <em>effect</em> of processing happen exactly once. Every working
 “exactly-once” system, from Kafka transactions to Stripe’s API, does the
@@ -602,10 +609,20 @@ overview of end-to-end exactly-once processing in Apache Flink</a>,
 Apache Flink blog, 2018</li>
 </ul>
 
-    </article>
-    <nav class="pager"><a class="prev" href="/reading/redis-internals.html"><span>Older</span>Redis internals: one thread, many tricks</a><a class="next" href="/reading/starrocks-olap.html"><span>Newer</span>StarRocks and how fast OLAP engines work</a></nav>
-  </div></main>
+        <div class="end-card">
+          <div class="big">You reached the end.</div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a><a class="chip" href="/topics/messaging.html">Messaging</a></div>
+          <div class="daynav"><a href="/reading/redis-internals.html"><div class="kicker">← Older · Oct 22</div><div class="t">Redis internals: one thread, many tricks</div></a><a href="/reading/starrocks-olap.html"><div class="kicker">Newer · Oct 23 →</div><div class="t">StarRocks and how fast OLAP engines work</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
 
-  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how real systems work.</span>
+  </div></footer>
+  <script src="/site.js"></script>
 </body>
 </html>

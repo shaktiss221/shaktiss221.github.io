@@ -3,43 +3,53 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Discord&#x27;s messages: Cassandra to ScyllaDB · Shakti&#x27;s Knowledge Base</title>
+  <title>Discord&#x27;s messages: Cassandra to ScyllaDB · The Daily Commit</title>
   <meta name="description" content="How Discord moved trillions of messages to ScyllaDB, and the data-services layer that stopped hot channels hurting everyone else.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header class="site"><div class="wrap">
-    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
-    <nav>
-      <a href="/">Home</a>
-      <a href="/reading/" aria-current="page">Reading</a>
-    </nav>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
   </div></header>
 
-  <main><div class="wrap">
-    <article class="post">
-      <p class="crumb"><a href="/reading/">Reading</a></p>
-      <h1>Discord&#x27;s messages: Cassandra to ScyllaDB</h1>
-      <p class="meta">October 28, 2026 · 16 min read<span class="tag">databases</span><span class="tag">case study</span></p>
-<details class="toc"><summary>Contents</summary>
-<ul>
-<li><a href="#to-2017-from-mongodb-to-cassandra"
-id="toc-to-2017-from-mongodb-to-cassandra">1. 2015 to 2017: from MongoDB
-to Cassandra</a></li>
-<li><a href="#to-2022-what-broke-at-trillions-of-messages"
-id="toc-to-2022-what-broke-at-trillions-of-messages">2. 2017 to 2022:
-what broke at trillions of messages</a></li>
-<li><a href="#the-new-design-data-services-in-front-of-scylladb"
-id="toc-the-new-design-data-services-in-front-of-scylladb">3. The new
-design: data services in front of ScyllaDB</a></li>
-<li><a href="#the-migration-the-results-and-the-lessons"
-id="toc-the-migration-the-results-and-the-lessons">4. The migration, the
-results and the lessons</a></li>
-<li><a href="#discussion-questions"
-id="toc-discussion-questions">Discussion questions</a></li>
-<li><a href="#sources" id="toc-sources">Sources</a></li>
-</ul>
-</details>
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Discord&#x27;s messages: Cassandra to ScyllaDB</span>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>16 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#to-2017-from-mongodb-to-cassandra">2015 to 2017: from MongoDB
+to Cassandra</a><a href="#to-2022-what-broke-at-trillions-of-messages">2017 to 2022:
+what broke at trillions of messages</a><a href="#the-new-design-data-services-in-front-of-scylladb">The new
+design: data services in front of ScyllaDB</a><a href="#the-migration-the-results-and-the-lessons">The migration, the
+results and the lessons</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 16 min left</div>
+      </nav>
+      <article class="article" data-minutes="16">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/databases.html">Databases</a> · October 28, 2026 · 16 min</div>
+        <h1>Discord&#x27;s messages: Cassandra to ScyllaDB</h1>
+        <p class="dek">How Discord moved trillions of messages to ScyllaDB, and the data-services layer that stopped hot channels hurting everyone else.</p>
 <p>In 2022 Discord moved trillions of messages from a 177-node Cassandra
 cluster to 72 ScyllaDB nodes, cut p99 read latency from as high as 125
 ms to about 15 ms, and copied the data in 9 days. The database swap gets
@@ -529,10 +539,20 @@ package</a>, Go documentation (the request-coalescing pattern)</li>
 chapter 3 (LSM trees and SSTables)</li>
 </ul>
 
-    </article>
-    <nav class="pager"><a class="prev" href="/reading/consistent-hashing.html"><span>Older</span>Consistent hashing and partitioning</a><span></span></nav>
-  </div></main>
+        <div class="end-card">
+          <div class="big">You reached the end.</div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/databases.html">Databases</a><a class="chip" href="/topics/case-study.html">Case Study</a></div>
+          <div class="daynav"><a href="/reading/consistent-hashing.html"><div class="kicker">← Older · Oct 27</div><div class="t">Consistent hashing and partitioning</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
 
-  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how real systems work.</span>
+  </div></footer>
+  <script src="/site.js"></script>
 </body>
 </html>

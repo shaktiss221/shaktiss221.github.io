@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Messaging · The Daily Commit</title>
+  <meta name="description" content="Queues, logs and delivery guarantees.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/">Archive</a>
+        <a href="/topics/" aria-current="page">Topics</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="wrap page">
+    <a class="link-btn mono" href="/topics/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>All topics</a>
+    <h1 class="page-title" style="margin-top:20px">Messaging</h1>
+    <p class="muted" style="margin-top:12px;font-size:17px;max-width:620px">Queues, logs and delivery guarantees.</p>
+    <p class="mono muted" style="margin-top:16px">1 deep dive · 18 min of reading</p>
+    <section class="group"><div class="section-hd"><span class="kicker">Newest first</span></div>
+      <a class="row-item" href="/reading/exactly-once.html"><span class="mono muted">Oct 23</span><div><h3>Exactly-once delivery: what it really means</h3><p>Why no network delivers exactly once, and the patterns that make the effect happen once anyway: idempotent consumers, the outbox and Kafka transactions.</p><div class="mono muted sub">Distributed Systems · 18 min</div></div></a>
+    </section>
+    <div class="chips" style="margin-top:40px"><span class="kicker" style="align-self:center;margin-right:6px">Other topics</span><a class="chip" href="/topics/databases.html">Databases</a><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a><a class="chip" href="/topics/apis.html">APIs</a><a class="chip" href="/topics/caching.html">Caching</a><a class="chip" href="/topics/networking.html">Networking</a><a class="chip" href="/topics/security.html">Security</a><a class="chip" href="/topics/analytics.html">Analytics</a><a class="chip" href="/topics/case-study.html">Case Study</a><a class="chip" href="/topics/infrastructure.html">Infrastructure</a></div>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how real systems work.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+</body>
+</html>

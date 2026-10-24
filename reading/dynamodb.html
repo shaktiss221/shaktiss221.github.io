@@ -3,50 +3,53 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DynamoDB under the hood · Shakti&#x27;s Knowledge Base</title>
+  <title>DynamoDB under the hood · The Daily Commit</title>
   <meta name="description" content="How AWS keeps single-digit millisecond latency at any scale, from Paxos partitions to global admission control.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header class="site"><div class="wrap">
-    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
-    <nav>
-      <a href="/">Home</a>
-      <a href="/reading/" aria-current="page">Reading</a>
-    </nav>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
   </div></header>
 
-  <main><div class="wrap">
-    <article class="post">
-      <p class="crumb"><a href="/reading/">Reading</a></p>
-      <h1>DynamoDB under the hood</h1>
-      <p class="meta">October 20, 2026 · 16 min read<span class="tag">databases</span><span class="tag">distributed systems</span></p>
-<details class="toc"><summary>Contents</summary>
-<ul>
-<li><a href="#why-dynamodb-exists" id="toc-why-dynamodb-exists">1. Why
-DynamoDB exists</a></li>
-<li><a href="#the-data-model-in-five-minutes"
-id="toc-the-data-model-in-five-minutes">2. The data model in five
-minutes</a></li>
-<li><a href="#architecture-partitions-leaders-and-routers"
-id="toc-architecture-partitions-leaders-and-routers">3. Architecture:
-partitions, leaders and routers</a></li>
-<li><a
-href="#capacity-from-per-partition-quotas-to-global-admission-control"
-id="toc-capacity-from-per-partition-quotas-to-global-admission-control">4.
-Capacity: from per-partition quotas to global admission control</a></li>
-<li><a href="#durability-and-availability"
-id="toc-durability-and-availability">5. Durability and
-availability</a></li>
-<li><a href="#what-the-internals-mean-for-your-data-model"
-id="toc-what-the-internals-mean-for-your-data-model">6. What the
-internals mean for your data model</a></li>
-<li><a href="#ideas-to-carry-away-and-questions-for-our-discussion"
-id="toc-ideas-to-carry-away-and-questions-for-our-discussion">7. Ideas
-to carry away, and questions for our discussion</a></li>
-<li><a href="#sources" id="toc-sources">Sources</a></li>
-</ul>
-</details>
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>DynamoDB under the hood</span>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>16 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#why-dynamodb-exists">Why DynamoDB exists</a><a href="#the-data-model-in-five-minutes">The data model in five
+minutes</a><a href="#architecture-partitions-leaders-and-routers">Architecture:
+partitions, leaders and routers</a><a href="#durability-and-availability">Durability and availability</a><a href="#what-the-internals-mean-for-your-data-model">What the
+internals mean for your data model</a><a href="#ideas-to-carry-away-and-questions-for-our-discussion">Ideas
+to carry away, and questions for our discussion</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 16 min left</div>
+      </nav>
+      <article class="article" data-minutes="16">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/databases.html">Databases</a> · October 20, 2026 · 16 min</div>
+        <h1>DynamoDB under the hood</h1>
+        <p class="dek">How AWS keeps single-digit millisecond latency at any scale, from Paxos partitions to global admission control.</p>
 <p>DynamoDB is a key-value store that is less interesting for its API
 than for one promise: the same single-digit millisecond latency at 10
 requests per second or 10 million. This reading follows how AWS keeps
@@ -569,10 +572,20 @@ SOSP 2007 (background for section 1)</li>
 from AWS documentation as I remember it and may have changed. Check the
 current DynamoDB service quotas before relying on them.</p>
 
-    </article>
-    <nav class="pager"><span></span><a class="next" href="/reading/tls-13.html"><span>Newer</span>TLS 1.3 from the handshake up</a></nav>
-  </div></main>
+        <div class="end-card">
+          <div class="big">You reached the end.</div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/databases.html">Databases</a><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a></div>
+          <div class="daynav"><span></span><a href="/reading/tls-13.html"><div class="kicker">Newer · Oct 21 →</div><div class="t">TLS 1.3 from the handshake up</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
 
-  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how real systems work.</span>
+  </div></footer>
+  <script src="/site.js"></script>
 </body>
 </html>

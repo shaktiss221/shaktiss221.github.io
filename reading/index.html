@@ -3,38 +3,59 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Reading · Shakti&#x27;s Knowledge Base</title>
-  <meta name="description" content="Long-form notes on how real systems work: databases, distributed systems, networking and security.">
+  <title>Archive · The Daily Commit</title>
+  <meta name="description" content="Deep dives on how real systems work: databases, distributed systems, networking and security.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header class="site"><div class="wrap">
-    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
-    <nav>
-      <a href="/">Home</a>
-      <a href="/reading/" aria-current="page">Reading</a>
-    </nav>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
   </div></header>
 
-  <main><div class="wrap">
-    <h1>Reading</h1>
-    <p class="lede">12 long reads on how real systems work, newest first. Each one ends with ideas to carry away and questions to think about.</p>
-    <ul class="list">
-      <li><a class="title" href="/reading/discord-scylladb.html">Discord&#x27;s messages: Cassandra to ScyllaDB</a><span class="desc">How Discord moved trillions of messages to ScyllaDB, and the data-services layer that stopped hot channels hurting everyone else.</span><span class="meta-line">October 28, 2026 · 16 min read<span class="tag">databases</span><span class="tag">case study</span></span></li>
-      <li><a class="title" href="/reading/consistent-hashing.html">Consistent hashing and partitioning</a><span class="desc">The hash ring and its successors (rendezvous, jump and Maglev hashing), range partitioning, and how real systems combine them.</span><span class="meta-line">October 27, 2026 · 16 min read<span class="tag">distributed systems</span><span class="tag">databases</span></span></li>
-      <li><a class="title" href="/reading/secrets-management.html">Secrets management: Vault, KMS and envelope encryption</a><span class="desc">From passwords in config files to dynamic credentials and workload identity, with envelope encryption underneath.</span><span class="meta-line">October 26, 2026 · 17 min read<span class="tag">security</span><span class="tag">infrastructure</span></span></li>
-      <li><a class="title" href="/reading/grpc-protobuf.html">gRPC and Protobuf in production</a><span class="desc">Why field numbers and HTTP/2 streams explain Protobuf&#x27;s schema rules, gRPC streaming and its load-balancing quirks.</span><span class="meta-line">October 25, 2026 · 17 min read<span class="tag">networking</span><span class="tag">APIs</span></span></li>
-      <li><a class="title" href="/reading/postgres-mvcc.html">Postgres MVCC, vacuum and isolation</a><span class="desc">Row versions, snapshots, vacuum and transaction ID wraparound: how Postgres lets readers and writers never block each other.</span><span class="meta-line">October 24, 2026 · 16 min read<span class="tag">databases</span></span></li>
-      <li><a class="title" href="/reading/caching-memcache.html">Caching at scale: lessons from Facebook&#x27;s memcache</a><span class="desc">Caching patterns and their failure modes, how Facebook scaled memcache, and how Meta pushed cache consistency to ten nines.</span><span class="meta-line">October 24, 2026 · 14 min read<span class="tag">caching</span><span class="tag">distributed systems</span></span></li>
-      <li><a class="title" href="/reading/starrocks-olap.html">StarRocks and how fast OLAP engines work</a><span class="desc">Columnar storage, vectorized execution, cost-based joins and real-time upserts, learned through one open-source engine.</span><span class="meta-line">October 23, 2026 · 15 min read<span class="tag">databases</span><span class="tag">analytics</span></span></li>
-      <li><a class="title" href="/reading/exactly-once.html">Exactly-once delivery: what it really means</a><span class="desc">Why no network delivers exactly once, and the patterns that make the effect happen once anyway: idempotent consumers, the outbox and Kafka transactions.</span><span class="meta-line">October 23, 2026 · 18 min read<span class="tag">distributed systems</span><span class="tag">messaging</span></span></li>
-      <li><a class="title" href="/reading/redis-internals.html">Redis internals: one thread, many tricks</a><span class="desc">One thread, compact encodings, persistence, eviction and clustering: how Redis gets so much from a single core.</span><span class="meta-line">October 22, 2026 · 18 min read<span class="tag">databases</span><span class="tag">caching</span></span></li>
-      <li><a class="title" href="/reading/rate-limiting.html">Rate limiting, from token buckets to global limits</a><span class="desc">The classic algorithms, how Stripe and Cloudflare run limits in production, and the contract between a limited server and a well-behaved client.</span><span class="meta-line">October 22, 2026 · 15 min read<span class="tag">distributed systems</span><span class="tag">APIs</span></span></li>
-      <li><a class="title" href="/reading/tls-13.html">TLS 1.3 from the handshake up</a><span class="desc">The protocol from the first byte to the certificates behind it, plus ECH, post-quantum key exchange and 47-day certificates.</span><span class="meta-line">October 21, 2026 · 17 min read<span class="tag">security</span><span class="tag">networking</span></span></li>
-      <li><a class="title" href="/reading/dynamodb.html">DynamoDB under the hood</a><span class="desc">How AWS keeps single-digit millisecond latency at any scale, from Paxos partitions to global admission control.</span><span class="meta-line">October 20, 2026 · 16 min read<span class="tag">databases</span><span class="tag">distributed systems</span></span></li>
-    </ul>
-  </div></main>
+  <main>
+    <div class="wrap page">
+    <div class="kicker">Archive</div>
+    <h1 class="page-title">Every deep dive</h1>
+    <p class="muted" style="margin-top:12px">12 deep dives · about 3 hours of reading</p>
+    <div class="chips" style="margin-top:24px"><a class="chip" href="/topics/databases.html">Databases</a><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a><a class="chip" href="/topics/apis.html">APIs</a><a class="chip" href="/topics/caching.html">Caching</a><a class="chip" href="/topics/networking.html">Networking</a><a class="chip" href="/topics/security.html">Security</a><a class="chip" href="/topics/analytics.html">Analytics</a><a class="chip" href="/topics/case-study.html">Case Study</a><a class="chip" href="/topics/infrastructure.html">Infrastructure</a><a class="chip" href="/topics/messaging.html">Messaging</a></div>
+    <section class="group"><div class="section-hd"><span class="kicker">October 2026</span><span class="mono muted">12 deep dives</span></div>
+      <a class="row-item" href="/reading/discord-scylladb.html"><span class="mono muted">Wed, Oct 28</span><div><h3>Discord&#x27;s messages: Cassandra to ScyllaDB</h3><p>How Discord moved trillions of messages to ScyllaDB, and the data-services layer that stopped hot channels hurting everyone else.</p><div class="mono muted sub">Databases · 16 min</div></div></a>
+      <a class="row-item" href="/reading/consistent-hashing.html"><span class="mono muted">Tue, Oct 27</span><div><h3>Consistent hashing and partitioning</h3><p>The hash ring and its successors (rendezvous, jump and Maglev hashing), range partitioning, and how real systems combine them.</p><div class="mono muted sub">Distributed Systems · 16 min</div></div></a>
+      <a class="row-item" href="/reading/secrets-management.html"><span class="mono muted">Mon, Oct 26</span><div><h3>Secrets management: Vault, KMS and envelope encryption</h3><p>From passwords in config files to dynamic credentials and workload identity, with envelope encryption underneath.</p><div class="mono muted sub">Security · 17 min</div></div></a>
+      <a class="row-item" href="/reading/grpc-protobuf.html"><span class="mono muted">Sun, Oct 25</span><div><h3>gRPC and Protobuf in production</h3><p>Why field numbers and HTTP/2 streams explain Protobuf&#x27;s schema rules, gRPC streaming and its load-balancing quirks.</p><div class="mono muted sub">Networking · 17 min</div></div></a>
+      <a class="row-item" href="/reading/postgres-mvcc.html"><span class="mono muted">Sat, Oct 24</span><div><h3>Postgres MVCC, vacuum and isolation</h3><p>Row versions, snapshots, vacuum and transaction ID wraparound: how Postgres lets readers and writers never block each other.</p><div class="mono muted sub">Databases · 16 min</div></div></a>
+      <a class="row-item" href="/reading/caching-memcache.html"><span class="mono muted">Sat, Oct 24</span><div><h3>Caching at scale: lessons from Facebook&#x27;s memcache</h3><p>Caching patterns and their failure modes, how Facebook scaled memcache, and how Meta pushed cache consistency to ten nines.</p><div class="mono muted sub">Caching · 14 min</div></div></a>
+      <a class="row-item" href="/reading/starrocks-olap.html"><span class="mono muted">Fri, Oct 23</span><div><h3>StarRocks and how fast OLAP engines work</h3><p>Columnar storage, vectorized execution, cost-based joins and real-time upserts, learned through one open-source engine.</p><div class="mono muted sub">Databases · 15 min</div></div></a>
+      <a class="row-item" href="/reading/exactly-once.html"><span class="mono muted">Fri, Oct 23</span><div><h3>Exactly-once delivery: what it really means</h3><p>Why no network delivers exactly once, and the patterns that make the effect happen once anyway: idempotent consumers, the outbox and Kafka transactions.</p><div class="mono muted sub">Distributed Systems · 18 min</div></div></a>
+      <a class="row-item" href="/reading/redis-internals.html"><span class="mono muted">Thu, Oct 22</span><div><h3>Redis internals: one thread, many tricks</h3><p>One thread, compact encodings, persistence, eviction and clustering: how Redis gets so much from a single core.</p><div class="mono muted sub">Databases · 18 min</div></div></a>
+      <a class="row-item" href="/reading/rate-limiting.html"><span class="mono muted">Thu, Oct 22</span><div><h3>Rate limiting, from token buckets to global limits</h3><p>The classic algorithms, how Stripe and Cloudflare run limits in production, and the contract between a limited server and a well-behaved client.</p><div class="mono muted sub">Distributed Systems · 15 min</div></div></a>
+      <a class="row-item" href="/reading/tls-13.html"><span class="mono muted">Wed, Oct 21</span><div><h3>TLS 1.3 from the handshake up</h3><p>The protocol from the first byte to the certificates behind it, plus ECH, post-quantum key exchange and 47-day certificates.</p><div class="mono muted sub">Security · 17 min</div></div></a>
+      <a class="row-item" href="/reading/dynamodb.html"><span class="mono muted">Tue, Oct 20</span><div><h3>DynamoDB under the hood</h3><p>How AWS keeps single-digit millisecond latency at any scale, from Paxos partitions to global admission control.</p><div class="mono muted sub">Databases · 16 min</div></div></a>
+    </section>
+    </div>
+  </main>
 
-  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how real systems work.</span>
+  </div></footer>
+  <script src="/site.js"></script>
 </body>
 </html>

@@ -3,48 +3,54 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Caching at scale: lessons from Facebook&#x27;s memcache · Shakti&#x27;s Knowledge Base</title>
+  <title>Caching at scale: lessons from Facebook&#x27;s memcache · The Daily Commit</title>
   <meta name="description" content="Caching patterns and their failure modes, how Facebook scaled memcache, and how Meta pushed cache consistency to ten nines.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header class="site"><div class="wrap">
-    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
-    <nav>
-      <a href="/">Home</a>
-      <a href="/reading/" aria-current="page">Reading</a>
-    </nav>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
   </div></header>
 
-  <main><div class="wrap">
-    <article class="post">
-      <p class="crumb"><a href="/reading/">Reading</a></p>
-      <h1>Caching at scale: lessons from Facebook&#x27;s memcache</h1>
-      <p class="meta">October 24, 2026 · 14 min read<span class="tag">caching</span><span class="tag">distributed systems</span></p>
-<details class="toc"><summary>Contents</summary>
-<ul>
-<li><a href="#what-a-cache-buys-and-what-it-costs"
-id="toc-what-a-cache-buys-and-what-it-costs">1. What a cache buys, and
-what it costs</a></li>
-<li><a href="#the-caching-patterns" id="toc-the-caching-patterns">2. The
-caching patterns</a></li>
-<li><a href="#stampedes-when-everyone-misses-at-once"
-id="toc-stampedes-when-everyone-misses-at-once">3. Stampedes: when
-everyone misses at once</a></li>
-<li><a href="#how-facebook-scaled-memcache"
-id="toc-how-facebook-scaled-memcache">4. How Facebook scaled
-memcache</a></li>
-<li><a href="#making-caches-consistent"
-id="toc-making-caches-consistent">5. Making caches consistent</a></li>
-<li><a href="#hot-keys-big-keys-and-other-sharp-edges"
-id="toc-hot-keys-big-keys-and-other-sharp-edges">6. Hot keys, big keys
-and other sharp edges</a></li>
-<li><a href="#ideas-to-carry-away-and-questions-for-our-discussion"
-id="toc-ideas-to-carry-away-and-questions-for-our-discussion">7. Ideas
-to carry away, and questions for our discussion</a></li>
-<li><a href="#sources" id="toc-sources">Sources</a></li>
-</ul>
-</details>
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Caching at scale: lessons from Facebook&#x27;s memcache</span>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>14 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#what-a-cache-buys-and-what-it-costs">What a cache buys, and
+what it costs</a><a href="#the-caching-patterns">The caching patterns</a><a href="#stampedes-when-everyone-misses-at-once">Stampedes: when
+everyone misses at once</a><a href="#how-facebook-scaled-memcache">How Facebook scaled
+memcache</a><a href="#making-caches-consistent">Making caches consistent</a><a href="#hot-keys-big-keys-and-other-sharp-edges">Hot keys, big keys
+and other sharp edges</a><a href="#ideas-to-carry-away-and-questions-for-our-discussion">Ideas
+to carry away, and questions for our discussion</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 14 min left</div>
+      </nav>
+      <article class="article" data-minutes="14">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/caching.html">Caching</a> · October 24, 2026 · 14 min</div>
+        <h1>Caching at scale: lessons from Facebook&#x27;s memcache</h1>
+        <p class="dek">Caching patterns and their failure modes, how Facebook scaled memcache, and how Meta pushed cache consistency to ten nines.</p>
 <p>A cache is the easiest component to add and one of the hardest to get
 right: it makes reads cheap by keeping a second copy of the data, and
 every hard problem in caching is about that second copy being wrong,
@@ -454,10 +460,20 @@ open directly (the original NSDI PDF) are taken from the lecture notes
 and reviews above; general patterns in sections 2 and 6 are standard
 practice rather than from one source.</p>
 
-    </article>
-    <nav class="pager"><a class="prev" href="/reading/starrocks-olap.html"><span>Older</span>StarRocks and how fast OLAP engines work</a><a class="next" href="/reading/postgres-mvcc.html"><span>Newer</span>Postgres MVCC, vacuum and isolation</a></nav>
-  </div></main>
+        <div class="end-card">
+          <div class="big">You reached the end.</div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/caching.html">Caching</a><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a></div>
+          <div class="daynav"><a href="/reading/starrocks-olap.html"><div class="kicker">← Older · Oct 23</div><div class="t">StarRocks and how fast OLAP engines work</div></a><a href="/reading/postgres-mvcc.html"><div class="kicker">Newer · Oct 24 →</div><div class="t">Postgres MVCC, vacuum and isolation</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
 
-  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how real systems work.</span>
+  </div></footer>
+  <script src="/site.js"></script>
 </body>
 </html>

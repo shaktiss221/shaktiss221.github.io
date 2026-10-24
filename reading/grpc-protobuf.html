@@ -3,41 +3,50 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>gRPC and Protobuf in production · Shakti&#x27;s Knowledge Base</title>
+  <title>gRPC and Protobuf in production · The Daily Commit</title>
   <meta name="description" content="Why field numbers and HTTP/2 streams explain Protobuf&#x27;s schema rules, gRPC streaming and its load-balancing quirks.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header class="site"><div class="wrap">
-    <a class="brand" href="/">Shakti&#x27;s Knowledge Base</a>
-    <nav>
-      <a href="/">Home</a>
-      <a href="/reading/" aria-current="page">Reading</a>
-    </nav>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
   </div></header>
 
-  <main><div class="wrap">
-    <article class="post">
-      <p class="crumb"><a href="/reading/">Reading</a></p>
-      <h1>gRPC and Protobuf in production</h1>
-      <p class="meta">October 25, 2026 · 17 min read<span class="tag">networking</span><span class="tag">APIs</span></p>
-<details class="toc"><summary>Contents</summary>
-<ul>
-<li><a href="#the-protobuf-wire-format"
-id="toc-the-protobuf-wire-format">1. The Protobuf wire format</a></li>
-<li><a href="#schema-evolution-the-rules-that-keep-you-compatible"
-id="toc-schema-evolution-the-rules-that-keep-you-compatible">2. Schema
-evolution: the rules that keep you compatible</a></li>
-<li><a href="#grpc-on-top-of-http2" id="toc-grpc-on-top-of-http2">3.
-gRPC on top of HTTP/2</a></li>
-<li><a href="#running-grpc-in-production"
-id="toc-running-grpc-in-production">4. Running gRPC in
-production</a></li>
-<li><a href="#discussion-questions"
-id="toc-discussion-questions">Discussion questions</a></li>
-<li><a href="#sources" id="toc-sources">Sources</a></li>
-</ul>
-</details>
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>gRPC and Protobuf in production</span>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>17 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#the-protobuf-wire-format">The Protobuf wire format</a><a href="#schema-evolution-the-rules-that-keep-you-compatible">Schema
+evolution: the rules that keep you compatible</a><a href="#grpc-on-top-of-http2">gRPC on top of HTTP/2</a><a href="#running-grpc-in-production">Running gRPC in production</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 17 min left</div>
+      </nav>
+      <article class="article" data-minutes="17">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/networking.html">Networking</a> · October 25, 2026 · 17 min</div>
+        <h1>gRPC and Protobuf in production</h1>
+        <p class="dek">Why field numbers and HTTP/2 streams explain Protobuf&#x27;s schema rules, gRPC streaming and its load-balancing quirks.</p>
 <p>Protobuf identifies fields by number instead of by name, and gRPC
 carries those bytes over HTTP/2 streams. Those two facts explain almost
 everything about the pair: why messages are small, why the schema rules
@@ -695,10 +704,20 @@ AIP-193 (errors)</li>
 Communications of the ACM, 2013</li>
 </ul>
 
-    </article>
-    <nav class="pager"><a class="prev" href="/reading/postgres-mvcc.html"><span>Older</span>Postgres MVCC, vacuum and isolation</a><a class="next" href="/reading/secrets-management.html"><span>Newer</span>Secrets management: Vault, KMS and envelope encryption</a></nav>
-  </div></main>
+        <div class="end-card">
+          <div class="big">You reached the end.</div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/networking.html">Networking</a><a class="chip" href="/topics/apis.html">APIs</a></div>
+          <div class="daynav"><a href="/reading/postgres-mvcc.html"><div class="kicker">← Older · Oct 24</div><div class="t">Postgres MVCC, vacuum and isolation</div></a><a href="/reading/secrets-management.html"><div class="kicker">Newer · Oct 26 →</div><div class="t">Secrets management: Vault, KMS and envelope encryption</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
 
-  <footer class="site"><div class="wrap">© 2026 Shakti</div></footer>
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how real systems work.</span>
+  </div></footer>
+  <script src="/site.js"></script>
 </body>
 </html>
