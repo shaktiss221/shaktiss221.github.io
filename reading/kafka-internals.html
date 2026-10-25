@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kafka internals: the log, replication and consumer groups · The Daily Commit</title>
+  <meta name="description" content="Why Kafka is a log and not a queue, how partitions are stored and replicated, what the high watermark guarantees, how consumer groups rebalance, and what changed in Kafka 4.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Kafka internals: the log, replication and consumer groups</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>12 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#a-log-not-a-queue">A log, not a queue</a><a href="#a-partition-on-disk">A partition on disk</a><a href="#replication-and-the-high-watermark">Replication and the high
+watermark</a><a href="#producers-partitioning-batching-and-idempotence">Producers:
+partitioning, batching and idempotence</a><a href="#consumers-groups-and-rebalancing">Consumers, groups and
+rebalancing</a><a href="#the-control-plane-from-zookeeper-to-kraft">The control plane:
+from ZooKeeper to KRaft</a><a href="#queues-for-kafka-share-groups">Queues for Kafka: share
+groups</a><a href="#ideas-to-carry-away-and-questions-for-our-discussion">Ideas
+to carry away, and questions for our discussion</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 12 min left</div>
+      </nav>
+      <article class="article" data-slug="kafka-internals" data-minutes="12">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/messaging.html">Messaging</a> · October 25, 2026 · 12 min</div>
+        <h1>Kafka internals: the log, replication and consumer groups</h1>
+        <p class="dek">Why Kafka is a log and not a queue, how partitions are stored and replicated, what the high watermark guarantees, how consumer groups rebalance, and what changed in Kafka 4.</p>
+<p>Kafka is easiest to understand if you stop thinking of it as a
+message queue: it is a replicated, append-only log that many readers can
+scan at their own pace. Almost every feature, and every surprising
+behavior, follows from that one design choice. This reading walks from a
+single partition on disk to replication, producers, consumer groups and
+the changes that arrived with Kafka 4.0 and 4.1.</p>
+<h2 id="a-log-not-a-queue">1. A log, not a queue</h2>
+<p>A classic queue such as RabbitMQ or Amazon SQS hands each message to
+one consumer and forgets it once that consumer acknowledges it. Kafka
+does something different: it appends every record to a log and keeps it
+for a configured retention period, whether or not anyone has read
+it.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th></th>
+<th>Queue (SQS, RabbitMQ)</th>
+<th>Log (Kafka)</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>After a message is consumed</td>
+<td>It is deleted</td>
+<td>It stays until retention expires</td>
+</tr>
+<tr class="even">
+<td>Tracking progress</td>
+<td>The broker tracks each message’s state</td>
+<td>Each consumer group tracks one number per partition: its offset</td>
+</tr>
+<tr class="odd">
+<td>Several independent readers</td>
+<td>Needs fan-out (one queue per reader)</td>
+<td>Free: each group reads the same log</td>
+</tr>
+<tr class="even">
+<td>Replay</td>
+<td>Not possible once deleted</td>
+<td>Rewind the offset and read again</td>
+</tr>
+<tr class="odd">
+<td>Ordering</td>
+<td>Usually best effort, or FIFO with limits</td>
+<td>Strict within a partition</td>
+</tr>
+<tr class="even">
+<td>Parallelism</td>
+<td>Add consumers freely</td>
+<td>Limited by the number of partitions</td>
+</tr>
+</tbody>
+</table>
+<p>The log model is why Kafka is used as the backbone of event-driven
+systems. A new service can start reading from the beginning of a topic
+and build its own view of the data. A bug in a consumer can be fixed and
+the consumer replayed from yesterday’s offset. The same stream can feed
+a search index, a data warehouse and a fraud detector without any of
+them knowing about each other.</p>
+<p>The price is the last row of the table: parallelism and ordering are
+both tied to partitions, which section 5 comes back to.</p>
+<h2 id="a-partition-on-disk">2. A partition on disk</h2>
+<p>A <strong>topic</strong> is split into <strong>partitions</strong>,
+and each partition is an ordered log. Every record in a partition gets a
+sequential <strong>offset</strong>: 0, 1, 2 and so on. Offsets are per
+partition, so there is no global order across a topic.</p>
+<p>On disk, a partition is a directory of <strong>segment
+files</strong>. Each segment holds a contiguous range of offsets, and a
+new segment is started when the active one reaches a size limit (1 GB by
+default) or an age limit. Only the newest segment is written to; older
+ones are immutable.</p>
+<p>Next to each segment sit two small index files:</p>
+<ul>
+<li>An <strong>offset index</strong> maps offsets to byte positions in
+the segment. It is sparse, with an entry every few kilobytes, so it
+stays small enough to keep in memory. To find offset 1,234,567, Kafka
+binary-searches the segment file names, then the index, then scans
+forward a few kilobytes.</li>
+<li>A <strong>time index</strong> maps timestamps to offsets, so a
+consumer can ask to start “from 9:00 this morning”.</li>
+</ul>
+<p>Retention works on whole segments. When the oldest segment is
+entirely older than the retention time (seven days by default) or the
+partition exceeds its size limit, Kafka deletes the file. There is no
+per-record deletion, which is part of why it is cheap.</p>
+<h3 id="log-compaction">Log compaction</h3>
+<p>For some topics you only care about the latest value per key, such as
+a customer’s current address. A <strong>compacted</strong> topic keeps
+at least the last record for every key and lets a background cleaner
+remove older ones. A record with a null value, a
+<strong>tombstone</strong>, marks a key as deleted and is itself removed
+after a while. Compacted topics let Kafka act as a durable changelog: a
+new consumer can rebuild the full current state by reading the topic
+from the start. Kafka uses this itself for consumer offsets.</p>
+<h3 id="why-it-is-fast">Why it is fast</h3>
+<p>Kafka’s throughput comes from doing very little per record:</p>
+<ul>
+<li><strong>Sequential I/O.</strong> Appends go to the end of a file and
+reads usually scan forward. Disks and SSDs are far faster at sequential
+access than random access.</li>
+<li><strong>The OS page cache.</strong> Kafka does not keep its own
+cache of records. Recently written data sits in the operating system’s
+page cache, so consumers that keep up read from memory without Kafka
+managing it.</li>
+<li><strong>Zero copy.</strong> When sending data to consumers, Kafka
+can use the <code>sendfile</code> system call to move bytes from the
+page cache to the network socket without copying them through the
+application.</li>
+<li><strong>Batching and compression.</strong> Producers send records in
+batches, compressed as a unit, and the broker stores and serves those
+batches as they are. Compression works much better on a batch of similar
+records than on one.</li>
+</ul>
+<h2 id="replication-and-the-high-watermark">3. Replication and the high
+watermark</h2>
+<p>Each partition has a <strong>replication factor</strong>, usually
+three. One replica is the <strong>leader</strong>; the others are
+<strong>followers</strong>. Producers write to the leader, and followers
+continuously <strong>fetch</strong> new records from it, the same way
+consumers do.</p>
+<figure class="diagram"><svg viewBox="0 0 760 270" role="img" aria-label="Consumers only see records every in-sync replica has stored" font-size="13"><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Consumers only see records every in-sync replica has stored</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">One partition, three replicas. The producer writes to the leader; followers fetch from it.</text><text x="24" y="96" font-weight="600" fill="var(--cds-text-primary)">Leader (broker 1)</text><rect x="200" y="74" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="222" y="96" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">0</text><rect x="248" y="74" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="270" y="96" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">1</text><rect x="296" y="74" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="318" y="96" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">2</text><rect x="344" y="74" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="366" y="96" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">3</text><rect x="392" y="74" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="414" y="96" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">4</text><rect x="440" y="74" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="462" y="96" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">5</text><rect x="488" y="74" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="510" y="96" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">6</text><rect x="536" y="74" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="558" y="96" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">7</text><rect x="584" y="74" width="44" height="34" rx="6" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="606" y="96" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">8</text><rect x="632" y="74" width="44" height="34" rx="6" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="654" y="96" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">9</text><text x="24" y="146" font-weight="400" fill="var(--cds-text-primary)">Follower (broker 2)</text><rect x="200" y="124" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="222" y="146" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">0</text><rect x="248" y="124" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="270" y="146" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">1</text><rect x="296" y="124" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="318" y="146" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">2</text><rect x="344" y="124" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="366" y="146" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">3</text><rect x="392" y="124" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="414" y="146" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">4</text><rect x="440" y="124" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="462" y="146" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">5</text><rect x="488" y="124" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="510" y="146" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">6</text><rect x="536" y="124" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="558" y="146" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">7</text><rect x="584" y="124" width="44" height="34" rx="6" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.25"></rect><text x="606" y="146" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">8</text><text x="24" y="196" font-weight="400" fill="var(--cds-text-primary)">Follower (broker 3)</text><rect x="200" y="174" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="222" y="196" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">0</text><rect x="248" y="174" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="270" y="196" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">1</text><rect x="296" y="174" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="318" y="196" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">2</text><rect x="344" y="174" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="366" y="196" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">3</text><rect x="392" y="174" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="414" y="196" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">4</text><rect x="440" y="174" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="462" y="196" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">5</text><rect x="488" y="174" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="510" y="196" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">6</text><rect x="536" y="174" width="44" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="558" y="196" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">7</text><line x1="582" y1="66" x2="582" y2="222" stroke="var(--cds-chart-categorical-1)" stroke-width="2" stroke-dasharray="5 4"></line><text x="574" y="244" text-anchor="end" font-size="12" fill="var(--cds-text-primary)">High watermark = 8: offsets 0 to 7 are on every in-sync replica and readable</text></svg></figure>
+<h3 id="in-sync-replicas">In-sync replicas</h3>
+<p>The leader tracks which followers are keeping up. Those form the
+<strong>in-sync replica set (ISR)</strong>. A follower that falls behind
+for longer than <code>replica.lag.time.max.ms</code> (30 seconds by
+default in recent versions) is dropped from the ISR, and rejoins once it
+catches up.</p>
+<h3 id="the-high-watermark">The high watermark</h3>
+<p>The <strong>high watermark</strong> is the offset up to which every
+replica in the ISR has the data. Records below it are
+<strong>committed</strong>: they will survive the loss of the leader,
+because every in-sync follower already has them. Consumers are only
+allowed to read up to the high watermark. The leader may hold newer
+records beyond it, but those are not yet safe, so no consumer sees
+them.</p>
+<p>This is the key guarantee: a consumer never reads a record that could
+later disappear because of a leader failure.</p>
+<h3 id="acks-and-min.insync.replicas">acks and min.insync.replicas</h3>
+<p>The producer chooses how long to wait:</p>
+<ul>
+<li><code>acks=0</code>: do not wait at all. Fast, and records can be
+lost silently.</li>
+<li><code>acks=1</code>: wait for the leader to write it. A leader crash
+before followers copy it loses the record.</li>
+<li><code>acks=all</code>: wait until every replica in the ISR has it.
+This has been the default since Kafka 3.0.</li>
+</ul>
+<p><code>acks=all</code> has a trap. If the ISR shrinks to just the
+leader, “all in-sync replicas” means one copy. The broker setting
+<code>min.insync.replicas</code> closes the gap: with a replication
+factor of 3 and <code>min.insync.replicas=2</code>, a write with
+<code>acks=all</code> is rejected unless at least two replicas have it.
+That combination is the standard durable setup, and it tolerates one
+broker failure without losing acknowledged data or availability.</p>
+<h3 id="leader-failover">Leader failover</h3>
+<p>When a leader fails, the controller picks a new leader from the ISR,
+so it already has every committed record. Followers that had records
+beyond the old high watermark <strong>truncate</strong> them to match
+the new leader, using <strong>leader epochs</strong> (a counter that
+increases with every leader change) to find exactly where their logs
+diverged.</p>
+<p>If every ISR member is gone, Kafka faces a choice: wait for one to
+come back, or elect an out-of-sync replica and lose data.
+<code>unclean.leader.election.enable</code> decides, and it is off by
+default, choosing consistency over availability. Kafka 4.0 also added a
+preview of <strong>Eligible Leader Replicas</strong> (KIP-966), which
+tracks more precisely which replicas are safe to elect.</p>
+<h2 id="producers-partitioning-batching-and-idempotence">4. Producers:
+partitioning, batching and idempotence</h2>
+<p>A producer decides which partition each record goes to:</p>
+<ul>
+<li>If the record has a <strong>key</strong>, it is hashed and the hash
+picks the partition. All records with the same key land in the same
+partition, which is how you get per-key ordering, for example all events
+for one order in sequence.</li>
+<li>If there is no key, the default partitioner sticks to one partition
+until the current batch is full, then moves on. This “sticky” behavior
+makes larger batches than spreading each record around would.</li>
+</ul>
+<p>A consequence worth remembering: adding partitions to a topic changes
+which partition a key hashes to. Per-key ordering only holds while the
+partition count stays the same, so choose it with growth in mind.</p>
+<p>Batching is controlled by <code>batch.size</code> and
+<code>linger.ms</code>: the producer waits up to <code>linger.ms</code>
+milliseconds to fill a batch before sending. A few milliseconds of
+linger can multiply throughput.</p>
+<h3 id="idempotent-producers">Idempotent producers</h3>
+<p>Retries can create duplicates. If a broker writes a batch but the
+acknowledgment is lost, the producer retries and the batch is written
+twice. The <strong>idempotent producer</strong> fixes this: each
+producer gets an ID, and every batch carries a sequence number per
+partition. The broker discards a batch whose sequence it has already
+seen. This is on by default since Kafka 3.0. Transactions build on it to
+write atomically across partitions; this site’s reading on exactly-once
+delivery covers that part.</p>
+<h2 id="consumers-groups-and-rebalancing">5. Consumers, groups and
+rebalancing</h2>
+<p>Consumers that share a <code>group.id</code> form a <strong>consumer
+group</strong>. Kafka assigns each partition of the subscribed topics to
+exactly one consumer in the group. That gives parallelism and
+per-partition ordering at once: each partition is processed in order by
+one consumer.</p>
+<p>The rule cuts both ways. A topic with 12 partitions can be processed
+by at most 12 consumers in one group; a 13th sits idle. If one slow
+record blocks a partition, everything behind it waits. Partition count
+is effectively the maximum parallelism, which is why teams often
+over-partition up front.</p>
+<h3 id="offsets">Offsets</h3>
+<p>Each group records its progress by <strong>committing</strong> the
+offset of the next record to read, per partition, to an internal
+compacted topic called <code>__consumer_offsets</code>. When a consumer
+restarts or a partition moves, the new owner continues from the last
+committed offset.</p>
+<p>When you commit decides your delivery guarantee. Commit after
+processing and a crash means some records are processed twice
+(at-least-once). Commit before processing and a crash means some are
+skipped (at-most-once). Most systems choose at-least-once and make
+processing idempotent.</p>
+<h3 id="rebalancing-and-why-it-was-painful">Rebalancing, and why it was
+painful</h3>
+<p>When a consumer joins, leaves or crashes, partitions must be
+reassigned. In the original protocol, every member stopped consuming,
+gave up all its partitions, and waited while one member (the group
+leader) computed a new assignment. With hundreds of consumers, or a
+deployment that restarts them one by one, this <strong>stop-the-world
+rebalance</strong> could pause a whole group again and again.</p>
+<p>Kafka improved this in steps:</p>
+<ol type="1">
+<li><strong>Static membership</strong> (KIP-345): a consumer with a
+stable <code>group.instance.id</code> can restart without triggering a
+rebalance, as long as it returns within the session timeout.</li>
+<li><strong>Cooperative incremental rebalancing</strong> (KIP-429):
+members only give up the partitions that actually move, and keep
+processing the rest.</li>
+<li><strong>The new consumer group protocol</strong> (KIP-848):
+assignment moves from the client to the broker-side <strong>group
+coordinator</strong>, which reconciles each member incrementally without
+a global pause. It is generally available in Kafka 4.0, enabled on the
+broker by default, with clients opting in through
+<code>group.protocol=consumer</code>.</li>
+</ol>
+<h2 id="the-control-plane-from-zookeeper-to-kraft">6. The control plane:
+from ZooKeeper to KRaft</h2>
+<p>Every Kafka cluster needs a <strong>controller</strong> that knows
+which brokers are alive, which replica leads each partition, and what
+the ISR is. For most of Kafka’s history that metadata lived in Apache
+ZooKeeper, a separate system to deploy and operate, and a single
+controller broker loaded it from ZooKeeper on failover. With many
+partitions, controller failover could take a long time.</p>
+<p><strong>KRaft</strong> replaces ZooKeeper with a small quorum of
+controller nodes that agree on metadata using a Raft-based protocol. The
+metadata itself is stored as a Kafka log
+(<code>__cluster_metadata</code>), and brokers simply replicate that log
+to stay up to date. The controller that takes over already has the full
+metadata in memory, so failover is quick.</p>
+<p>Kafka 4.0, released in March 2025, is <a
+href="https://kafka.apache.org/blog/2025/03/18/apache-kafka-4.0.0-release-announcement/">the
+first major release to run entirely without ZooKeeper</a>. Clusters must
+migrate to KRaft on 3.x before upgrading. 4.0 also added a
+<strong>pre-vote</strong> step (KIP-996) so a briefly disconnected
+controller does not force unnecessary elections, and later releases
+added dynamic changes to the controller quorum (KIP-853).</p>
+<h2 id="queues-for-kafka-share-groups">7. Queues for Kafka: share
+groups</h2>
+<p>The partition-per-consumer rule is a poor fit for work queues, where
+you want 100 workers pulling jobs and do not care about order.
+<strong>KIP-932, Queues for Kafka</strong>, adds <strong>share
+groups</strong> for exactly this.</p>
+<p>In a share group, many consumers can read from the same partition at
+once. Each record is handed to one consumer under a time-limited
+<strong>acquisition lock</strong>, and the consumer acknowledges records
+individually: accept, release (give it back for redelivery) or reject.
+Kafka counts delivery attempts per record, so a record that keeps
+failing can be dropped or set aside after a limit. This brings SQS-style
+semantics (visibility timeouts, per-message acknowledgment, redelivery)
+to ordinary Kafka topics, without giving up retention and replay for
+other groups reading the same topic.</p>
+<p>It arrived as early access in Kafka 4.0, and <a
+href="https://thenewstack.io/apache-kafka-4-1-the-3-big-things-developers-need-to-know/">Kafka
+4.1 moved it to preview</a> in September 2025. Check the current release
+notes before relying on it in production.</p>
+<h2 id="ideas-to-carry-away-and-questions-for-our-discussion">8. Ideas
+to carry away, and questions for our discussion</h2>
+<p>Five ideas to keep:</p>
+<ol type="1">
+<li><strong>Kafka is a log.</strong> Retention, replay, independent
+consumer groups and compaction all follow from keeping records instead
+of deleting them on read.</li>
+<li><strong>The partition is the unit of everything.</strong> Ordering,
+parallelism, replication and storage are all per partition, so partition
+count and key choice are the most important design decisions.</li>
+<li><strong>Committed means on every in-sync replica.</strong> The high
+watermark is what makes “acknowledged” and “readable” safe across leader
+failures.</li>
+<li><strong>acks=all needs min.insync.replicas.</strong> Without it, a
+shrunken ISR silently reduces you to one copy.</li>
+<li><strong>Coordination is the hard part.</strong> Rebalancing and the
+controller were Kafka’s biggest operational pain, and KIP-848 and KRaft
+are the fixes.</li>
+</ol>
+<p>Think about these before we talk:</p>
+<ul>
+<li>Why can’t a consumer read records above the high watermark, even
+though the leader has them?</li>
+<li>With replication factor 3, <code>min.insync.replicas=2</code> and
+<code>acks=all</code>, what happens to producers when two brokers go
+down? What would you rather happen?</li>
+<li>You need per-customer ordering and expect traffic to grow tenfold.
+How many partitions would you create, and why does that number matter
+more than it does in a queue?</li>
+<li>When would you pick SQS or RabbitMQ over Kafka, and do share groups
+change that answer?</li>
+<li>A consumer group keeps rebalancing during every deploy. What would
+you check first?</li>
+<li>Which topics in a system you know would benefit from log
+compaction?</li>
+</ul>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Apache Kafka, <a
+href="https://kafka.apache.org/blog/2025/03/18/apache-kafka-4.0.0-release-announcement/">Apache
+Kafka 4.0.0 release announcement</a>, March 2025</li>
+<li>The New Stack, <a
+href="https://thenewstack.io/apache-kafka-4-1-the-3-big-things-developers-need-to-know/">Apache
+Kafka 4.1: the 3 big things developers need to know</a>, September
+2025</li>
+<li>Apache Kafka, <a
+href="https://cwiki.apache.org/confluence/display/KAFKA/Queues+for+Kafka+%28KIP-932%29+-+Preview+Release+Notes">Queues
+for Kafka (KIP-932) preview release notes</a></li>
+<li>Jay Kreps, <em>The Log: What every software engineer should know
+about real-time data’s unifying abstraction</em> (LinkedIn Engineering,
+2013)</li>
+<li>Kreps, Narkhede and Rao, <em>Kafka: a Distributed Messaging System
+for Log Processing</em> (NetDB 2011)</li>
+<li>Apache Kafka documentation: design, replication and consumer
+configuration sections</li>
+</ul>
+<p>The Kafka 4.0 and 4.1 details were checked against the pages above
+today. Storage, replication and configuration defaults (segment size,
+retention, replica lag time, idempotence and acks defaults) are from my
+knowledge of the Kafka documentation and were not re-checked today.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/messaging.html">Messaging</a><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a></div>
+          <div class="daynav"><a href="/reading/postgres-mvcc.html"><div class="kicker">← Older · Oct 24</div><div class="t">Postgres MVCC, vacuum and isolation</div></a><a href="/reading/grpc-protobuf.html"><div class="kicker">Newer · Oct 25 →</div><div class="t">gRPC and Protobuf in production</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+</body>
+</html>
