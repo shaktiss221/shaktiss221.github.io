@@ -11,7 +11,7 @@ import os
 import re
 import shutil
 import subprocess
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SITE_TITLE = 'The Daily Commit'
@@ -393,8 +393,13 @@ def build():
         if i == 0:
             write('news/index.html', page('AI News', body, '/news/', has_news, skin='mod'))
 
-    # Front page: the newest deep dive, the latest news (or topics), then earlier reads.
-    lead = articles[0]
+    # Front page: today's deep dive, the latest news (or topics), then earlier reads.
+    # Articles dated after today (India time) wait in the archive until their day;
+    # on a day with two articles, the one marked `daily: true` leads.
+    today = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date().isoformat()
+    current = [a for a in articles if a['date'] <= today] or articles
+    current.sort(key=lambda a: (a['date'], a.get('daily') == 'true'), reverse=True)
+    lead = current[0]
     preview = ''.join(f'<li><span class="n">{n + 1:02d}</span><a href="/reading/{lead["slug"]}.html#{hid}">{esc(label)}</a></li>'
                       for n, (hid, label) in enumerate(lead['sections']))
     if has_news:
@@ -412,7 +417,7 @@ def build():
                           f'<div class="t">{esc(topic_name(t))}</div><div class="d">{esc(TOPIC_BLURBS.get(t.lower(), ""))}</div></a>'
                           for t in topic_order[:6])
                 + f'<a class="link-btn" href="/topics/" style="margin-top:18px">All topics {icon("right")}</a>')
-    earlier = '\n      '.join(row(a) for a in articles[1:7])
+    earlier = '\n      '.join(row(a) for a in current[1:7])
     body = f'''    <div class="wrap page">
     <div class="kicker" style="margin-bottom:28px">{fmt_date(lead["date"], "long")}</div>
     <div class="front-grid">

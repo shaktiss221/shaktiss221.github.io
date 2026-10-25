@@ -3,6 +3,7 @@ title: "Kafka internals: the log, replication and consumer groups"
 date: 2026-10-25
 summary: Why Kafka is a log and not a queue, how partitions are stored and replicated, what the high watermark guarantees, how consumer groups rebalance, and what changed in Kafka 4.
 tags: messaging, distributed systems
+daily: true
 ---
 
 Kafka is easiest to understand if you stop thinking of it as a message queue: it is a replicated, append-only log that many readers can scan at their own pace. Almost every feature, and every surprising behavior, follows from that one design choice. This reading walks from a single partition on disk to replication, producers, consumer groups and the changes that arrived with Kafka 4.0 and 4.1.

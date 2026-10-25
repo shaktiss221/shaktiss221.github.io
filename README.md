@@ -3,7 +3,7 @@
 Deep dives on how real systems work, plus AI news, served by GitHub Pages from `main`.
 The HTML is generated and committed; run `python3 tools/build.py` after changing anything in `content/`.
 
-- `content/reading/` – one Markdown file per deep dive (front matter: title, date, summary, tags). The first tag is its main topic.
+- `content/reading/` – one Markdown file per deep dive (front matter: title, date, summary, tags, optional `daily: true`). The first tag is its main topic. The front page leads with the newest article dated today or earlier (India time), preferring the one marked `daily: true`; future-dated articles wait in the archive until their day.
 - `content/diagrams/` – one SVG per diagram, inlined where an article has `<!--diagram:ID-->`; `src/` keeps the JSX each was rendered from
 - `content/news/` – one AI news digest per day, named `YYYY-MM-DD.md` (see below). The AI News section only appears once this folder has a digest.
 - `style.css`, `site.js` – shared styles and the small script for the Aa menu, reading progress and copy buttons
