@@ -26,6 +26,9 @@ DIAGRAMS = os.path.join(ROOT, 'content', 'diagrams')
 # to build the site without sign-in.
 SUPABASE_URL = ''
 SUPABASE_ANON_KEY = ''
+# GoatCounter site code (the part before .goatcounter.com) for page view counts;
+# leave empty to build without the counter.
+GOATCOUNTER = ''
 FONTS = ('https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;'
          '0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap')
 TOPIC_BLURBS = {
@@ -92,6 +95,8 @@ def page(title, body, current, has_news, description=SITE_DESC, skin='', scripts
     tagline = 'Deep dives on how systems work, plus the AI news.' if has_news else 'Deep dives on how real systems work.'
     account = ('<button type="button" class="signin" data-auth hidden>Sign in</button><div class="pop" id="account" hidden></div>'
                if SUPABASE_URL else '')
+    counter = (f'  <script data-goatcounter="https://{GOATCOUNTER}.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>\n'
+               if GOATCOUNTER else '')
     auth = (f'  <script>window.DC_AUTH={{url:"{SUPABASE_URL}",key:"{SUPABASE_ANON_KEY}"}}</script>\n'
             '  <script src="/vendor/supabase.js"></script>\n  <script src="/auth.js"></script>\n' if SUPABASE_URL else '')
     sizes = ''.join(f'<button type="button" data-size="{v}">{l}</button>' for l, v in [('S', 17), ('M', 19), ('L', 21), ('XL', 23)])
@@ -137,7 +142,7 @@ def page(title, body, current, has_news, description=SITE_DESC, skin='', scripts
     <span class="mono muted">{tagline}</span>
   </div></footer>
   <script src="/site.js"></script>
-{scripts}{auth}</body>
+{scripts}{auth}{counter}</body>
 </html>
 '''
 

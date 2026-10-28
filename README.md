@@ -10,6 +10,7 @@ The HTML is generated and committed; run `python3 tools/build.py` after changing
 - `style.css`, `site.js` – shared styles and the small script for the Aa menu, reading progress and copy buttons
 - `ai-first.js` – marks AI First days done, picks today's session and counts the streak; progress is kept in the reader's browser (`localStorage`, key `dc-aif`)
 - `auth.js`, `vendor/supabase.js`, `supabase/schema.sql` – optional Sign in with Google (Supabase) for read marks and resume. Off until `SUPABASE_URL` and `SUPABASE_ANON_KEY` are set in `tools/build.py`.
+- Page views: set `GOATCOUNTER` in `tools/build.py` to the GoatCounter site code and rebuild; counts show at `https://<code>.goatcounter.com`.
 - Generated: `index.html`, `reading/`, `topics/`, `news/`, `ai-first/`
 
 ## AI First week format
