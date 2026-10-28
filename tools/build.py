@@ -2,16 +2,20 @@
 
 Each Markdown file in content/reading/ becomes reading/<slug>.html, and each
 file in content/news/ (one AI news digest per day) becomes news/<date>.html.
+The weeks in content/ai-first/ become the Becoming AI First path: an overview
+at ai-first/ and one page per day at ai-first/day-NN.html.
 The front page, archive, topic pages and news index are regenerated from the
 front matter. Run from the repo root:  python3 tools/build.py
 """
 import html
+import json
 import math
 import os
 import re
 import shutil
 import subprocess
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SITE_TITLE = 'The Daily Commit'
@@ -44,6 +48,15 @@ SKINS = {
             '\n  <link rel="stylesheet" href="/news.css">'),
 }
 
+# Becoming AI First: each day is three timed steps that add up to 30 minutes.
+AIF_DIR = os.path.join(ROOT, 'content', 'ai-first')
+AIF_TITLE = 'Becoming AI First'
+AIF_DESC = 'Thirty minutes a day for twelve weeks: a path from senior backend engineer to AI engineer.'
+AIF_MINUTES = 30
+AIF_STEPS = {'learn': 'Learn', 'do': 'Do', 'note': 'Write it down'}
+# Set by build() when content/ai-first/ has weeks, so every page shows the nav item.
+HAS_AIF = False
+
 ICONS = {
     'right': '<path d="M5 12h14M13 6l6 6-6 6"/>',
     'left': '<path d="M19 12H5M11 6l-6 6 6 6"/>',
@@ -65,10 +78,12 @@ def slugify(s):
     return re.sub(r'[^a-z0-9]+', '-', s.lower()).strip('-')
 
 
-def page(title, body, current, has_news, description=SITE_DESC, skin=''):
+def page(title, body, current, has_news, description=SITE_DESC, skin='', scripts=''):
     nav = [('/', 'Today'), ('/reading/', 'Archive'), ('/topics/', 'Topics')]
     if has_news:
         nav.append(('/news/', 'AI News'))
+    if HAS_AIF:
+        nav.append(('/ai-first/', 'AI First'))
     links = '\n        '.join(
         f'<a href="{href}"{" aria-current=\"page\"" if href == current else ""}>{label}</a>'
         for href, label in nav
@@ -122,7 +137,7 @@ def page(title, body, current, has_news, description=SITE_DESC, skin=''):
     <span class="mono muted">{tagline}</span>
   </div></footer>
   <script src="/site.js"></script>
-{auth}</body>
+{scripts}{auth}</body>
 </html>
 '''
 
@@ -201,6 +216,149 @@ def read_news(path):
     return {'date': meta['date'], 'items': items}
 
 
+def read_aif_week(path):
+    """One week of the AI First path: front matter (week, phase, title, goal),
+    then a "## Title" per day with step lines:
+      learn: MINUTES | Resource title | URL
+      do: MINUTES | What to build or try
+      note: MINUTES | What to write down
+      also: Optional resource title | URL"""
+    meta, body = read_front_matter(open(path, encoding='utf-8').read())
+    days = []
+    for chunk in re.split(r'^## ', body, flags=re.M)[1:]:
+        lines = [x.strip() for x in chunk.strip().splitlines() if x.strip()]
+        day = {'title': lines[0], 'steps': [], 'also': []}
+        for line in lines[1:]:
+            kind, _, rest = line.partition(':')
+            kind = kind.strip().lower()
+            parts = [p.strip() for p in rest.split('|')]
+            if kind == 'also':
+                day['also'].append({'title': parts[0], 'url': parts[-1] if len(parts) > 1 else ''})
+            elif kind == 'learn':
+                day['steps'].append({'kind': kind, 'minutes': int(parts[0]), 'title': parts[1], 'url': parts[-1]})
+            elif kind in AIF_STEPS:
+                day['steps'].append({'kind': kind, 'minutes': int(parts[0]), 'text': ' | '.join(parts[1:])})
+            else:
+                raise ValueError(f'{os.path.basename(path)}: unknown line in "{day["title"]}": {line}')
+        day['minutes'] = sum(s['minutes'] for s in day['steps'])
+        if day['minutes'] != AIF_MINUTES:
+            print(f'Warning: "{day["title"]}" in {os.path.basename(path)} adds up to {day["minutes"]} minutes, not {AIF_MINUTES}.')
+        days.append(day)
+    meta['week'] = int(meta['week'])
+    meta['days'] = days
+    return meta
+
+
+def host(url):
+    return urlparse(url).netloc.removeprefix('www.')
+
+
+def aif_href(n):
+    return f'/ai-first/day-{n:02d}.html'
+
+
+def aif_step(s):
+    if s['kind'] == 'learn':
+        what = (f'<p><a href="{esc(s["url"])}" rel="noopener">{esc(s["title"])} ↗</a></p>'
+                f'<div class="mono muted host">{esc(host(s["url"]))}</div>')
+    else:
+        what = f'<p>{inline_md(s["text"])}</p>'
+    return (f'<li class="aif-step"><span class="aif-min">{s["minutes"]}<small>min</small></span>'
+            f'<div><div class="kicker">{AIF_STEPS[s["kind"]]}</div>{what}</div></li>')
+
+
+def aif_today(days, compact=False):
+    """Today's session: day 1 until the reader's progress script fills in the next undone day."""
+    first = days[0]
+    data = json.dumps([{'t': d['title'], 'w': d['week']} for d in days], ensure_ascii=False).replace('</', '<\\/')
+    data = f'<script type="application/json" id="aif-days">{data}</script>'
+    if compact:
+        return (f'<a class="aif-strip" data-aif-today-link href="{aif_href(1)}"><span class="kicker acc">{AIF_TITLE}</span>'
+                f'<span class="t"><span data-aif-today-day>Day 1 · Week 1</span> · <span data-aif-today-title>{esc(first["title"])}</span></span>'
+                f'<span class="mono muted"><span data-aif-progress>0 of {len(days)} days done</span> {icon("right")}</span></a>{data}')
+    return f'''<div class="aif-today">
+      <div class="kicker acc">Today's 30 minutes</div>
+      <a class="aif-next" data-aif-today-link href="{aif_href(1)}"><span class="mono muted" data-aif-today-day>Day 1 · Week 1</span><span class="t" data-aif-today-title>{esc(first["title"])}</span></a>
+      <div class="aif-meter" aria-hidden="true"><span data-aif-bar></span></div>
+      <div class="aif-stats mono muted"><span data-aif-progress>0 of {len(days)} days done</span><span data-aif-streak></span></div>
+      <div><a class="btn btn-solid" data-aif-today-link href="{aif_href(1)}">Start today's session {icon("right")}</a></div>
+    </div>
+    {data}'''
+
+
+def build_ai_first(weeks, has_news):
+    """The overview page and one page per day. Progress is per-browser (ai-first.js)."""
+    days = []
+    for w in weeks:
+        for d in w['days']:
+            d.update(n=len(days) + 1, week=w['week'], phase=w['phase'], week_title=w['title'], goal=w['goal'])
+            days.append(d)
+    script = '  <script src="/ai-first.js"></script>\n'
+    shutil.rmtree(os.path.join(ROOT, 'ai-first'), ignore_errors=True)
+
+    for i, d in enumerate(days):
+        prev, nxt = (days[i - 1] if i else None), (days[i + 1] if i + 1 < len(days) else None)
+        nav = (f'<a href="{aif_href(prev["n"])}"><div class="kicker">← Day {prev["n"]}</div><div class="t">{esc(prev["title"])}</div></a>'
+               if prev else '<span></span>')
+        nav += (f'<a href="{aif_href(nxt["n"])}"><div class="kicker">Day {nxt["n"]} →</div><div class="t">{esc(nxt["title"])}</div></a>'
+                if nxt else f'<a href="/ai-first/"><div class="kicker">The end →</div><div class="t">Back to the whole path</div></a>')
+        also = ''
+        if d['also']:
+            also = ('<p class="aif-also"><span class="kicker">If you have more time</span> '
+                    + ' · '.join(f'<a href="{esc(a["url"])}" rel="noopener">{esc(a["title"])} ↗</a>' for a in d['also']) + '</p>')
+        body = f'''    <div class="wrap page aif-page">
+    <a class="link-btn mono" href="/ai-first/" style="font-size:12px">{icon("left")}All {len(days)} days</a>
+    <div class="kicker acc" style="margin-top:28px">{AIF_TITLE} · Week {d["week"]} · Day {d["n"]} of {len(days)}</div>
+    <h1 class="page-title">{esc(d["title"])}</h1>
+    <p class="aif-sub mono muted">{icon("clock")}{d["minutes"]} minutes · {esc(d["phase"])} · {esc(d["week_title"])}</p>
+    <ol class="aif-plan">{"".join(aif_step(s) for s in d["steps"])}</ol>
+    {also}
+    <div class="end-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">Done for today?</div>
+      <button type="button" class="btn btn-solid" data-aif-mark data-day="{d["n"]}">{icon("check")}<span>Mark day {d["n"]} done</span></button></div>
+      <p class="mono muted" style="margin-top:12px">Progress is saved in this browser. <span data-aif-progress></span></p>
+      <div class="daynav">{nav}</div>
+    </div>
+    <span hidden data-aif-total="{len(days)}"></span>
+    </div>'''
+        write(f'ai-first/day-{d["n"]:02d}.html',
+              page(f'Day {d["n"]}: {d["title"]}', body, '/ai-first/', has_news, d['goal'], scripts=script))
+
+    phases = []
+    for w in weeks:
+        if not phases or phases[-1][0] != w['phase']:
+            phases.append((w['phase'], []))
+        phases[-1][1].append(w)
+    secs = ''
+    for p, (name, ws) in enumerate(phases):
+        span = f'Week {ws[0]["week"]}' if len(ws) == 1 else f'Weeks {ws[0]["week"]}–{ws[-1]["week"]}'
+        secs += (f'\n    <section class="group"><div class="section-hd"><span class="kicker">Phase {p + 1} · {esc(name)}</span>'
+                 f'<span class="mono muted">{span}</span></div>')
+        for w in ws:
+            rows = ''.join(
+                f'<a class="row-item" data-day="{d["n"]}" href="{aif_href(d["n"])}"><span class="mono muted">Day {d["n"]:02d}</span>'
+                f'<div><h3>{esc(d["title"])}</h3><div class="mono muted sub">{d["minutes"]} min · '
+                f'{" · ".join(dict.fromkeys(AIF_STEPS[s["kind"]] for s in d["steps"]))}'
+                f'<span class="read-mark"> · {icon("check")}Done</span></div></div></a>'
+                for d in w['days'])
+            secs += (f'<div class="aif-week" id="week-{w["week"]}"><h2>Week {w["week"]} · {esc(w["title"])}</h2>'
+                     f'<p>{esc(w["goal"])}</p></div>{rows}')
+        secs += '</section>'
+    body = f'''    <div class="wrap page">
+    <div class="kicker">{len(weeks)} weeks · {len(days)} days · {AIF_MINUTES} minutes a day</div>
+    <h1 class="page-title">{AIF_TITLE}</h1>
+    <p class="aif-lede">A path from senior backend engineer to AI engineer, thirty minutes at a time. Each day has something to read or watch, something to build, and one thing to write down.</p>
+    {aif_today(days)}
+    <div class="aif-how">
+      <div><span class="kicker">Learn</span><b>Read or watch</b><span class="muted">One focused resource, with the part to cover spelled out.</span></div>
+      <div><span class="kicker">Do</span><b>Build or try it</b><span class="muted">Small exercises that add up to real projects in one repo, <code>ai-first-lab</code>. Python by default, with Java options.</span></div>
+      <div><span class="kicker">Write it down</span><b>Keep a log</b><span class="muted">A few lines a day in <code>ai-first-log.md</code>. By week 12 it is your interview material.</span></div>
+    </div>{secs}
+    </div>'''
+    write('ai-first/index.html', page(AIF_TITLE, body, '/ai-first/', has_news, AIF_DESC, scripts=script))
+    return days
+
+
 def row(a, date_style='short', show_summary=False):
     summary = f'<p>{esc(a["summary"])}</p>' if show_summary else ''
     return (f'<a class="row-item" data-slug="{a["slug"]}" href="/reading/{a["slug"]}.html">'
@@ -217,6 +375,10 @@ def write(rel, text):
 
 
 def build():
+    global HAS_AIF
+    aif_weeks = sorted((read_aif_week(os.path.join(AIF_DIR, n)) for n in os.listdir(AIF_DIR) if n.endswith('.md')),
+                       key=lambda w: w['week']) if os.path.isdir(AIF_DIR) else []
+    HAS_AIF = bool(aif_weeks)
     src = os.path.join(ROOT, 'content', 'reading')
     articles = []
     for name in sorted(os.listdir(src)):
@@ -393,6 +555,8 @@ def build():
         if i == 0:
             write('news/index.html', page('AI News', body, '/news/', has_news, skin='mod'))
 
+    aif_days = build_ai_first(aif_weeks, has_news) if HAS_AIF else []
+
     # Front page: today's deep dive, the latest news (or topics), then earlier reads.
     # Articles dated after today (India time) wait in the archive until their day;
     # on a day with two articles, the one marked `daily: true` leads.
@@ -430,14 +594,17 @@ def build():
       </article>
       <aside class="rail">{rail}</aside>
     </div>
+    {aif_today(aif_days, compact=True) if aif_days else ''}
     <section class="rows">
       <div class="section-hd"><span class="kicker">Earlier</span><a class="link-btn" href="/reading/">Full archive {icon("right")}</a></div>
       {earlier}
     </section>
     </div>'''
-    write('index.html', page(SITE_TITLE, body, '/', has_news))
+    write('index.html', page(SITE_TITLE, body, '/', has_news,
+                             scripts='  <script src="/ai-first.js"></script>\n' if aif_days else ''))
 
-    print(f'Built {len(articles)} articles, {len(topics)} topics, {len(digests)} news digests.')
+    print(f'Built {len(articles)} articles, {len(topics)} topics, {len(digests)} news digests, '
+          f'{len(aif_days)} AI First days.')
 
 
 if __name__ == '__main__':

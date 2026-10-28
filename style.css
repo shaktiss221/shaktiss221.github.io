@@ -182,6 +182,43 @@ figure.diagram {
 .why { margin-top: 14px; font-size: 14px; display: flex; gap: 10px; }
 .why b { font-weight: 600; color: var(--accent); white-space: nowrap; }
 
+/* Becoming AI First */
+.aif-lede { font-family: var(--serif); font-size: 21px; line-height: 1.55; color: var(--muted); margin-top: 18px; max-width: 680px; }
+.aif-today { margin-top: 36px; padding: 28px; border-radius: 16px; background: var(--surface); display: grid; gap: 16px; max-width: 760px; }
+.aif-next { color: var(--ink); display: block; }
+.aif-next:hover { text-decoration: none; }
+.aif-next:hover .t { color: var(--accent); }
+.aif-next .t { display: block; font-family: var(--serif); font-size: 30px; line-height: 1.15; letter-spacing: -0.01em; margin-top: 6px; transition: color .2s; }
+.aif-meter { height: 6px; border-radius: 999px; background: var(--rule); overflow: hidden; }
+.aif-meter span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+.aif-stats { display: flex; gap: 18px; flex-wrap: wrap; }
+.aif-how { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 28px; }
+.aif-how > div { padding: 20px; border: 1px solid var(--rule); border-radius: 14px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.aif-how b { font-family: var(--serif); font-size: 21px; font-weight: 500; }
+.aif-how code, .aif-step code { font-family: var(--mono); font-size: .82em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.aif-week { margin-top: 36px; padding-bottom: 6px; }
+.aif-week h2 { font-size: 26px; line-height: 1.2; }
+.aif-week p { color: var(--muted); margin-top: 6px; max-width: 680px; }
+.aif-page { max-width: 820px; }
+.aif-page .page-title { font-size: clamp(32px, 4.6vw, 48px); }
+.aif-sub { margin-top: 14px; line-height: 1.7; }
+.aif-sub .ico { vertical-align: -2px; margin-right: 6px; }
+.aif-plan { list-style: none; padding: 0; margin: 36px 0 0; border-top: 1px solid var(--ink); }
+.aif-step { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 20px; padding: 24px 0; border-bottom: 1px solid var(--rule); }
+.aif-min { font-family: var(--serif); font-size: 36px; line-height: 1; color: var(--accent); }
+.aif-min small { display: block; font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 6px; }
+.aif-step p { font-family: var(--serif); font-size: var(--read-size); line-height: 1.55; margin-top: 6px; overflow-wrap: break-word; }
+.aif-step .host { margin-top: 6px; }
+.aif-also { margin-top: 20px; font-size: 14px; line-height: 1.7; }
+.aif-also .kicker { margin-right: 8px; }
+.btn-solid.is-done { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 1px var(--rule); }
+.btn-solid.is-done:hover { color: var(--accent); background: transparent; }
+.aif-strip { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 24px; align-items: baseline; margin-top: 56px; padding: 20px 24px; border-radius: 14px; background: var(--surface); color: var(--ink); }
+.aif-strip:hover { text-decoration: none; }
+.aif-strip:hover .t { color: var(--accent); }
+.aif-strip .t { font-family: var(--serif); font-size: 20px; line-height: 1.3; transition: color .2s; }
+.aif-strip .mono { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+
 /* Footer */
 .ftr { border-top: 1px solid var(--rule); }
 .ftr .wrap { display: flex; justify-content: space-between; gap: 16px; padding-top: 28px; padding-bottom: 28px; flex-wrap: wrap; }
@@ -215,4 +252,12 @@ figure.diagram {
   .news-page { padding: 32px 16px 96px; }
   .news-item { grid-template-columns: 32px minmax(0, 1fr); gap: 12px; }
   .article pre { margin-left: -16px; margin-right: -16px; border-radius: 0; }
+  .aif-lede { font-size: 18px; }
+  .aif-today { padding: 20px; }
+  .aif-next .t { font-size: 24px; }
+  .aif-how { grid-template-columns: minmax(0, 1fr); }
+  .aif-week h2 { font-size: 22px; }
+  .aif-step { grid-template-columns: 48px minmax(0, 1fr); gap: 14px; padding: 20px 0; }
+  .aif-min { font-size: 28px; }
+  .aif-strip { grid-template-columns: minmax(0, 1fr); gap: 6px; margin-top: 40px; padding: 18px 20px; }
 }

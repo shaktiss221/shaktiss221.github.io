@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Day 11: Attention (part 2) · The Daily Commit</title>
+  <meta name="description" content="Build an intuition for tokens, embeddings, attention and sampling, enough to reason about cost, latency and failure modes.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/" aria-current="page">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="wrap page aif-page">
+    <a class="link-btn mono" href="/ai-first/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>All 84 days</a>
+    <div class="kicker acc" style="margin-top:28px">Becoming AI First · Week 2 · Day 11 of 84</div>
+    <h1 class="page-title">Attention (part 2)</h1>
+    <p class="aif-sub mono muted"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>30 minutes · Foundations · How LLMs work</p>
+    <ol class="aif-plan"><li class="aif-step"><span class="aif-min">15<small>min</small></span><div><div class="kicker">Learn</div><p><a href="https://www.3blue1brown.com/lessons/attention" rel="noopener">3Blue1Brown, Attention in transformers: second half ↗</a></p><div class="mono muted host">3blue1brown.com</div></div></li><li class="aif-step"><span class="aif-min">12<small>min</small></span><div><div class="kicker">Do</div><p>Explain attention and context windows to a junior engineer in five sentences. Then ask an AI to critique your explanation.</p></div></li><li class="aif-step"><span class="aif-min">3<small>min</small></span><div><div class="kicker">Write it down</div><p>Why do long prompts cost more and run slower?</p></div></li></ol>
+    
+    <div class="end-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">Done for today?</div>
+      <button type="button" class="btn btn-solid" data-aif-mark data-day="11"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark day 11 done</span></button></div>
+      <p class="mono muted" style="margin-top:12px">Progress is saved in this browser. <span data-aif-progress></span></p>
+      <div class="daynav"><a href="/ai-first/day-10.html"><div class="kicker">← Day 10</div><div class="t">Attention (part 1)</div></a><a href="/ai-first/day-12.html"><div class="kicker">Day 12 →</div><div class="t">How a model is trained</div></a></div>
+    </div>
+    <span hidden data-aif-total="84"></span>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script src="/ai-first.js"></script>
+</body>
+</html>
