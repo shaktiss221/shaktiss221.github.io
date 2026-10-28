@@ -28,7 +28,7 @@ SUPABASE_URL = ''
 SUPABASE_ANON_KEY = ''
 # GoatCounter site code (the part before .goatcounter.com) for page view counts;
 # leave empty to build without the counter.
-GOATCOUNTER = ''
+GOATCOUNTER = 'shaktiss221'
 FONTS = ('https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;'
          '0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap')
 TOPIC_BLURBS = {
