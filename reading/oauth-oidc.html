@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OAuth 2.0 and OpenID Connect, done safely · The Daily Commit</title>
+  <meta name="description" content="What OAuth actually delegates, the authorization code flow with PKCE, access and refresh tokens, how OpenID Connect adds login, JWT validation pitfalls, sender-constrained tokens, and what RFC 9700 and OAuth 2.1 changed.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>OAuth 2.0 and OpenID Connect, done safely</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>21 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#the-problem-delegated-access-without-passwords">The problem:
+delegated access without passwords</a><a href="#scopes-consent-and-what-a-token-means">Scopes, consent and
+what a token means</a><a href="#the-grant-types-and-which-ones-survive">The grant types, and
+which ones survive</a><a href="#the-authorization-code-flow-with-pkce">The authorization code
+flow with PKCE</a><a href="#access-tokens-and-refresh-tokens">Access tokens and refresh
+tokens</a><a href="#openid-connect-login-on-top-of-oauth">OpenID Connect: login
+on top of OAuth</a><a href="#validating-jwts-without-getting-burned">Validating JWTs
+without getting burned</a><a href="#sender-constrained-tokens-mtls-and-dpop">Sender-constrained
+tokens: mTLS and DPoP</a><a href="#where-tokens-live-in-a-browser">Where tokens live in a
+browser</a><a href="#service-to-service-and-workload-identity">Service-to-service
+and workload identity</a><a href="#rfc-9700-and-oauth-2.1">RFC 9700 and OAuth 2.1</a><a href="#a-practical-checklist">A practical checklist</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 21 min left</div>
+      </nav>
+      <article class="article" data-slug="oauth-oidc" data-minutes="21">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/security.html">Security</a> · October 28, 2026 · 21 min</div>
+        <h1>OAuth 2.0 and OpenID Connect, done safely</h1>
+        <p class="dek">What OAuth actually delegates, the authorization code flow with PKCE, access and refresh tokens, how OpenID Connect adds login, JWT validation pitfalls, sender-constrained tokens, and what RFC 9700 and OAuth 2.1 changed.</p>
+<p>Almost every “Sign in with Google” button, every third-party app that
+reads your GitHub repos, and most of the access tokens flowing between
+microservices trace back to one framework: OAuth 2.0. It’s also one of
+the most misunderstood pieces of infrastructure engineers touch. People
+use it for login when it wasn’t designed for that, pick flows that the
+standards body now says never to use, and validate tokens in ways that
+have led to real breaches. This reading builds OAuth up from the problem
+it solves, then adds OpenID Connect, tokens, the attacks that shaped
+today’s best practice, and the 2025 Security BCP (RFC 9700) that rewrote
+the defaults.</p>
+<h2 id="the-problem-delegated-access-without-passwords">1. The problem:
+delegated access without passwords</h2>
+<p>Before OAuth, if a photo-printing site wanted your photos from
+another service, it asked for your password for that service. That’s
+terrible in every direction: the printing site gets full access to your
+account, forever, and you can’t revoke it without changing your password
+everywhere it’s used. If the printing site is breached, so is your other
+account.</p>
+<p>OAuth’s answer is <strong>delegation</strong>. You (the <em>resource
+owner</em>) tell the photo service (which runs an <em>authorization
+server</em> and a <em>resource server</em>) that the printing site (the
+<em>client</em>) may read your photos, and nothing else, until you say
+otherwise. The client never sees your password. Instead it gets an
+<strong>access token</strong>: a credential that represents a specific,
+limited grant.</p>
+<p>Those four roles appear in every OAuth discussion:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Role</th>
+<th>Who it is</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Resource owner</td>
+<td>The user who can grant access</td>
+<td>You</td>
+</tr>
+<tr class="even">
+<td>Client</td>
+<td>The app that wants access</td>
+<td>A printing site, a CLI, a mobile app</td>
+</tr>
+<tr class="odd">
+<td>Authorization server (AS)</td>
+<td>Authenticates the user and issues tokens</td>
+<td>accounts.google.com, Okta, Auth0, Keycloak</td>
+</tr>
+<tr class="even">
+<td>Resource server (RS)</td>
+<td>The API that accepts tokens</td>
+<td>Google Photos API, your internal API</td>
+</tr>
+</tbody>
+</table>
+<p>OAuth 2.0 was published in 2012 as RFC 6749, with RFC 6750 defining
+how to send bearer tokens. It replaced OAuth 1.0, which required clients
+to sign every request with a shared secret, a scheme that was hard to
+implement correctly. OAuth 2.0 dropped request signing and relied on TLS
+instead, which made it far easier to adopt and, as we’ll see, opened the
+door to token theft that later extensions had to close.</p>
+<p>An important point that’s easy to miss: OAuth is an
+<strong>authorization</strong> framework. An access token tells an API
+“the bearer may do X.” It doesn’t tell the client who the user is. Using
+OAuth alone for login is a known mistake, and section 6 covers the
+protocol built to fix that.</p>
+<h2 id="scopes-consent-and-what-a-token-means">2. Scopes, consent and
+what a token means</h2>
+<p>A client asks for access in terms of <strong>scopes</strong>: strings
+such as <code>photos.read</code>, <code>repo</code>, or
+<code>https://www.googleapis.com/auth/calendar.readonly</code>. The
+authorization server shows the user a consent screen (“PrintCo wants to
+view your photos”), and if they agree, issues a token carrying those
+scopes.</p>
+<p>Scopes are coarse by design. They name kinds of access, not specific
+objects. For finer control, RFC 9396 (Rich Authorization Requests, 2023)
+lets a client request a structured <code>authorization_details</code>
+object, such as “initiate one payment of 45 EUR to this account,” which
+open-banking APIs use heavily.</p>
+<p>Two more concepts matter for every design:</p>
+<ul>
+<li><strong>Audience.</strong> Which resource server is the token for? A
+token minted for the calendar API shouldn’t be accepted by the payments
+API. RFC 8707 (Resource Indicators) lets the client name the target API
+with a <code>resource</code> parameter, and the AS puts it in the
+token’s <code>aud</code> claim.</li>
+<li><strong>Lifetime.</strong> Access tokens are meant to be short-lived
+(minutes to an hour). Longer-lived access is handled with refresh tokens
+(section 5).</li>
+</ul>
+<h2 id="the-grant-types-and-which-ones-survive">3. The grant types, and
+which ones survive</h2>
+<p>OAuth 2.0 defined several ways (“grants”) for a client to get a
+token. Over the following decade, attacks and new platforms (single-page
+apps, mobile, IoT) changed which ones are considered safe.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Grant</th>
+<th>Use</th>
+<th>Status today</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Authorization code</td>
+<td>User-facing apps of all kinds</td>
+<td><strong>The default.</strong> With PKCE, for every client</td>
+</tr>
+<tr class="even">
+<td>Implicit</td>
+<td>Browser apps, token returned in the URL fragment</td>
+<td><strong>Deprecated</strong> by RFC 9700; removed in OAuth 2.1</td>
+</tr>
+<tr class="odd">
+<td>Resource owner password credentials</td>
+<td>Client collects the user’s password and trades it for a token</td>
+<td><strong>Must not be used</strong> (RFC 9700); removed in OAuth
+2.1</td>
+</tr>
+<tr class="even">
+<td>Client credentials</td>
+<td>Service-to-service, no user involved</td>
+<td>Fine, with strong client authentication</td>
+</tr>
+<tr class="odd">
+<td>Device authorization (RFC 8628)</td>
+<td>TVs, CLIs, devices without a browser</td>
+<td>Fine; watch for phishing of user codes</td>
+</tr>
+<tr class="even">
+<td>Refresh token</td>
+<td>Getting new access tokens without the user</td>
+<td>Fine, with rotation or sender-constraining for public clients</td>
+</tr>
+</tbody>
+</table>
+<p>The implicit grant existed because in 2012, JavaScript apps couldn’t
+easily make cross-origin POST requests to a token endpoint. The AS
+returned the access token directly in the redirect URL fragment. That
+put tokens in browser history, in referrer headers, and within reach of
+any script on the page, and there was no way to bind the token to the
+client that started the flow. Once CORS made POSTs to the token endpoint
+easy, the reason for implicit disappeared, and the code flow with PKCE
+replaced it.</p>
+<p>The password grant defeats the whole point of OAuth (the client sees
+the password) and can’t support multi-factor authentication or federated
+login. RFC 9700 says it must not be used.</p>
+<h2 id="the-authorization-code-flow-with-pkce">4. The authorization code
+flow with PKCE</h2>
+<p>This is the flow to learn, because it’s the one you should almost
+always use.</p>
+<figure class="diagram"><svg viewBox="0 0 760 400" role="img" aria-label="Authorization code flow with PKCE" font-size="13"><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Authorization code flow with PKCE</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">The code travels through the browser; tokens only travel on the back channel.</text><defs><marker id="pka" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><rect x="15" y="66" width="190" height="34" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="110" y="88" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Client app</text><line x1="110" y1="100" x2="110" y2="378" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4"></line><rect x="285" y="66" width="190" height="34" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="380" y="88" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Authorization server</text><line x1="380" y1="100" x2="380" y2="378" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4"></line><rect x="555" y="66" width="190" height="34" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="650" y="88" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Resource server (API)</text><line x1="650" y1="100" x2="650" y2="378" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4"></line><line x1="110" y1="136" x2="376" y2="136" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#pka)"></line><text x="118" y="128" font-size="11.5" fill="var(--cds-text-primary)">1. authorize: scope, state, challenge</text><line x1="380" y1="180" x2="114" y2="180" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#pka)"></line><text x="118" y="172" font-size="11.5" fill="var(--cds-text-primary)">2. login + consent; redirect with code</text><line x1="110" y1="224" x2="376" y2="224" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#pka)"></line><text x="118" y="216" font-size="11.5" fill="var(--cds-text-primary)">3. POST /token: code + verifier</text><line x1="380" y1="268" x2="114" y2="268" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#pka)"></line><text x="118" y="260" font-size="11.5" fill="var(--cds-text-primary)">4. verifier matches: tokens issued</text><line x1="110" y1="312" x2="646" y2="312" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#pka)"></line><text x="118" y="304" font-size="11.5" fill="var(--cds-text-primary)">5. GET /api  Authorization: Bearer &lt;access token&gt;</text><line x1="650" y1="356" x2="114" y2="356" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#pka)"></line><text x="118" y="348" font-size="11.5" fill="var(--cds-text-primary)">6. API validates token (signature, iss, aud, exp, scope)</text></svg></figure>
+<p>Step by step:</p>
+<ol type="1">
+<li><strong>The client generates a secret.</strong> Before redirecting,
+the client creates a random <code>code_verifier</code> (43 to 128
+characters) and computes
+<code>code_challenge = BASE64URL(SHA-256(code_verifier))</code>. It also
+creates a random <code>state</code> value. Both stay in the client.</li>
+<li><strong>Redirect to the AS.</strong> The client sends the user’s
+browser to the authorization endpoint with
+<code>response_type=code</code>, its <code>client_id</code>, the
+<code>redirect_uri</code>, the requested <code>scope</code>, the
+<code>state</code>, the <code>code_challenge</code>, and
+<code>code_challenge_method=S256</code>.</li>
+<li><strong>The user authenticates and consents.</strong> This happens
+entirely at the AS. The client never sees the password, the MFA prompt,
+or which identity provider the user picked.</li>
+<li><strong>Redirect back with a code.</strong> The AS redirects to the
+registered <code>redirect_uri</code> with a short-lived, single-use
+<strong>authorization code</strong> and the same <code>state</code>. The
+client checks that <code>state</code> matches what it sent, which stops
+an attacker from injecting their own authorization response (a CSRF
+attack on the login flow).</li>
+<li><strong>Exchange the code.</strong> The client POSTs the code and
+the original <code>code_verifier</code> to the token endpoint, over a
+direct HTTPS connection (the “back channel”), plus client authentication
+if it’s a confidential client.</li>
+<li><strong>The AS checks PKCE.</strong> It hashes the verifier and
+compares it to the challenge from step 2. Only the party that started
+the flow knows the verifier. If they match, the AS returns an access
+token (and usually a refresh token).</li>
+</ol>
+<h3 id="why-the-indirection">Why the indirection?</h3>
+<p>The code passes through the browser (the “front channel”), where it
+could leak through logs, referrers, malicious browser extensions, or on
+mobile, another app registered for the same URL scheme. But a code alone
+is useless: redeeming it requires the verifier (and, for confidential
+clients, the client secret), which never touched the browser. The token
+itself only ever travels on the back channel.</p>
+<h3 id="what-pkce-fixes">What PKCE fixes</h3>
+<p>PKCE (Proof Key for Code Exchange, pronounced “pixy”) was published
+as RFC 7636 in 2015 to fix <strong>authorization code
+interception</strong> on mobile. On a phone, a malicious app could
+register the same custom URL scheme
+(<code>com.example.app://callback</code>) as a legitimate app, receive
+the redirect, and redeem the code itself, because mobile apps can’t keep
+a client secret. PKCE closes that gap: the malicious app has the code
+but not the verifier.</p>
+<p>It later turned out that PKCE also defends against <strong>code
+injection</strong>, where an attacker takes a code issued for <em>their
+own</em> account (or one stolen from a victim) and gets it redeemed in
+someone else’s session. Because the code is bound to a challenge from a
+specific flow, it can’t be redeemed in a different one. That’s why RFC
+9700 now recommends PKCE for <strong>all</strong> clients, including
+confidential server-side apps that have secrets, and why OAuth 2.1 makes
+it mandatory for the code flow.</p>
+<h3 id="redirect-uris-must-match-exactly">Redirect URIs must match
+exactly</h3>
+<p>Many real OAuth breaches came from loose redirect URI matching: an AS
+that accepted any URL under <code>https://example.com/</code> could be
+tricked into sending codes to an attacker-controlled path, an open
+redirector, or a subdomain the attacker took over. RFC 9700 requires
+exact string matching of redirect URIs (with a narrow exception for
+localhost ports used by native apps, per RFC 8252).</p>
+<h3 id="mix-up-attacks-and-the-iss-parameter">Mix-up attacks and the
+<code>iss</code> parameter</h3>
+<p>A client that works with several authorization servers can be tricked
+into sending a code from an honest AS to an attacker’s AS. RFC 9207
+(2022) has the AS include an <code>iss</code> parameter in the
+authorization response so the client can check which AS actually
+answered. If your client talks to more than one identity provider, check
+<code>iss</code>.</p>
+<h2 id="access-tokens-and-refresh-tokens">5. Access tokens and refresh
+tokens</h2>
+<h3 id="two-formats">Two formats</h3>
+<p>An access token is opaque to the client, but the resource server has
+to validate it. There are two common approaches:</p>
+<ul>
+<li><strong>Reference tokens.</strong> A random string that means
+nothing on its own. The RS asks the AS what it means through
+<strong>token introspection</strong> (RFC 7662), getting back JSON with
+<code>active</code>, <code>scope</code>, <code>sub</code>,
+<code>exp</code> and so on. Revocation takes effect immediately, but
+every API call (or every cache miss) costs a round trip to the AS.</li>
+<li><strong>Self-contained tokens</strong>, almost always
+<strong>JWTs</strong> (RFC 7519). The token carries its claims and a
+signature. The RS validates it locally with the AS’s public key, fetched
+from a JWKS endpoint and cached. Validation is fast and works even if
+the AS is down, but a token can’t be revoked before it expires, short of
+the RS checking a denylist. RFC 9068 (2021) defines a standard JWT
+profile for access tokens with required claims (<code>iss</code>,
+<code>exp</code>, <code>aud</code>, <code>sub</code>,
+<code>client_id</code>, <code>iat</code>, <code>jti</code>) and a
+<code>typ</code> header of <code>at+jwt</code>.</li>
+</ul>
+<p>The usual compromise: JWT access tokens with short lifetimes (5 to 60
+minutes) plus refresh tokens for long sessions, so revocation takes
+effect within one access-token lifetime.</p>
+<h3 id="refresh-tokens">Refresh tokens</h3>
+<p>A refresh token lets the client get new access tokens without sending
+the user through the flow again. It’s sent only to the AS, never to
+resource servers, which shrinks its exposure. But it’s long-lived and
+powerful, so RFC 9700 requires that refresh tokens issued to
+<strong>public clients</strong> (apps without a secret, such as SPAs and
+mobile apps) be either <strong>sender-constrained</strong> (section 8)
+or protected by <strong>refresh token rotation</strong>.</p>
+<p>With rotation, every use of a refresh token returns a new one and
+invalidates the old. If an attacker steals a refresh token and uses it,
+then the legitimate client later uses the same (now stale) token, the AS
+sees a refresh token used twice. It can’t tell which party is the
+attacker, so it revokes the whole token family and forces the user to
+log in again. That turns silent long-term theft into a detectable,
+bounded event.</p>
+<h3 id="bearer-means-bearer">Bearer means bearer</h3>
+<p>RFC 6750 tokens are <strong>bearer tokens</strong>: whoever holds the
+token can use it, like cash. That’s the reason for nearly every rule in
+this reading: short lifetimes, narrow scopes and audiences, never
+putting tokens in URLs, never logging them, and sender-constraining
+where the risk justifies it.</p>
+<p>A real example of what happens when long-lived bearer tokens leak: in
+April 2022, GitHub disclosed that attackers had used stolen OAuth tokens
+issued to Heroku and Travis CI (two integrations many organizations had
+authorized) to download private repositories from dozens of
+organizations, including npm. The tokens were valid, the scopes were
+broad, and nothing about them was tied to the integrations’ own
+infrastructure.</p>
+<h2 id="openid-connect-login-on-top-of-oauth">6. OpenID Connect: login
+on top of OAuth</h2>
+<p>OAuth tells an API what a client may do. It doesn’t tell the client
+who the user is. Before OpenID Connect, many apps “logged in” users by
+getting an access token and calling a profile API. That’s dangerous: a
+malicious app that obtained a token for a user (perhaps legitimately,
+for its own purposes) could present it to <em>your</em> app’s login
+endpoint, and if your app just checks “does this token work against the
+profile API?”, the attacker logs in as that user. The token wasn’t
+issued to your app, but your app can’t tell.</p>
+<p><strong>OpenID Connect</strong> (OIDC Core 1.0, finalized by the
+OpenID Foundation in 2014) adds an authentication layer to OAuth.
+Request the <code>openid</code> scope, and the token response includes
+an <strong>ID token</strong>: a signed JWT <em>about the authentication
+event, addressed to your client</em>.</p>
+<p>Key ID token claims:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Claim</th>
+<th>Meaning</th>
+<th>Client must check</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>iss</code></td>
+<td>Who issued it</td>
+<td>Matches the expected provider exactly</td>
+</tr>
+<tr class="even">
+<td><code>aud</code></td>
+<td>Who it’s for</td>
+<td>Contains your <code>client_id</code></td>
+</tr>
+<tr class="odd">
+<td><code>sub</code></td>
+<td>Stable user ID at this issuer</td>
+<td>Use <code>iss</code> + <code>sub</code> as the user key, not
+email</td>
+</tr>
+<tr class="even">
+<td><code>exp</code>, <code>iat</code></td>
+<td>Validity window</td>
+<td>Not expired, with small clock skew</td>
+</tr>
+<tr class="odd">
+<td><code>nonce</code></td>
+<td>Echo of a value you sent</td>
+<td>Matches, which prevents replay</td>
+</tr>
+<tr class="even">
+<td><code>auth_time</code>, <code>acr</code>, <code>amr</code></td>
+<td>When and how the user authenticated</td>
+<td>If you need recent or MFA login</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>aud</code> check is what fixes the profile-API problem: an
+ID token issued to another app has a different audience, so your app
+rejects it.</p>
+<p>The <strong><code>iss</code> plus <code>sub</code></strong> rule
+deserves emphasis. Emails change, can be reassigned, and at some
+providers aren’t verified. Several account-takeover bugs came from apps
+that linked accounts by email across providers, so an attacker who could
+register an unverified email at one provider got into the victim’s
+account at the app. Key users by issuer and subject, and treat email as
+a profile attribute (check <code>email_verified</code> if you use it at
+all).</p>
+<p>OIDC adds a few more standard pieces that make integration
+easier:</p>
+<ul>
+<li><strong>Discovery.</strong>
+<code>/.well-known/openid-configuration</code> lists the provider’s
+endpoints, supported algorithms and JWKS URL, so clients configure
+themselves from one URL.</li>
+<li><strong>UserInfo endpoint.</strong> Returns profile claims for an
+access token.</li>
+<li><strong>Dynamic registration</strong> and <strong>logout</strong>
+specs (front-channel, back-channel and RP-initiated logout), with
+varying adoption.</li>
+</ul>
+<p>A useful rule of thumb: <strong>ID tokens are for the client, access
+tokens are for APIs.</strong> Never send an ID token to an API as a
+credential, and never treat an access token as proof of who logged
+in.</p>
+<h2 id="validating-jwts-without-getting-burned">7. Validating JWTs
+without getting burned</h2>
+<p>JWTs are simple to describe and easy to validate badly. A JWT is
+three Base64url parts: a header
+(<code>{"alg":"RS256","kid":"abc"}</code>), a payload of claims, and a
+signature over the first two. Most JWT vulnerabilities come from
+trusting the header to tell you how to verify the token.</p>
+<p><strong><code>alg: none</code>.</strong> The JWT spec allows unsigned
+tokens with <code>"alg":"none"</code>. In 2015, Tim McLean (writing on
+the Auth0 blog) showed that several popular libraries would accept a
+token with <code>alg: none</code> and no signature as valid, if the
+application called a generic <code>verify(token, key)</code>.</p>
+<p><strong>Algorithm confusion.</strong> The same research showed a
+worse bug. A server expects RS256 (RSA, verified with a public key). An
+attacker sends a token with <code>"alg":"HS256"</code> (HMAC, verified
+with a shared secret) and signs it using the server’s <em>public</em>
+key as the HMAC secret. A library that picks the algorithm from the
+header then verifies the HMAC with the public key and accepts it. Public
+keys are public, so anyone can forge tokens.</p>
+<p>The defense for both is the same: <strong>the verifier decides the
+algorithm, not the token.</strong> Configure an allowlist of expected
+algorithms per issuer and reject anything else. RFC 8725 (JWT Best
+Current Practices, 2020) makes this explicit.</p>
+<p>A complete validation checklist for an access token at a resource
+server:</p>
+<ol type="1">
+<li>Parse the header, but use it only to select a key by
+<code>kid</code> from the issuer’s JWKS, and reject unexpected
+<code>alg</code> values.</li>
+<li>Verify the signature with that key.</li>
+<li>Check <code>iss</code> equals the expected issuer exactly.</li>
+<li>Check <code>aud</code> includes this API.</li>
+<li>Check <code>exp</code> (and <code>nbf</code> if present) with a
+small clock-skew allowance.</li>
+<li>Check <code>typ</code> is <code>at+jwt</code> if you follow RFC
+9068, so an ID token can’t be passed off as an access token.</li>
+<li>Check scopes or other authorization claims for the specific
+operation.</li>
+<li>Cache the JWKS but refresh it on an unknown <code>kid</code>,
+rate-limited, so key rotation works without letting attackers force
+endless fetches.</li>
+</ol>
+<p><strong>Signing keys are the crown jewels.</strong> In 2023,
+Microsoft disclosed that a threat actor it calls Storm-0558 had acquired
+a Microsoft account (consumer) signing key and used it to forge tokens
+that were accepted by Exchange Online for enterprise mailboxes,
+including US government accounts. The US Cyber Safety Review Board’s
+2024 report on the incident found, among other failures, that the token
+validation logic didn’t properly check that a consumer key wasn’t being
+used for enterprise tokens. Two lessons apply to any system: protect and
+rotate signing keys like the most sensitive secrets you have (the Oct 26
+secrets-management reading covers KMS and HSMs), and validate the issuer
+and key scope strictly, not just the signature.</p>
+<h2 id="sender-constrained-tokens-mtls-and-dpop">8. Sender-constrained
+tokens: mTLS and DPoP</h2>
+<p>Bearer tokens are only as safe as every place they pass through.
+<strong>Sender-constrained</strong> tokens fix this by binding the token
+to a key the client holds, so a stolen token is useless without the
+private key.</p>
+<p><strong>Mutual TLS (RFC 8705, 2020).</strong> The client
+authenticates to the AS with a TLS client certificate, and the AS puts
+the certificate’s thumbprint in the token (<code>cnf.x5t#S256</code>).
+The resource server only accepts the token over a TLS connection
+authenticated with the same certificate. It’s strong and widely used in
+open banking (FAPI profiles), but it needs client certificates and TLS
+termination that passes certificate details through, which is awkward
+for browsers and many load-balancer setups.</p>
+<p><strong>DPoP (RFC 9449, 2023).</strong> Demonstrating Proof of
+Possession works at the application layer. The client generates a key
+pair (in a browser, ideally a non-extractable WebCrypto key). On each
+request, it sends a <code>DPoP</code> header containing a small JWT
+signed with its private key, covering the HTTP method, the URL, a
+timestamp, a unique ID, and (when sending to a resource server) a hash
+of the access token. The AS binds the issued token to the public key’s
+thumbprint (<code>cnf.jkt</code>). The RS checks that each request’s
+proof is signed by that key and matches the request. Servers can also
+supply a nonce to limit how long a pre-generated proof stays useful.</p>
+<p>DPoP is practical where mTLS isn’t: SPAs, mobile apps, and anything
+behind TLS-terminating proxies. It’s also the recommended way to protect
+refresh tokens for public clients without rotation. The cost is a
+signature per request and some complexity in clients and servers.</p>
+<h2 id="where-tokens-live-in-a-browser">9. Where tokens live in a
+browser</h2>
+<p>Single-page apps are the hardest case. Wherever JavaScript can read a
+token, a cross-site scripting bug can steal it. The IETF’s “OAuth 2.0
+for Browser-Based Applications” document (an OAuth working group BCP
+draft) lays out the options, from most to least secure:</p>
+<ol type="1">
+<li><strong>Backend for Frontend (BFF).</strong> A small server-side
+component on the same site runs the OAuth flow as a confidential client
+and keeps all tokens on the server. The browser gets only an
+<code>HttpOnly</code>, <code>Secure</code>, <code>SameSite</code>
+session cookie, and the BFF proxies API calls, attaching tokens. XSS can
+still make requests while the page is open, but it can’t steal tokens to
+use elsewhere or later.</li>
+<li><strong>Token-mediating backend.</strong> The backend runs the flow
+but hands short-lived access tokens to the browser, keeping the refresh
+token server-side.</li>
+<li><strong>Browser-only client.</strong> The SPA runs the code flow
+with PKCE itself and holds tokens in memory (or a service worker or web
+worker to isolate them). Pair it with DPoP and short lifetimes. Storing
+tokens in <code>localStorage</code> makes them readable by any script on
+the origin, which is the setup the draft most strongly discourages.</li>
+</ol>
+<p>The trend in practice is toward BFF for anything sensitive. It turns
+the problem back into classic web session security, which browsers are
+good at.</p>
+<h2 id="service-to-service-and-workload-identity">10. Service-to-service
+and workload identity</h2>
+<p>Not every token has a user behind it. For a backend calling another
+backend, the <strong>client credentials</strong> grant is the OAuth
+answer: the service authenticates to the AS with its own credentials and
+gets a token scoped to what it may call.</p>
+<p>The weak point is how the service authenticates. A static
+<code>client_secret</code> in an environment variable is a long-lived
+bearer secret with all the problems above. Better options:</p>
+<ul>
+<li><strong>Private key JWT</strong> (<code>private_key_jwt</code>, from
+OIDC and RFC 7523). The client signs a short assertion with its private
+key, and the AS verifies it with the registered public key. No shared
+secret ever leaves the client.</li>
+<li><strong>mTLS client authentication</strong> (RFC 8705).</li>
+<li><strong>Workload identity federation.</strong> The service presents
+a token its platform already gives it (a Kubernetes service-account
+token, a cloud instance identity, a SPIFFE ID) and exchanges it for an
+access token. Cloud providers’ “workload identity federation” features
+(for example, letting GitHub Actions jobs get AWS or GCP credentials
+with no stored secret) are built on OIDC tokens and <strong>token
+exchange</strong> (RFC 8693). The Oct 26 secrets-management reading goes
+deeper on this.</li>
+</ul>
+<p>Token exchange also handles <strong>delegation chains</strong>:
+service A received a user’s token and needs to call service B on that
+user’s behalf. Rather than forwarding the user’s token (which has the
+wrong audience and probably too much scope), A exchanges it at the AS
+for a new token, audience-restricted to B, possibly with an
+<code>act</code> (actor) claim recording that A is acting for the
+user.</p>
+<h2 id="rfc-9700-and-oauth-2.1">11. RFC 9700 and OAuth 2.1</h2>
+<p>After years of attacks and patches spread across many documents, the
+OAuth working group published two consolidating efforts.</p>
+<p><strong>RFC 9700, “Best Current Practice for OAuth 2.0
+Security”</strong> (January 2025, also BCP 240) updates RFC 6749 and the
+related specs with what a decade of deployment taught. Its main
+requirements:</p>
+<ul>
+<li>Use the authorization code grant with <strong>PKCE</strong> for all
+clients; authorization servers must support it.</li>
+<li>Don’t use the <strong>implicit</strong> grant or other response
+types that return access tokens in the authorization response.</li>
+<li><strong>Must not</strong> use the resource owner password
+credentials grant.</li>
+<li>Register and match <strong>redirect URIs exactly</strong>.</li>
+<li>Prevent CSRF with PKCE, the OIDC <code>nonce</code>, or a one-time
+<code>state</code>.</li>
+<li>Defend against <strong>mix-up attacks</strong> when a client uses
+multiple authorization servers (for example with the <code>iss</code>
+response parameter).</li>
+<li><strong>Sender-constrain</strong> or <strong>rotate</strong> refresh
+tokens for public clients, and preferably sender-constrain access tokens
+too.</li>
+<li>Restrict access token <strong>privileges and audience</strong> to
+the minimum needed.</li>
+<li>Don’t send access tokens in query strings.</li>
+<li>Prefer asymmetric client authentication (mTLS or
+<code>private_key_jwt</code>) over shared secrets.</li>
+</ul>
+<p><strong>OAuth 2.1</strong> (draft-ietf-oauth-v2-1, still an
+Internet-Draft at the time of writing) is a rewrite of the core spec
+that folds in these lessons so newcomers don’t need to read a dozen
+RFCs. It removes the implicit and password grants, requires PKCE for the
+code flow, requires exact redirect URI matching, forbids bearer tokens
+in query strings, and constrains refresh tokens for public clients. If
+you follow RFC 9700 today, you’re already effectively doing OAuth
+2.1.</p>
+<p>One more extension worth knowing: <strong>Pushed Authorization
+Requests</strong> (PAR, RFC 9126, 2021). Instead of putting all the
+authorization parameters in the browser redirect, where they can be
+tampered with or leaked and URLs get long, the client POSTs them to the
+AS directly and gets back a short <code>request_uri</code> to put in the
+redirect. Financial-grade profiles (FAPI 2.0) require PAR, PKCE and
+sender-constrained tokens together.</p>
+<h2 id="a-practical-checklist">12. A practical checklist</h2>
+<p>When reviewing an OAuth or OIDC integration:</p>
+<ol type="1">
+<li>Code flow with PKCE (<code>S256</code>) everywhere, including
+server-side apps.</li>
+<li>No implicit or password grants anywhere, even “just for internal
+tools.”</li>
+<li>Exact redirect URI registration; <code>state</code> or
+<code>nonce</code> checked on every response.</li>
+<li>For login, validate the <strong>ID token</strong> (<code>iss</code>,
+<code>aud</code>, <code>exp</code>, <code>nonce</code>) and key users by
+<code>iss</code> + <code>sub</code>.</li>
+<li>For APIs, validate access tokens with an algorithm allowlist,
+correct <code>iss</code> and <code>aud</code>, and scopes per
+operation.</li>
+<li>Short access token lifetimes; refresh tokens rotated or
+sender-constrained.</li>
+<li>Tokens never in URLs or logs; BFF for browser apps that handle
+anything sensitive.</li>
+<li>Services authenticate with keys or workload identity, not long-lived
+secrets.</li>
+<li>Signing keys in a KMS or HSM, rotated, with JWKS caching that
+tolerates rotation.</li>
+<li>An inventory of third-party OAuth grants your organization has
+approved, reviewed regularly (the 2022 GitHub incident started with
+integrations nobody was watching).</li>
+</ol>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>OAuth delegates limited access to a client without sharing
+passwords. It’s authorization, not authentication.</li>
+<li>The authorization code flow with PKCE is the one flow to use for
+user-facing apps. The code goes through the browser; tokens never
+do.</li>
+<li>PKCE defends against code interception and code injection, so use it
+even when you have a client secret.</li>
+<li>Access tokens are bearer credentials: keep them short-lived,
+narrowly scoped, audience-restricted and out of URLs.</li>
+<li>OpenID Connect adds the ID token, which is addressed to your client.
+Check <code>aud</code> and <code>nonce</code>, and key users by
+<code>iss</code> + <code>sub</code>.</li>
+<li>Never let a JWT’s header choose the verification algorithm.</li>
+<li>DPoP and mTLS bind tokens to keys so stolen tokens are useless.</li>
+<li>RFC 9700 (2025) is the current security baseline; OAuth 2.1 packages
+the same rules into one spec.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Your team runs a confidential server-side web app with a client
+secret. Someone asks why it needs PKCE. Walk through the code injection
+attack that PKCE prevents even here.</li>
+<li>JWT access tokens can’t be revoked before they expire. How short
+would you make them for an internal admin API versus a public read API,
+and what would you add if you needed instant revocation?</li>
+<li>Refresh token rotation detects reuse but can’t tell attacker from
+victim. What user experience does that produce after a theft, and is it
+acceptable for a banking app? For a note-taking app?</li>
+<li>Why is “Sign in with X” by calling a profile API with an access
+token unsafe, when the token is perfectly valid?</li>
+<li>The BFF pattern puts tokens on a server and gives the browser a
+cookie. Which attacks does it stop, and which ones (think CSRF and XSS)
+does it not?</li>
+<li>Storm-0558 forged tokens with a stolen key. Beyond key protection,
+which validation checks would have limited the damage, and where in your
+own systems might the same gap exist?</li>
+<li>When would you choose mTLS over DPoP for sender-constraining, and
+vice versa?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>RFC 6749, “The OAuth 2.0 Authorization Framework” (2012), and RFC
+6750, “Bearer Token Usage” (2012).</li>
+<li>RFC 9700, “Best Current Practice for OAuth 2.0 Security” (BCP 240,
+January 2025), https://www.rfc-editor.org/rfc/rfc9700.html</li>
+<li>draft-ietf-oauth-v2-1, “The OAuth 2.1 Authorization Framework,” and
+the OAuth WG spec list at https://oauth.net/specs</li>
+<li>RFC 7636, “Proof Key for Code Exchange” (2015); RFC 8252, “OAuth 2.0
+for Native Apps” (2017); RFC 8628, “Device Authorization Grant”
+(2019).</li>
+<li>RFC 9449, “OAuth 2.0 Demonstrating Proof of Possession (DPoP)”
+(September 2023), https://www.rfc-editor.org/rfc/rfc9449.html ; RFC
+8705, “OAuth 2.0 Mutual-TLS Client Authentication and Certificate-Bound
+Access Tokens” (2020).</li>
+<li>RFC 7519 (JWT), RFC 8725 (JWT Best Current Practices), RFC 9068 (JWT
+Profile for Access Tokens), RFC 7662 (Token Introspection), RFC 8693
+(Token Exchange), RFC 8707 (Resource Indicators), RFC 9126 (PAR), RFC
+9207 (Authorization Server Issuer Identification), RFC 9396 (Rich
+Authorization Requests).</li>
+<li>OpenID Connect Core 1.0 and Discovery 1.0, OpenID Foundation,
+https://openid.net/specs/openid-connect-core-1_0.html</li>
+<li>IETF OAuth WG, “OAuth 2.0 for Browser-Based Applications”
+(draft-ietf-oauth-browser-based-apps).</li>
+<li>Tim McLean, “Critical vulnerabilities in JSON Web Token libraries,”
+Auth0 blog, 2015.</li>
+<li>GitHub blog, “Security alert: Attack campaign involving stolen OAuth
+user tokens issued to two third-party integrators,” April 2022.</li>
+<li>Microsoft Security Response Center, “Results of major technical
+investigations for Storm-0558 key acquisition” (2023), and the US Cyber
+Safety Review Board report on the Microsoft Exchange Online intrusion
+(2024).</li>
+<li>WorkOS, “DPoP (RFC 9449) explained,”
+https://workos.com/blog/dpop-rfc-9449-explained</li>
+</ul>
+<p>The RFC 9700 and RFC 9449 publication details were confirmed against
+the RFC Editor pages on Oct 28, 2026. The other RFC numbers, the 2015
+JWT library research and the 2022 and 2023 incidents come from the cited
+documents as I know them; check the originals before quoting
+specifics.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/security.html">Security</a><a class="chip" href="/topics/apis.html">APIs</a></div>
+          <div class="daynav"><a href="/reading/discord-scylladb.html"><div class="kicker">← Older · Oct 28</div><div class="t">Discord&#x27;s messages: Cassandra to ScyllaDB</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+</body>
+</html>
