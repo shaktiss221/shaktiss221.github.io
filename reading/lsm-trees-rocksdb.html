@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LSM trees and RocksDB: trading reads for writes · The Daily Commit</title>
+  <meta name="description" content="Why log-structured merge trees beat B-trees for write-heavy workloads, how memtables, SSTables, Bloom filters and compaction work in RocksDB, the read/write/space amplification trade-off, and what MyRocks, WiscKey and newer research changed.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>LSM trees and RocksDB: trading reads for writes</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>18 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#why-not-just-use-a-b-tree">Why not just use a B-tree?</a><a href="#the-write-path-wal-and-memtable">The write path: WAL and
+memtable</a><a href="#sstables-the-files-on-disk">SSTables: the files on disk</a><a href="#the-read-path-and-bloom-filters">The read path and Bloom
+filters</a><a href="#compaction-where-the-real-work-happens">Compaction: where the
+real work happens</a><a href="#the-amplification-triangle">The amplification triangle</a><a href="#when-lsm-trees-go-wrong">When LSM trees go wrong</a><a href="#rocksdb-in-production">RocksDB in production</a><a href="#ideas-that-changed-the-trade-offs">Ideas that changed the
+trade-offs</a><a href="#choosing-and-tuning">Choosing and tuning</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 18 min left</div>
+      </nav>
+      <article class="article" data-slug="lsm-trees-rocksdb" data-minutes="18">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/databases.html">Databases</a> · October 29, 2026 · 18 min</div>
+        <h1>LSM trees and RocksDB: trading reads for writes</h1>
+        <p class="dek">Why log-structured merge trees beat B-trees for write-heavy workloads, how memtables, SSTables, Bloom filters and compaction work in RocksDB, the read/write/space amplification trade-off, and what MyRocks, WiscKey and newer research changed.</p>
+<p>If you’ve used Cassandra, ScyllaDB, CockroachDB, TiKV, Kafka Streams
+state stores, MyRocks, or the storage behind many queues and time-series
+systems, you’ve used a log-structured merge tree. The LSM tree is the
+main alternative to the B-tree, and for write-heavy workloads on modern
+storage it usually wins. The idea fits in one sentence: never update
+data in place; buffer writes in memory, write them out as sorted
+immutable files, and merge those files in the background. Everything
+interesting about LSM trees, from their speed to their failure modes,
+comes from that background merging. This reading builds an LSM tree from
+scratch, using RocksDB as the concrete example, and ends with how real
+systems tune and extend it.</p>
+<h2 id="why-not-just-use-a-b-tree">1. Why not just use a B-tree?</h2>
+<p>A B-tree (more precisely a B+tree, as used in InnoDB, Postgres
+indexes, and SQLite) keeps data sorted in fixed-size pages, typically 4
+to 16 KB, arranged as a shallow tree. To update a row, you find its
+page, change it, and write the page back. Reads are excellent: three or
+four page lookups find any key, and the upper levels are almost always
+cached.</p>
+<p>Writes are where it hurts. Changing a 100-byte row means rewriting an
+entire page (say 16 KB), so the <strong>write amplification</strong>
+(bytes written to storage divided by bytes the application wrote) can be
+in the hundreds for small random updates. Those writes are also random,
+scattered across the file. On spinning disks, random writes were
+painfully slow. On SSDs they’re fast, but SSDs have their own reasons to
+dislike them: flash can’t overwrite in place, so the drive’s firmware
+does its own garbage collection, and random small writes increase it,
+wearing out the drive faster.</p>
+<p>Pages also waste space. B-tree pages split when they fill, so they
+typically sit partly empty, and compression works page by page, so a 16
+KB page that compresses to 5 KB may still occupy an 8 KB slot on
+disk.</p>
+<p>Patrick O’Neil and colleagues proposed the <strong>log-structured
+merge tree</strong> in 1996 to fix the write side: turn random writes
+into sequential ones by batching them in memory and merging sorted runs
+on disk. Google’s Bigtable paper (2006) brought the design into
+large-scale production, LevelDB (2011, by Jeff Dean and Sanjay Ghemawat)
+made a compact open-source version, and Facebook forked LevelDB in 2012
+to create <strong>RocksDB</strong>, which is now the most widely
+embedded LSM engine.</p>
+<h2 id="the-write-path-wal-and-memtable">2. The write path: WAL and
+memtable</h2>
+<figure class="diagram"><svg viewBox="0 0 760 330" role="img" aria-label="LSM tree write path: WAL and memtable, flush to L0, compaction into larger levels" font-size="13"><defs><marker id="lsa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Writes land in memory, then move down through larger sorted levels</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Leveled compaction, size multiplier 10. Each level below L0 is one sorted run.</text><text x="24" y="92" font-weight="600" fill="var(--cds-text-primary)">Memory</text><rect x="130" y="70" width="150" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="205" y="92" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">memtable (sorted)</text><rect x="300" y="70" width="150" height="34" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.06" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="375" y="92" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">immutable memtable</text><path d="M280,87 L298,87" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#lsa)"></path><text x="24" y="146" font-weight="600" fill="var(--cds-text-primary)">Disk</text><rect x="500" y="124" width="230" height="34" rx="6" fill="var(--cds-chart-categorical-4)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25"></rect><text x="615" y="146" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">WAL (append-only, for recovery)</text><text x="24" y="170" font-weight="600" fill="var(--cds-text-primary)">L0</text><rect x="130" y="152" width="50" height="28" rx="6" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><rect x="188" y="152" width="50" height="28" rx="6" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><rect x="246" y="152" width="50" height="28" rx="6" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><rect x="304" y="152" width="50" height="28" rx="6" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="372" y="171" font-size="11.5" fill="var(--cds-text-secondary)">overlapping files, one per flush</text><path d="M375,104 L230,150" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#lsa)"></path><text x="250" y="128" font-size="11.5" fill="var(--cds-text-secondary)">flush</text><text x="24" y="220" font-weight="600" fill="var(--cds-text-primary)">L1</text><rect x="130" y="202" width="120" height="28" rx="6" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="262" y="221" font-size="11.5" fill="var(--cds-text-secondary)">1 unit, no overlaps</text><text x="24" y="270" font-weight="600" fill="var(--cds-text-primary)">L2</text><rect x="130" y="252" width="600" height="28" rx="6" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="430" y="271" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">10x L1</text><path d="M100,166 C80,190 80,205 126,214" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#lsa)"></path><text x="56" y="196" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">compact</text><path d="M100,216 C80,240 80,255 126,264" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#lsa)"></path><text x="56" y="246" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">compact</text><text x="24" y="312" font-size="11.5" fill="var(--cds-text-secondary)">A read checks the memtables, then each L0 file, then one file per level; Bloom filters skip most.</text></svg></figure>
+<p>A write in RocksDB (a <code>Put</code>, <code>Delete</code> or
+<code>Merge</code>) does two things:</p>
+<ol type="1">
+<li><strong>Append to the write-ahead log (WAL).</strong> The record
+goes to the end of a log file. This is purely for durability: if the
+process crashes, the WAL is replayed on restart to rebuild what was in
+memory. Appends are sequential and can be batched across many concurrent
+writers (“group commit”). Whether each write waits for
+<code>fsync</code> is configurable, which is the usual durability versus
+latency trade.</li>
+<li><strong>Insert into the memtable.</strong> The memtable is an
+in-memory sorted structure, a skip list by default, holding the most
+recent writes. Sorted order matters because it lets the memtable be
+written out later as a sorted file without a separate sort.</li>
+</ol>
+<p>That’s it. The write is acknowledged without reading anything from
+disk, and without touching any existing data. This is why LSM write
+throughput is so high, and why writes have predictable latency as long
+as the background work keeps up (that “as long as” is section 7).</p>
+<p>When the memtable reaches its size limit
+(<code>write_buffer_size</code>, 64 MB by default in RocksDB), it
+becomes <strong>immutable</strong>, a new empty memtable takes over new
+writes, and a background thread <strong>flushes</strong> the immutable
+one to disk as a sorted file. Once flushed, the corresponding WAL
+segment can be deleted.</p>
+<h3 id="deletes-are-writes-too">Deletes are writes too</h3>
+<p>You can’t delete from an immutable file. A delete writes a
+<strong>tombstone</strong>: a marker saying “this key is deleted as of
+this sequence number.” Reads that find a tombstone treat the key as
+absent. The old value and the tombstone both stay on disk until
+compaction merges them and can prove no older version remains below, at
+which point both are dropped. Tombstones cause one of the classic LSM
+pathologies, covered in section 7.</p>
+<p>Every write gets a monotonically increasing <strong>sequence
+number</strong>, and each stored entry is really
+<code>(user key, sequence number, type)</code>. That’s how the engine
+knows which version is newest, and it gives you cheap snapshots: a
+snapshot is just a sequence number, and reads at that snapshot ignore
+anything newer.</p>
+<h2 id="sstables-the-files-on-disk">3. SSTables: the files on disk</h2>
+<p>A flushed memtable becomes a <strong>Sorted String Table</strong>
+(SST), an immutable file of key-value pairs sorted by key. The term
+comes from Bigtable. A RocksDB SST in the default block-based format
+contains:</p>
+<ul>
+<li><strong>Data blocks</strong>, about 4 KB each by default
+(<code>block_size</code>), holding sorted entries. Keys within a block
+are prefix-compressed: each key stores only the bytes that differ from
+the previous key, with periodic “restart points” so a lookup can
+binary-search within the block.</li>
+<li><strong>Index block</strong>, with one entry per data block giving
+the last key in that block and its offset. To find a key, binary-search
+the index, then read one data block.</li>
+<li><strong>Filter block</strong>, holding a <strong>Bloom
+filter</strong> (or a newer Ribbon filter) over the file’s keys.</li>
+<li><strong>Properties and metadata</strong>, such as key ranges, entry
+counts and compression type.</li>
+</ul>
+<p>Because files are immutable and sorted, they compress well.
+Compression is per block, with LZ4 or Snappy for speed and Zstandard for
+the higher levels where most data lives. Immutability also makes many
+things easier: backups and checkpoints can hard-link files, caches never
+need invalidation, and replication or snapshot shipping can copy whole
+files (CockroachDB and TiKV send Raft snapshots this way, as the Oct 27
+Raft reading mentioned).</p>
+<h2 id="the-read-path-and-bloom-filters">4. The read path and Bloom
+filters</h2>
+<p>A point lookup has to find the newest version of a key, which could
+be anywhere: in the active memtable, an immutable memtable, or any SST.
+RocksDB checks them in order from newest to oldest and stops at the
+first hit:</p>
+<ol type="1">
+<li>The active memtable.</li>
+<li>Any immutable memtables waiting to flush.</li>
+<li>Each file in <strong>L0</strong>, newest first. L0 files are raw
+memtable flushes, so their key ranges overlap and every one must be
+checked.</li>
+<li>Then one file per level in L1, L2 and so on. Below L0 each level is
+a single sorted run with non-overlapping files, so a binary search over
+the file key ranges picks the only file that could contain the key.</li>
+</ol>
+<p>Without help, a lookup for a key that doesn’t exist would read a
+block from every level. <strong>Bloom filters</strong> prevent that. A
+Bloom filter is a compact bit array that can answer “definitely not
+here” or “maybe here.” With about 10 bits per key, the false-positive
+rate is about 1%, so a lookup skips 99% of the files that don’t hold the
+key with no disk read at all. Filters and index blocks are usually
+pinned in the block cache, so a point read typically costs one data
+block read from storage, or zero if that block is cached.</p>
+<p><strong>Range scans</strong> are the harder case. A scan like “all
+keys from <code>user:100</code> to <code>user:200</code>” can’t use
+Bloom filters (they only answer exact-key questions), so it has to open
+an iterator on every memtable, every L0 file and one file per level, and
+merge them with a heap. The cost grows with the number of sorted runs.
+RocksDB offers <strong>prefix Bloom filters</strong> for scans within a
+known prefix, and research systems have proposed range filters, but in
+general range-heavy read workloads are where B-trees keep an edge.</p>
+<h2 id="compaction-where-the-real-work-happens">5. Compaction: where the
+real work happens</h2>
+<p>If flushes were the only thing happening, L0 would grow forever and
+reads would check thousands of files. <strong>Compaction</strong> merges
+files to keep the number of sorted runs small, throws away overwritten
+values and resolved tombstones, and moves data toward the bottom of the
+tree. How you compact defines the LSM’s trade-offs.</p>
+<h3 id="leveled-compaction-rocksdbs-default">Leveled compaction
+(RocksDB’s default)</h3>
+<p>Data is organized into levels L0, L1, … Ln. Each level from L1 down
+has a target size, and each is <strong>10 times</strong> larger than the
+one above (<code>max_bytes_for_level_multiplier</code>, default 10).
+L1’s target is set by <code>max_bytes_for_level_base</code> (256 MB by
+default in recent RocksDB versions).</p>
+<ul>
+<li>When L0 accumulates enough files
+(<code>level0_file_num_compaction_trigger</code>, default 4), they’re
+merged together with the overlapping files in L1.</li>
+<li>When any level exceeds its target size, RocksDB picks a file in that
+level and merges it with the files it overlaps in the next level down,
+writing new files into the lower level.</li>
+</ul>
+<p>Because each level is one sorted run, a read touches at most one file
+per level, and space overhead is small: most data sits in the last
+level, and at most around 10% of data can be stale copies sitting in
+upper levels. The cost is <strong>write amplification</strong>. Every
+byte gets rewritten each time it moves down a level, and merging a file
+into a level ten times bigger can rewrite roughly ten times its size in
+overlapping data. With 5 to 7 levels, leveled compaction commonly writes
+each byte 10 to 30 times over its lifetime, and RocksDB’s own tuning
+guide describes write amplification in this range.</p>
+<p>RocksDB’s <code>level_compaction_dynamic_level_bytes</code> option
+(on by default since RocksDB 8.4) sizes levels from the bottom up,
+setting the last level from the actual data size and dividing by 10
+upward. That keeps the 10x ratio true even when the database is small
+and avoids wasting space when levels are mostly empty.</p>
+<h3 id="tiered-universal-compaction">Tiered (universal) compaction</h3>
+<p>Instead of keeping one sorted run per level, tiered compaction lets
+several similar-sized runs accumulate and merges them all at once into a
+bigger run. RocksDB calls its version <strong>universal
+compaction</strong>; Cassandra’s default for years was the similar
+<strong>size-tiered</strong> strategy.</p>
+<p>Each byte is rewritten far fewer times, since it’s merged only when
+its tier fills up, so write amplification is much lower. But there are
+more sorted runs to check on reads, and space amplification can be
+large: during a full merge of the biggest runs, the old and new copies
+exist side by side, so you may temporarily need up to twice the data
+size free on disk.</p>
+<h3 id="fifo-and-others">FIFO and others</h3>
+<p><strong>FIFO compaction</strong> just deletes the oldest files once a
+size or age limit is hit. It’s for time-series and cache-like data where
+old data simply expires. Cassandra’s <strong>time-window
+compaction</strong> groups files by write time for the same reason. Many
+systems mix strategies, for example tiering in upper levels and leveling
+at the bottom, which is where much of the research in section 9
+points.</p>
+<h2 id="the-amplification-triangle">6. The amplification triangle</h2>
+<p>Every LSM design choice moves you around three costs:</p>
+<ul>
+<li><strong>Write amplification</strong>: bytes written to storage per
+byte written by the application. Costs SSD endurance and background I/O
+and CPU.</li>
+<li><strong>Read amplification</strong>: storage reads (or files and
+blocks checked) per lookup. Costs latency and IOPS.</li>
+<li><strong>Space amplification</strong>: storage used divided by live
+data size. Costs money.</li>
+</ul>
+<p>Manos Athanassoulis and colleagues formalized this in 2016 as the
+<strong>RUM conjecture</strong> (Read, Update, Memory): an access method
+can optimize for at most two of the three at once, and improving one
+costs the others. A B-tree has low read amplification but high write
+amplification and wasted page space. Leveled LSM has low space and
+decent read amplification but high write amplification. Tiered LSM has
+low write amplification but higher read and space amplification.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Design</th>
+<th>Write amp</th>
+<th>Read amp (point)</th>
+<th>Space amp</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>B+tree (InnoDB-like)</td>
+<td>High for small random updates</td>
+<td>Low (about 1 cached path plus 1 page)</td>
+<td>Medium (partly empty pages)</td>
+</tr>
+<tr class="even">
+<td>Leveled LSM</td>
+<td>Medium-high (roughly 10 to 30)</td>
+<td>Low with Bloom filters</td>
+<td>Low (about 1.1x)</td>
+</tr>
+<tr class="odd">
+<td>Tiered LSM</td>
+<td>Low</td>
+<td>Higher (more runs)</td>
+<td>High during merges (up to about 2x)</td>
+</tr>
+</tbody>
+</table>
+<p>Mark Callaghan, who worked on MySQL and RocksDB at Google and
+Facebook, has written extensively on his “Small Datum” blog about
+measuring these three factors. One of his recurring points is that you
+can’t compare engines on a single benchmark number: you need to know
+which of the three costs the workload actually pays for.</p>
+<h2 id="when-lsm-trees-go-wrong">7. When LSM trees go wrong</h2>
+<p>LSM trees are fast as long as compaction keeps up. Most production
+incidents involve it falling behind.</p>
+<p><strong>Write stalls.</strong> If writes arrive faster than flush and
+compaction can process them, L0 fills with files and pending compaction
+bytes pile up. Reads get slower (every L0 file must be checked), so
+RocksDB protects itself by throttling writes. When L0 reaches
+<code>level0_slowdown_writes_trigger</code> files (default 20) it slows
+writes, and at <code>level0_stop_writes_trigger</code> (default 36) it
+stops them entirely until compaction catches up. Similar limits apply to
+the number of unflushed memtables and to estimated pending compaction
+bytes. To an application, this looks like sudden latency spikes or
+timeouts under heavy write load. The fixes are more background threads
+(<code>max_background_jobs</code>), larger or more memtables, faster
+disks, or reducing write amplification.</p>
+<p><strong>Tombstone pileups.</strong> Deleting many keys writes many
+tombstones, and they can’t be dropped until compaction reaches the
+bottom level. Meanwhile range scans must step over every tombstone. A
+queue implemented as “insert at the tail, delete from the head” is the
+classic victim: each dequeue scans past an ever-growing run of
+tombstones at the head. Cassandra’s warning about scanning too many
+tombstones exists for this reason, and the Discord reading on Oct 28
+described how tombstones and compaction contributed to Discord’s
+Cassandra latency problems. RocksDB mitigations include <strong>range
+deletions</strong> (one tombstone covering a whole key range),
+<code>SingleDelete</code> for keys written once, and compaction triggers
+that prioritize files with many deletions.</p>
+<p><strong>Space amplification surprises.</strong> With tiered
+compaction, a major merge can need free space equal to the data it’s
+merging. Teams run out of disk not because data grew, but because
+compaction needed room to work.</p>
+<p><strong>Compaction interfering with foreground work.</strong>
+Compaction competes with queries for disk bandwidth and CPU. RocksDB’s
+rate limiter caps background write bandwidth, and newer versions can
+adjust that cap automatically, but there’s a real trade-off: limit
+compaction too much and you hit write stalls instead.</p>
+<p><strong>Large values.</strong> If values are large (kilobytes or
+more), rewriting them during every compaction is pure waste, since the
+keys need to stay sorted but the values don’t. That’s the problem
+WiscKey addresses (section 9).</p>
+<h2 id="rocksdb-in-production">8. RocksDB in production</h2>
+<p><strong>MyRocks.</strong> Facebook’s biggest RocksDB deployment is
+MyRocks, a MySQL storage engine built on RocksDB, which replaced InnoDB
+for the user database (UDB) that stores Facebook’s social graph.
+Facebook’s 2016 announcement and its 2017 migration post describe the
+motivation: compressed InnoDB used far more space on flash than the same
+data in MyRocks, which needed roughly half the storage, while also
+writing much less to flash. The VLDB 2020 paper by Yoshinori Matsunobu,
+Siying Dong and Herman Lee (“MyRocks: LSM-Tree Database Storage Engine
+Serving Facebook’s Social Graph”) documents the migration, the
+engineering needed to make an LSM perform for a general-purpose SQL
+workload, and the trade-offs that remained, such as range scans and CPU
+spent on compaction.</p>
+<p><strong>Embedded everywhere.</strong> RocksDB is a library, not a
+server, so it shows up inside many distributed systems as the local
+storage on each node: TiKV (TiDB), YugabyteDB’s DocDB (a heavily
+modified fork), Kafka Streams state stores, Flink’s RocksDB state
+backend, and many others. CockroachDB used RocksDB until 2020, then
+replaced it with <strong>Pebble</strong>, a Go LSM engine compatible
+with RocksDB’s file format, citing the cost of crossing between Go and
+C++ and the desire to control the engine’s code.</p>
+<p><strong>Column families.</strong> One RocksDB instance can hold
+several <strong>column families</strong>, each with its own memtables,
+SSTs and compaction settings, but sharing one WAL so a write across
+families is atomic. Systems use this to keep, say, a data family on
+leveled compaction and a short-lived metadata family on FIFO.</p>
+<p><strong>Merge operator.</strong> For read-modify-write patterns like
+counters, RocksDB’s <strong>merge operator</strong> lets you write an
+operand (“add 1”) instead of reading the value first. Operands stack up
+and are combined lazily, during reads or compaction. It turns a
+read-then-write into a blind write, which an LSM does cheaply.</p>
+<h2 id="ideas-that-changed-the-trade-offs">9. Ideas that changed the
+trade-offs</h2>
+<p>LSM research has been very active in the last decade. A few ideas
+have made it into production engines.</p>
+<p><strong>Key-value separation (WiscKey).</strong> Lu and colleagues’
+WiscKey paper (FAST 2016) keeps keys and small pointers in the LSM tree,
+and stores values in a separate append-only <strong>value log</strong>.
+Compaction now moves only keys and pointers, which slashes write
+amplification for large values. The cost is that range scans become
+random reads into the value log, and the log needs its own garbage
+collection. RocksDB’s <strong>BlobDB</strong> (integrated BlobDB,
+rewritten around 2021) implements this idea, with values above a size
+threshold going into blob files. TiKV’s Titan and Badger (the Go engine
+behind Dgraph) use the same approach.</p>
+<p><strong>Smarter Bloom filters (Monkey).</strong> Giving every level
+the same bits per key is not optimal. Dayan, Athanassoulis and Idreos’s
+Monkey paper (SIGMOD 2017) shows that a lookup’s cost is dominated by
+the false positives at the larger, deeper levels, so allocating filter
+memory unevenly across levels reduces lookup cost for the same memory.
+Their later Dostoevsky paper (SIGMOD 2018) proposed “lazy leveling,”
+tiering at upper levels and leveling only at the last, which gets most
+of tiering’s write savings while keeping leveling’s space and point-read
+benefits for the bulk of the data.</p>
+<p><strong>Ribbon filters.</strong> RocksDB added the Ribbon filter in
+2021 (based on work by Peter Dillinger and Stefan Walzer), which uses
+about 30% less memory than a Bloom filter for the same false-positive
+rate, at somewhat higher CPU cost to build. RocksDB lets you use Ribbon
+for lower levels, where most keys live and memory matters most, and
+Bloom at the top, where filters are built frequently.</p>
+<p><strong>Tiered storage and disaggregation.</strong> Because SSTs are
+immutable, they’re natural to put on cheaper or remote storage. RocksDB
+supports placing the last levels on a different, cheaper device.
+Cloud-native databases go further, keeping SSTs in object storage with
+local caches, the same direction you saw in StarRocks’ shared-data mode
+on Oct 23.</p>
+<h2 id="choosing-and-tuning">10. Choosing and tuning</h2>
+<p>Some rules of thumb for deciding whether an LSM fits and how to
+configure it:</p>
+<ul>
+<li><strong>Write-heavy, point-read workloads</strong> (event ingestion,
+messaging metadata, time series, counters, the storage layer under a
+distributed KV store) are the LSM’s home ground.</li>
+<li><strong>Read-heavy, range-scan-heavy workloads with few
+updates</strong> often do as well or better on a B-tree. Many OLTP
+systems still choose B-trees for predictability.</li>
+<li><strong>Watch the three amplifications.</strong> Measure bytes
+written to disk versus bytes written by the app (write amp), disk used
+versus live data (space amp), and block cache hit rates and read IOPS
+(read amp). RocksDB exposes all of these in its statistics.</li>
+<li><strong>Size the block cache and pin filters and indexes</strong> so
+that point reads cost at most one storage read.</li>
+<li><strong>Pick compaction by workload.</strong> Leveled for read and
+space efficiency, universal for write-heavy workloads that can spare
+disk, FIFO for expiring data.</li>
+<li><strong>Leave headroom.</strong> Compaction needs disk bandwidth and
+free space. A disk at 85% full or an I/O budget at 90% can turn into
+write stalls under a traffic spike.</li>
+<li><strong>Design keys for the engine.</strong> Keys that share
+prefixes compress well and enable prefix filters. Avoid queue-like
+delete patterns, or use range deletions.</li>
+</ul>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>An LSM tree turns random writes into sequential ones: WAL plus
+memtable in front, immutable sorted files behind.</li>
+<li>Deletes and updates are just new writes; old versions and tombstones
+disappear only when compaction merges them away.</li>
+<li>Reads check newest to oldest. Bloom filters (about 1% false
+positives at 10 bits per key) make point lookups cheap; range scans pay
+for every sorted run.</li>
+<li>Compaction strategy is the main tuning knob. Leveled favors reads
+and space, tiered favors writes.</li>
+<li>Read, write and space amplification trade off against each other
+(the RUM conjecture). Know which one your workload pays for.</li>
+<li>Most LSM incidents are compaction falling behind: write stalls,
+tombstone pileups and surprise disk usage.</li>
+<li>Key-value separation, better filters and hybrid compaction policies
+have shifted the trade-offs, and are now in production engines.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Leveled compaction with a multiplier of 10 rewrites each byte many
+times. Would a multiplier of 4 or 20 be better for a write-heavy
+workload, and what would you give up?</li>
+<li>A team implements a job queue on RocksDB with keys
+<code>job:&lt;timestamp&gt;</code> and deletes jobs after processing.
+Latency climbs over hours. What’s happening, and how would you redesign
+it?</li>
+<li>Why does key-value separation help writes but hurt range scans? For
+which value sizes would you turn on BlobDB?</li>
+<li>CockroachDB moved from RocksDB to Pebble. What are the risks and
+benefits of owning your own storage engine?</li>
+<li>Facebook found that MyRocks used much less space than compressed
+InnoDB. Using the B-tree weaknesses in section 1, explain where those
+savings come from.</li>
+<li>If you ran RocksDB on object storage with a local SSD cache, which
+levels would you keep local, and how would compaction change?</li>
+<li>Where in your current systems is an LSM tree hiding underneath, and
+do you know which compaction strategy it uses?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Patrick O’Neil, Edward Cheng, Dieter Gawlick and Elizabeth O’Neil,
+“The Log-Structured Merge-Tree (LSM-Tree),” Acta Informatica, 1996.</li>
+<li>Fay Chang et al., “Bigtable: A Distributed Storage System for
+Structured Data,” OSDI 2006.</li>
+<li>RocksDB wiki and docs: “RocksDB Overview,” “Leveled Compaction,”
+“Universal Compaction,” “Write Stalls,” “RocksDB Tuning Guide,”
+“BlobDB,” https://github.com/facebook/rocksdb/wiki and
+https://rocksdb.org</li>
+<li>Yoshinori Matsunobu, Siying Dong and Herman Lee, “MyRocks: LSM-Tree
+Database Storage Engine Serving Facebook’s Social Graph,” PVLDB 13(12),
+2020, https://www.vldb.org/pvldb/vol13/p3217-matsunobu.pdf</li>
+<li>Facebook Engineering, “MyRocks: A space- and write-optimized MySQL
+database” (2016),
+https://engineering.fb.com/core-data/myrocks-a-space-and-write-optimized-mysql-database/
+and “Migrating a database from InnoDB to MyRocks” (2017),
+https://engineering.fb.com/2017/09/25/core-data/migrating-a-database-from-innodb-to-myrocks/</li>
+<li>Manos Athanassoulis et al., “Designing Access Methods: The RUM
+Conjecture,” EDBT 2016.</li>
+<li>Lanyue Lu et al., “WiscKey: Separating Keys from Values in
+SSD-conscious Storage,” FAST 2016.</li>
+<li>Niv Dayan, Manos Athanassoulis and Stratos Idreos, “Monkey: Optimal
+Navigable Key-Value Store,” SIGMOD 2017; Niv Dayan and Stratos Idreos,
+“Dostoevsky,” SIGMOD 2018.</li>
+<li>Peter C. Dillinger and Stefan Walzer, “Ribbon filter: practically
+smaller than Bloom and Xor” (2021), and the RocksDB blog post on Ribbon
+filters.</li>
+<li>Cockroach Labs, “Introducing Pebble: A RocksDB-inspired key-value
+store written in Go” (2020).</li>
+<li>Mark Callaghan, Small Datum blog, posts on read, write and space
+amplification, https://smalldatum.blogspot.com</li>
+<li>Martin Kleppmann, <em>Designing Data-Intensive Applications</em>
+(O’Reilly, 2017), chapter 3.</li>
+</ul>
+<p>The MyRocks paper and Facebook posts were located on Oct 29, 2026.
+The RocksDB option names and defaults are from the RocksDB wiki and
+options headers as I know them; defaults change between releases, so
+check <code>include/rocksdb/options.h</code> for the version you run.
+The 10 bits per key and 1% figure is the standard Bloom filter
+result.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/databases.html">Databases</a><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a></div>
+          <div class="daynav"><a href="/reading/oauth-oidc.html"><div class="kicker">← Older · Oct 28</div><div class="t">OAuth 2.0 and OpenID Connect, done safely</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
