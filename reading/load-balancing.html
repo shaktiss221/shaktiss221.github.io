@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Load balancing: from DNS to the power of two choices · The Daily Commit</title>
+  <meta name="description" content="The layers a request passes through, L4 versus L7 balancing, why round robin and least-connections fail at scale, the power of two random choices, health checks and outlier ejection, subsetting, and lessons from Google, Netflix, Twitter and Envoy.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Load balancing: from DNS to the power of two choices</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>17 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#what-balanced-actually-means">What “balanced” actually
+means</a><a href="#the-layers">The layers</a><a href="#l4-versus-l7-and-the-long-lived-connection-problem">L4 versus
+L7, and the long-lived connection problem</a><a href="#the-algorithms">The algorithms</a><a href="#health-checking">Health checking</a><a href="#graceful-changes-draining-slow-start-and-lame-ducks">Graceful
+changes: draining, slow start and lame ducks</a><a href="#subsetting-not-everyone-connects-to-everyone">Subsetting: not
+everyone connects to everyone</a><a href="#overload-when-balancing-isnt-enough">Overload: when balancing
+isn’t enough</a><a href="#lessons-from-production">Lessons from production</a><a href="#a-practical-playbook">A practical playbook</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 17 min left</div>
+      </nav>
+      <article class="article" data-slug="load-balancing" data-minutes="17">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/networking.html">Networking</a> · October 30, 2026 · 17 min</div>
+        <h1>Load balancing: from DNS to the power of two choices</h1>
+        <p class="dek">The layers a request passes through, L4 versus L7 balancing, why round robin and least-connections fail at scale, the power of two random choices, health checks and outlier ejection, subsetting, and lessons from Google, Netflix, Twitter and Envoy.</p>
+<p>Load balancing sounds like the simplest problem in backend systems:
+you have N servers and some requests, so spread the requests evenly. In
+practice it decides whether a slow server degrades one request or a
+whole fleet, whether a deploy is smooth or a retry storm, and how many
+machines you need to buy. The hard parts aren’t the algorithms in
+textbooks. They’re stale information, many independent balancers acting
+at once, servers that are alive but sick, and connections that last much
+longer than requests. This reading goes from the layers of balancing a
+request passes through to the algorithms, health checking and the
+production lessons that companies like Google, Netflix and Twitter have
+written about.</p>
+<h2 id="what-balanced-actually-means">1. What “balanced” actually
+means</h2>
+<p>The goal isn’t equal request counts. It’s that <strong>no server is
+overloaded while others sit idle</strong>, measured in whatever resource
+actually runs out: CPU, memory, connections, or queue depth. Requests
+vary wildly in cost (a cached lookup versus a report), and servers vary
+too (different hardware generations, noisy neighbors, a JIT that hasn’t
+warmed up, a garbage collection pause). An algorithm that gives each
+server the same number of requests can still leave one at 95% CPU and
+another at 40%.</p>
+<p>Capacity planning makes this concrete. If your hottest server runs at
+90% when the average is 60%, you have to provision for the hottest one.
+Google’s SRE book makes this point in its chapter on datacenter load
+balancing: imbalance is wasted capacity, because the fleet’s useful
+capacity is limited by its most loaded members. Better balancing
+directly translates into fewer machines.</p>
+<p>A second goal is often more important than the first: <strong>keep
+failures contained</strong>. A balancer that keeps sending traffic to a
+broken server, or that piles all retries onto the remaining healthy
+servers until they fall over too, turns a single failure into an
+outage.</p>
+<h2 id="the-layers">2. The layers</h2>
+<figure class="diagram"><svg viewBox="0 0 760 330" role="img" aria-label="Layers of load balancing from DNS to client-side balancing" font-size="13"><defs><marker id="lba" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">A request usually passes through several load balancers</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Each layer spreads load over the next and decides what counts as healthy.</text><rect x="24" y="70" width="180" height="36" rx="7" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="114" y="93" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">DNS / anycast</text><text x="220" y="93" font-size="12" fill="var(--cds-text-secondary)">picks a region or edge site</text><line x1="114" y1="106" x2="114" y2="126" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#lba)"></line><rect x="24" y="128" width="180" height="36" rx="7" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="114" y="151" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">L4 balancer</text><text x="220" y="151" font-size="12" fill="var(--cds-text-secondary)">spreads TCP/UDP flows (Maglev, Katran, NLB)</text><line x1="114" y1="164" x2="114" y2="184" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#lba)"></line><rect x="24" y="186" width="180" height="36" rx="7" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="114" y="209" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">L7 proxy</text><text x="220" y="209" font-size="12" fill="var(--cds-text-secondary)">routes HTTP/gRPC requests (Envoy, NGINX, ALB)</text><line x1="114" y1="222" x2="114" y2="242" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#lba)"></line><rect x="24" y="244" width="180" height="36" rx="7" fill="var(--cds-chart-categorical-4)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25"></rect><text x="114" y="267" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Client-side LB</text><text x="220" y="267" font-size="12" fill="var(--cds-text-secondary)">service picks a backend per request (gRPC, mesh)</text><rect x="574" y="250" width="28" height="24" rx="7" fill="var(--cds-chart-categorical-5)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-5)" stroke-width="1.25"></rect><rect x="610" y="250" width="28" height="24" rx="7" fill="var(--cds-chart-categorical-5)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-5)" stroke-width="1.25"></rect><rect x="646" y="250" width="28" height="24" rx="7" fill="var(--cds-chart-categorical-5)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-5)" stroke-width="1.25"></rect><rect x="682" y="250" width="28" height="24" rx="7" fill="var(--cds-chart-categorical-5)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-5)" stroke-width="1.25"></rect><rect x="718" y="250" width="28" height="24" rx="7" fill="var(--cds-chart-categorical-5)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-5)" stroke-width="1.25"></rect><text x="574" y="292" font-size="11.5" fill="var(--cds-text-secondary)">backends</text><line x1="545" y1="262" x2="568" y2="262" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#lba)"></line><text x="24" y="322" font-size="11.5" fill="var(--cds-text-secondary)">Granularity gets finer at each step: region, connection, then individual request.</text></svg></figure>
+<p>A request to a large service typically passes through several layers
+of balancing, each with a different view and granularity:</p>
+<p><strong>DNS and anycast (global).</strong> DNS resolution can return
+different IPs depending on the client’s location and the health of each
+region. It’s coarse: answers are cached by resolvers for the TTL and
+often longer, so shifting traffic away from a failed region can take
+minutes. <strong>Anycast</strong> advertises the same IP address from
+many locations via BGP, so the network itself routes each client to a
+nearby site. CDNs and DNS providers rely on it heavily, and it reacts as
+fast as routing converges.</p>
+<p><strong>L4 load balancers (connections).</strong> At layer 4, the
+balancer sees IP addresses and ports, not HTTP. It picks a backend for
+each TCP connection (or UDP flow) and forwards packets. Because it
+doesn’t parse or terminate the protocol, it can be extremely fast.
+Google’s <strong>Maglev</strong> (NSDI 2016) runs on ordinary servers,
+uses consistent hashing so that every Maglev machine picks the same
+backend for a given connection, and returns responses directly from
+backends to clients (direct server return). Facebook’s
+<strong>Katran</strong> does the same with eBPF and XDP in the Linux
+kernel, GitHub built <strong>GLB</strong>, and Cloudflare built
+<strong>Unimog</strong>. In the cloud, AWS’s Network Load Balancer plays
+this role. The consistent hashing pack reading on Oct 27 covered
+Maglev’s hashing in detail.</p>
+<p><strong>L7 proxies (requests).</strong> At layer 7, the balancer
+terminates the connection, parses HTTP or gRPC, and picks a backend for
+each <strong>request</strong>. It can route by path or header, retry,
+add timeouts, terminate TLS, and see response codes and latencies.
+Envoy, NGINX, HAProxy, AWS ALB and Google’s front ends work here. The
+price is more CPU per request and another hop.</p>
+<p><strong>Client-side balancing (requests, inside the caller).</strong>
+In a service mesh or with gRPC, the calling service (or a sidecar proxy
+next to it) holds a list of backend addresses from service discovery and
+picks one per request. No central balancer sits in the path. Twitter’s
+Finagle, Netflix’s Ribbon, gRPC’s built-in policies and Envoy as a
+sidecar all work this way.</p>
+<p>Why so many layers? Each solves a different problem. DNS and anycast
+handle geography and whole-site failures. L4 handles enormous packet
+rates cheaply and gives a stable virtual IP. L7 and client-side
+balancing make fine-grained, per-request decisions using information
+only they can see.</p>
+<h2 id="l4-versus-l7-and-the-long-lived-connection-problem">3. L4 versus
+L7, and the long-lived connection problem</h2>
+<p>The difference between per-connection and per-request balancing
+matters more than it seems.</p>
+<p>HTTP/1.1 clients open several connections and send one request at a
+time on each, so balancing connections roughly balances requests.
+<strong>HTTP/2 and gRPC multiplex many requests over one long-lived
+connection.</strong> An L4 balancer only sees the connection, so if a
+client opens one connection, all of its requests go to one backend for
+hours. Add new backends during a scale-up and they get no traffic,
+because existing connections are pinned to the old ones.</p>
+<p>This is the most common load-balancing surprise in gRPC deployments,
+and the fixes are all about moving to request-level balancing:</p>
+<ul>
+<li>Put an <strong>L7 proxy</strong> that understands HTTP/2 in front,
+so it balances each request across its own connections to backends.</li>
+<li>Use <strong>client-side balancing</strong>: gRPC clients resolve all
+backend addresses and keep a connection to each (or to a subset), then
+balance requests across them. The Oct 25 gRPC pack reading touched on
+this.</li>
+<li>Set a <strong>maximum connection age</strong> on servers, so clients
+periodically reconnect and get rebalanced. gRPC servers support
+<code>MAX_CONNECTION_AGE</code> for exactly this reason.</li>
+</ul>
+<h2 id="the-algorithms">4. The algorithms</h2>
+<h3 id="round-robin">Round robin</h3>
+<p>Send each request to the next server in order. It’s simple, stateless
+apart from a counter, and works well when requests cost the same and
+servers are identical. It fails when they’re not: a slow server gets the
+same share as a fast one, so its queue grows without bound.
+<strong>Weighted round robin</strong> gives servers shares proportional
+to their capacity, which helps with mixed hardware but needs the weights
+to be right.</p>
+<h3 id="random">Random</h3>
+<p>Pick a server uniformly at random. Over many requests it’s as even as
+round robin, but over short windows some servers get noticeably more
+than others. With n servers and n requests, the busiest server gets
+about log n / log log n requests instead of 1, a classic balls-into-bins
+result. Random needs no coordination, which is its main attraction.</p>
+<h3 id="least-connections-least-outstanding-requests">Least connections
+/ least outstanding requests</h3>
+<p>Send each request to the server with the fewest requests currently in
+flight. This adapts automatically: a slow server accumulates in-flight
+requests and stops receiving new ones. With a single balancer, it’s one
+of the best simple algorithms.</p>
+<p>The problem is <strong>multiple balancers</strong>. Each one sees
+only its own in-flight counts. If 100 client-side balancers all see
+server 7 with zero outstanding requests (because it just came up, or
+just finished a burst), all 100 send their next request there at once.
+This <strong>herd behavior</strong> turns a newly started server into
+the most overloaded one. The same happens with any “pick the global
+best” rule based on information that’s even slightly stale.</p>
+<h3 id="the-power-of-two-random-choices">The power of two random
+choices</h3>
+<p>The fix is a remarkable result from Michael Mitzenmacher’s work in
+the 1990s (his 1996 PhD thesis and the paper “The Power of Two Choices
+in Randomized Load Balancing,” published in 2001). Instead of picking
+one server at random or the best of all, <strong>pick two at random and
+send the request to the less loaded of the two</strong>.</p>
+<p>With pure random assignment of n requests to n servers, the busiest
+server ends up with about log n / log log n. With two random choices, it
+drops to about log log n / log 2, which is an exponential improvement.
+Going from two choices to three helps only by a constant factor. Almost
+all the benefit comes from the second choice.</p>
+<p>Two choices also fix the herd problem. Because each balancer picks
+its two candidates at random, different balancers compare different
+pairs, so they don’t all converge on the same “best” server. A server
+that’s momentarily least loaded will win some comparisons, not all of
+them. Least-loaded-of-two with stale information performs far better
+than least-loaded-of-all with the same stale information.</p>
+<p>This is why “P2C” is the default in many modern balancers. Envoy’s
+<code>LEAST_REQUEST</code> policy samples two hosts by default
+(<code>choice_count</code> is configurable) and picks the one with fewer
+active requests. Linkerd and Finagle use P2C with latency-aware load
+metrics. Netflix’s 2018 post “Rethinking Netflix’s Edge Load Balancing”
+describes moving Zuul from round robin to a choice-of-2 algorithm that
+combined the client’s own in-flight count with load data reported by
+servers, plus penalties for recently failed or newly started
+servers.</p>
+<h3 id="latency-aware-ewma">Latency-aware: EWMA</h3>
+<p>Outstanding requests measure queue length, not speed. A server can
+have few requests in flight but take a long time on each. Twitter’s
+Finagle and Linkerd use <strong>peak EWMA</strong>: an exponentially
+weighted moving average of response latency that jumps up immediately
+when a slow response arrives and decays slowly, multiplied by the number
+of outstanding requests. Combined with P2C, it steers traffic away from
+slow servers quickly and returns it gradually.</p>
+<h3 id="consistent-hashing">Consistent hashing</h3>
+<p>Sometimes you want the same key to go to the same server: a cache
+shard, a session, a user’s partition. That’s <strong>consistent
+hashing</strong> (ring, rendezvous, jump hash, Maglev). It trades
+balance for affinity, and it needs extensions like bounded loads to
+avoid hot servers. The Oct 27 pack reading covered it in depth, so here
+it’s enough to say: use hashing when locality matters, and load-aware
+balancing otherwise.</p>
+<h2 id="health-checking">5. Health checking</h2>
+<p>A balancer must know which backends can take traffic. There are two
+complementary approaches.</p>
+<p><strong>Active health checks.</strong> The balancer periodically
+sends a probe (a TCP connect, an HTTP <code>GET /healthz</code>, a gRPC
+health check) and marks a backend unhealthy after a few consecutive
+failures, healthy again after a few successes. They’re simple and catch
+dead servers, but they have blind spots:</p>
+<ul>
+<li>A health endpoint that just returns 200 says the process is alive,
+not that it can serve real requests. If the database it depends on is
+down, <code>/healthz</code> still passes.</li>
+<li>A health endpoint that checks <em>every</em> dependency has the
+opposite problem. If a shared dependency fails, every backend fails its
+check at once, and the balancer removes the entire fleet. A degraded
+service becomes a completely unavailable one. Many balancers have a
+“panic” mode for this: Envoy, for example, stops honoring health status
+and spreads traffic over all hosts when the healthy fraction drops below
+a threshold (50% by default), on the theory that some service is better
+than none.</li>
+<li>Probes from many balancers to many backends add up. Ten thousand
+clients each checking a hundred backends every few seconds is real
+load.</li>
+</ul>
+<p>A good compromise: the health check tests that the process can do
+useful local work, while dependency failures show up through real
+traffic (below) and are handled with circuit breakers.</p>
+<p><strong>Passive health checks (outlier detection).</strong> The
+balancer watches real responses. If a backend returns several
+consecutive errors, or its error rate or latency is far worse than its
+peers, it’s <strong>ejected</strong> temporarily. Envoy’s outlier
+detection defaults are a good reference: eject after 5 consecutive 5xx
+responses, evaluate every 10 seconds, eject for a base time of 30
+seconds (multiplied by how many times the host has been ejected before),
+and never eject more than 10% of hosts at once. That last limit is the
+important one. It stops outlier detection from removing most of the
+fleet during a widespread problem, where the backends aren’t the
+outliers at all.</p>
+<p>Passive checks catch what active probes miss, the server that answers
+<code>/healthz</code> but fails real requests, and they cost nothing
+extra. Use both.</p>
+<h2 id="graceful-changes-draining-slow-start-and-lame-ducks">6. Graceful
+changes: draining, slow start and lame ducks</h2>
+<p>Most backend churn is planned: deploys, autoscaling, maintenance.
+Handling it well prevents a lot of errors.</p>
+<p><strong>Draining.</strong> When a server is about to stop, it should
+stop receiving new requests but finish the ones in flight. Google’s SRE
+book describes a <strong>lame duck</strong> state: the backend is still
+running and answering in-flight requests, but tells clients (through
+health checks or response metadata) that it’s going away, so they stop
+sending new work. Kubernetes models this with readiness probes (fail
+readiness first, so endpoints are removed) plus a termination grace
+period. A common bug is the race between a pod shutting down and the
+endpoint removal propagating to every client and proxy. The usual fix is
+a short sleep in a <code>preStop</code> hook so the server keeps serving
+while the update spreads.</p>
+<p><strong>Slow start.</strong> A freshly started server often can’t
+handle a full share right away: caches are cold, JIT compilation hasn’t
+happened, connection pools are empty. And least-request algorithms send
+it <em>more</em> traffic, because it has no outstanding requests. Slow
+start ramps a new backend’s weight up over a window (Envoy and HAProxy
+both support this). Netflix’s edge balancer applied a similar penalty to
+new servers.</p>
+<p><strong>Connection draining on L4.</strong> For long-lived
+connections, removing a backend from an L4 balancer doesn’t move
+existing connections. Either wait for them to close, or have the server
+close them gracefully (HTTP/2 <code>GOAWAY</code>), so clients reconnect
+elsewhere.</p>
+<h2 id="subsetting-not-everyone-connects-to-everyone">7. Subsetting: not
+everyone connects to everyone</h2>
+<p>With client-side balancing, every client connecting to every backend
+gets expensive. A thousand clients and a thousand backends means a
+million connections, each with TLS state, health checks and memory.
+Google’s SRE book describes the solution: <strong>subsetting</strong>,
+where each client connects to only a subset of backends.</p>
+<p>The naive approach, each client picking a random subset, leads to
+uneven load: some backends end up in many subsets and others in few. The
+SRE book describes <strong>deterministic subsetting</strong>: clients
+are grouped into rounds, each round shuffles the backend list with a
+seed shared by that round, and each client in the round takes a
+different slice of the shuffled list. That way every backend gets
+roughly the same number of clients, and the assignment stays stable as
+long as membership doesn’t change. Twitter’s Finagle has a related
+scheme called <strong>aperture</strong> balancing, where each client
+balances over a small window of backends sized dynamically to its own
+load, with a deterministic layout so windows spread evenly across the
+backends.</p>
+<p>Subset size is a trade-off. Too small, and a few slow or failing
+backends affect a large share of one client’s capacity. Too large, and
+you’re back to too many connections.</p>
+<h2 id="overload-when-balancing-isnt-enough">8. Overload: when balancing
+isn’t enough</h2>
+<p>Load balancing spreads load. It can’t create capacity. When total
+demand exceeds total capacity, a good balancer helps the system fail
+gracefully instead of collapsing.</p>
+<ul>
+<li><strong>Load shedding on the server.</strong> Backends should reject
+excess work quickly, with a 503 or gRPC <code>RESOURCE_EXHAUSTED</code>,
+instead of queueing until everything times out. A fast rejection lets
+the client try elsewhere or back off. The Oct 22 rate-limiting reading
+covers this from the server side.</li>
+<li><strong>Retry budgets.</strong> Retries multiply load exactly when
+the system is weakest. Limit retries to a fraction of normal traffic
+(for example, 10% extra) and never retry at more than one layer without
+coordination. Finagle and Envoy both support retry budgets.</li>
+<li><strong>Circuit breakers.</strong> Envoy’s circuit breakers cap
+pending requests, active requests and connections per backend cluster,
+so a slow dependency can’t consume all of the caller’s resources.</li>
+<li><strong>Criticality.</strong> The SRE book describes tagging
+requests by criticality (for example, user-facing versus batch) so that
+under overload the system sheds the least important work first.</li>
+</ul>
+<p>The interaction between balancing and overload is worth stating
+directly: least-request and EWMA policies move traffic <em>away</em>
+from struggling servers, which is great when one server is sick and
+dangerous when all of them are near capacity. Then shifting load just
+overloads the next server. That’s why limits on ejection, retries and
+panic thresholds matter as much as the algorithm.</p>
+<h2 id="lessons-from-production">9. Lessons from production</h2>
+<p><strong>Google (SRE book, chapters 19 and 20).</strong> Google’s
+front-end balancing uses DNS and Maglev to choose datacenters and spread
+connections, then L7 front ends. Inside the datacenter, clients use
+subsetting and a <strong>weighted round robin</strong> where backends
+report their own utilization and error rates, and clients adjust weights
+accordingly. The key idea is that the backend knows its own load better
+than any client, so feeding that signal back beats guessing from
+outside.</p>
+<p><strong>Netflix.</strong> The 2018 Zuul post describes how round
+robin worked poorly at the edge when servers were unevenly loaded,
+especially during deploys and with new instances. The team moved to
+choice-of-2 with a combination of client-side in-flight counts and
+server-reported utilization, with penalties for servers that were new or
+had recently errored, and reported a reduction in load-related
+errors.</p>
+<p><strong>Twitter (Finagle).</strong> Finagle’s balancers moved from
+round robin to P2C with least-loaded and later peak-EWMA load metrics,
+and then to aperture for very large clusters. Twitter’s engineering
+posts emphasize that local decisions with good random sampling
+outperform attempts at global coordination.</p>
+<p><strong>Envoy.</strong> Envoy packages most of these ideas as
+configuration: round robin, least request (P2C), random, ring hash and
+Maglev policies; active health checks; outlier detection with ejection
+limits; panic thresholds; slow start; zone-aware routing; and circuit
+breakers. Its documentation’s “Load balancing” section is one of the
+best practical overviews of the trade-offs.</p>
+<p><strong>Zone awareness.</strong> Cloud regions have several
+availability zones, and cross-zone traffic costs money and latency.
+Zone-aware routing prefers backends in the caller’s own zone, spilling
+over only when local capacity is insufficient. It’s an easy win, but it
+needs care: if zones have unequal capacity, strict locality overloads
+the smallest one.</p>
+<h2 id="a-practical-playbook">10. A practical playbook</h2>
+<p>When designing or reviewing load balancing for a service:</p>
+<ol type="1">
+<li><strong>Know your layers.</strong> Which balancers does a request
+pass through, and does each balance connections or requests?</li>
+<li><strong>For HTTP/2 and gRPC, balance requests</strong>, with an L7
+proxy or client-side balancing, and set a maximum connection age.</li>
+<li><strong>Default to P2C least-request</strong> (or EWMA) for request
+balancing, not round robin, unless requests are uniform.</li>
+<li><strong>Use both active and passive health checks</strong>, keep the
+health endpoint local, and cap ejection at a fraction of the fleet.</li>
+<li><strong>Configure a panic threshold</strong> so a widespread failure
+doesn’t remove every backend.</li>
+<li><strong>Drain before stopping</strong> and <strong>slow-start new
+instances</strong>.</li>
+<li><strong>Subset</strong> when client and server counts are
+large.</li>
+<li><strong>Shed load on servers, budget retries on clients</strong>,
+and add circuit breakers for slow dependencies.</li>
+<li><strong>Prefer local zones</strong>, with spillover.</li>
+<li><strong>Measure imbalance</strong>: compare the hottest backend’s
+utilization to the average. That gap is the capacity you’re paying for
+and not using.</li>
+</ol>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Balance the resource that runs out, not request counts. Imbalance
+means you have to provision for the hottest server.</li>
+<li>Requests pass through several layers (DNS or anycast, L4, L7,
+client-side), each with a different granularity and failure scope.</li>
+<li>L4 balances connections. With HTTP/2 and gRPC, that can pin all of a
+client’s traffic to one backend.</li>
+<li>Least-loaded-of-all fails with many balancers and stale data. The
+power of two random choices gets most of the benefit with no
+herding.</li>
+<li>Health checks should be local; passive outlier detection catches
+what probes miss; ejection limits and panic thresholds stop health logic
+from causing outages.</li>
+<li>Draining, slow start, subsetting, retry budgets and load shedding
+matter as much as the selection algorithm.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Why does picking the least loaded of <em>two</em> random servers do
+so much better than picking one at random, and why doesn’t picking the
+best of <em>all</em> servers do better still when there are many
+balancers?</li>
+<li>Your gRPC service scaled from 10 to 20 pods, but the new pods get
+almost no traffic. What’s happening, and what are three ways to fix
+it?</li>
+<li>A health endpoint checks the database. The database has a 30-second
+blip. Walk through what happens with and without a panic threshold.</li>
+<li>Envoy caps outlier ejection at 10% of hosts by default. What failure
+would happen without that cap?</li>
+<li>Google feeds backend-reported utilization into client weights. What
+could go wrong if a buggy backend reports 0% utilization?</li>
+<li>When would you choose consistent hashing over P2C for a service, and
+how would you handle a hot key?</li>
+<li>How would you measure load imbalance in your current services, and
+what number would make you change the algorithm?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Michael Mitzenmacher, “The Power of Two Choices in Randomized Load
+Balancing,” IEEE Transactions on Parallel and Distributed Systems, 2001
+(based on his 1996 PhD thesis); Azar, Broder, Karlin and Upfal,
+“Balanced Allocations,” STOC 1994.</li>
+<li>Betsy Beyer et al. (eds.), <em>Site Reliability Engineering</em>
+(O’Reilly, 2016), chapter 19 “Load Balancing at the Frontend,” chapter
+20 “Load Balancing in the Datacenter,” chapter 21 “Handling Overload,”
+https://sre.google/sre-book/load-balancing-datacenter/</li>
+<li>Daniel E. Eisenbud et al., “Maglev: A Fast and Reliable Software
+Network Load Balancer,” NSDI 2016.</li>
+<li>Envoy documentation: “Load balancing,” “Outlier detection,” “Health
+checking,” “Circuit breaking,”
+https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/overview
+and
+https://envoyproxy.io/docs/envoy/latest/api-v3/config/cluster/v3/outlier_detection.proto</li>
+<li>Netflix Technology Blog, “Rethinking Netflix’s Edge Load Balancing”
+(2018), and the Zuul wiki, https://github.com/Netflix/zuul/wiki</li>
+<li>Twitter Finagle documentation, “Load Balancing” (P2C, EWMA,
+aperture), https://twitter.github.io/finagle/guide/Clients.html</li>
+<li>Facebook Engineering, “Open-sourcing Katran, a scalable network load
+balancer” (2018); GitHub Engineering, “GLB: GitHub’s open source load
+balancer” (2018); Cloudflare blog, “Unimog: Cloudflare’s edge load
+balancer” (2020).</li>
+<li>gRPC documentation, “Load Balancing” and server keepalive options
+(<code>MAX_CONNECTION_AGE</code>),
+https://grpc.io/blog/grpc-load-balancing/</li>
+<li>Kubernetes documentation, “Pod Lifecycle: termination of Pods” and
+readiness probes.</li>
+</ul>
+<p>The Envoy outlier detection settings come from Envoy’s proto
+documentation, located on Oct 30, 2026. The Netflix, Twitter and Google
+descriptions summarize those organizations’ own write-ups as I know
+them, without exact figures. Check the posts for numbers.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/networking.html">Networking</a><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a></div>
+          <div class="daynav"><a href="/reading/lsm-trees-rocksdb.html"><div class="kicker">← Older · Oct 29</div><div class="t">LSM trees and RocksDB: trading reads for writes</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
