@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Observability: metrics, logs, traces and SLOs that actually help · The Daily Commit</title>
+  <meta name="description" content="What observability means beyond dashboards, how metrics, logs and traces each answer different questions, how distributed tracing works from Dapper to OpenTelemetry and W3C Trace Context, sampling and cardinality trade-offs, and alerting on SLO burn rates.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Observability: metrics, logs, traces and SLOs that actually help</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>16 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#monitoring-versus-observability">Monitoring versus
+observability</a><a href="#three-signals-three-jobs">Three signals, three jobs</a><a href="#metrics-that-matter">Metrics that matter</a><a href="#distributed-tracing-from-dapper-to-opentelemetry">Distributed
+tracing: from Dapper to OpenTelemetry</a><a href="#sampling">Sampling</a><a href="#logs-that-work-with-everything-else">Logs that work with
+everything else</a><a href="#slos-deciding-what-good-enough-means">SLOs: deciding what
+“good enough” means</a><a href="#alerting-on-burn-rate">Alerting on burn rate</a><a href="#debugging-with-the-signals-together">Debugging with the
+signals together</a><a href="#costs-and-practical-advice">Costs and practical advice</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 16 min left</div>
+      </nav>
+      <article class="article" data-slug="observability-tracing" data-minutes="16">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/observability.html">Observability</a> · October 31, 2026 · 16 min</div>
+        <h1>Observability: metrics, logs, traces and SLOs that actually help</h1>
+        <p class="dek">What observability means beyond dashboards, how metrics, logs and traces each answer different questions, how distributed tracing works from Dapper to OpenTelemetry and W3C Trace Context, sampling and cardinality trade-offs, and alerting on SLO burn rates.</p>
+<p>At 2 a.m. checkout latency doubles. The dashboards show it, but the
+question you actually need answered is “why?”, and it’s usually one you
+didn’t anticipate when you built the dashboards: only users on one app
+version, only orders with a gift card, only requests that hit one
+database replica. Observability is the ability to answer new questions
+like that from the telemetry your system already emits, without shipping
+new code first. This reading covers the three classic signals (metrics,
+logs and traces) and what each is good for, how distributed tracing
+works from Google’s Dapper to OpenTelemetry, the costs that dominate
+real deployments (cardinality and sampling), and how to alert on what
+users experience using SLOs and burn rates.</p>
+<h2 id="monitoring-versus-observability">1. Monitoring versus
+observability</h2>
+<p><strong>Monitoring</strong> asks known questions: Is CPU above 80%?
+Is the error rate above 1%? Is the queue backing up? You decide in
+advance what to measure and what thresholds matter. It’s essential and
+it catches known failure modes.</p>
+<p><strong>Observability</strong> is borrowed from control theory, where
+a system is observable if you can infer its internal state from its
+outputs. For software it means: when something goes wrong in a way you
+didn’t predict, can you work out what’s happening from the data you
+have? Charity Majors, Liz Fong-Jones and George Miranda’s book
+<em>Observability Engineering</em> (O’Reilly, 2022) frames the
+difference as known-unknowns versus unknown-unknowns. Distributed
+systems fail in novel combinations, so the second matters more and more
+as systems grow.</p>
+<p>The practical test is simple: <strong>can you slice your telemetry by
+any dimension you didn’t plan for?</strong> Version, customer, region,
+feature flag, endpoint, database shard. If answering “is it only
+customer X?” requires adding a new metric and redeploying, you have
+monitoring but not much observability.</p>
+<h2 id="three-signals-three-jobs">2. Three signals, three jobs</h2>
+<p><strong>Metrics</strong> are numbers aggregated over time: request
+counts, error counts, latency histograms, queue depths, CPU. They’re
+cheap to store, because a counter costs the same whether it counts ten
+requests or ten million, and fast to query, which makes them ideal for
+dashboards and alerts. Their weakness is that aggregation throws detail
+away. A metric tells you the p99 latency went up. It can’t tell you
+which requests were slow, unless you anticipated the dimension and added
+it as a label.</p>
+<p><strong>Logs</strong> are records of discrete events, ideally
+<strong>structured</strong> (JSON or key-value pairs rather than free
+text) so they can be queried. They carry the detail metrics drop: the
+error message, the user ID, the SQL that failed. Their weaknesses are
+cost (every event is stored) and isolation: a log line from one service
+doesn’t tell you which user request it belonged to, unless you connect
+them.</p>
+<p><strong>Traces</strong> record the path of a single request through
+the system as a tree of timed operations. They answer “where did the
+time go?” and “which service failed?” for a specific request, across
+process boundaries. Their weaknesses are instrumentation effort and
+volume, which is why tracing usually involves sampling.</p>
+<p>The signals are most useful <strong>connected</strong>. Put the trace
+ID in every log line, so you can jump from a slow trace to the logs of
+every service it touched. Attach <strong>exemplars</strong> (sample
+trace IDs) to metric data points, so a spike on a latency graph links
+straight to example traces from that spike. Prometheus and OpenTelemetry
+both support exemplars, and Grafana can show them on graphs.</p>
+<h3 id="wide-events">Wide events</h3>
+<p>A growing school of thought argues for one richer signal instead of
+three separate ones. Honeycomb, among others, advocates <strong>wide
+structured events</strong>: one event per request per service, with
+dozens or hundreds of fields (user, version, endpoint, cache hit, row
+counts, durations of sub-steps, feature flags). Metrics can then be
+computed from events at query time, and traces are just events that
+share a trace ID and have parent links. The benefit is that you never
+have to decide in advance which dimensions to aggregate on. The cost is
+storage and a columnar query engine that can handle it. Majors has
+called this approach “observability 2.0.” Whether or not you adopt it
+fully, the lesson carries over: <strong>add context to the telemetry you
+already emit</strong>. A span or log line with twenty useful fields is
+worth far more than five with two.</p>
+<h2 id="metrics-that-matter">3. Metrics that matter</h2>
+<p>With thousands of possible metrics, a few frameworks help decide what
+to look at first.</p>
+<p><strong>The four golden signals</strong> (Google SRE book, chapter 6,
+“Monitoring Distributed Systems”): <strong>latency</strong>,
+<strong>traffic</strong>, <strong>errors</strong> and
+<strong>saturation</strong>. If you can measure only four things about a
+user-facing service, measure these. The book adds an important detail
+about latency: track the latency of successful and failed requests
+separately, because a fast error can make average latency look better
+while things are getting worse.</p>
+<p><strong>RED</strong> (Tom Wilkie, for request-driven services):
+<strong>R</strong>ate, <strong>E</strong>rrors,
+<strong>D</strong>uration. Essentially the golden signals minus
+saturation, applied per service and endpoint.</p>
+<p><strong>USE</strong> (Brendan Gregg, for resources): for every
+resource such as CPU, memory, disk and network, check
+<strong>U</strong>tilization, <strong>S</strong>aturation and
+<strong>E</strong>rrors. USE is how you find out <em>why</em> a service
+is slow once RED tells you <em>that</em> it is.</p>
+<h3 id="histograms-not-averages">Histograms, not averages</h3>
+<p>Latency should almost never be summarized as an average.
+Distributions are skewed: most requests are fast, a few are very slow,
+and those few are the ones users complain about. Use
+<strong>percentiles</strong> (p50, p95, p99, p99.9). And at scale, tail
+latency affects nearly everyone: Jeff Dean and Luiz André Barroso’s “The
+Tail at Scale” (CACM, 2013) shows that when a user request fans out to
+many servers, even a rare slow response on one server becomes common at
+the request level. If a page makes 100 backend calls, each with a 1%
+chance of being slow, about 63% of page loads hit at least one slow
+call.</p>
+<p>Two technical points trip people up:</p>
+<ul>
+<li><strong>You can’t average percentiles.</strong> The p99 of the whole
+fleet isn’t the average of each server’s p99. You need the underlying
+distribution. That’s why metric systems store
+<strong>histograms</strong> (counts per latency bucket) that can be
+summed across servers and then turned into percentiles. Prometheus
+classic histograms use fixed buckets, so choose them to bracket your SLO
+thresholds. Newer formats (Prometheus native histograms, OpenTelemetry
+exponential histograms) use automatically scaled buckets with much
+better accuracy and no hand-tuning.</li>
+<li><strong>Summaries computed on each client</strong> (pre-calculated
+quantiles) can’t be aggregated at all. Prefer histograms.</li>
+</ul>
+<h3 id="cardinality-the-cost-that-bites">Cardinality: the cost that
+bites</h3>
+<p>Each unique combination of metric name and label values is a separate
+time series. <code>http_requests_total{service, endpoint, status}</code>
+with 20 endpoints and 5 status codes is 100 series per service instance.
+Add a <code>user_id</code> label with a million users and it becomes 100
+million series, and your metrics system falls over or your bill
+explodes.</p>
+<p>The rule of thumb: <strong>metric labels must have bounded, small
+sets of values</strong> (status code, endpoint template, region,
+version). High-cardinality context like user IDs, request IDs and order
+IDs belongs in logs, traces or wide events, which store per-event detail
+without creating a time series per value. Also watch for accidental
+cardinality: an endpoint label built from the raw URL
+(<code>/users/8123/orders</code>) instead of the route template
+(<code>/users/{id}/orders</code>) creates one series per user.</p>
+<h2 id="distributed-tracing-from-dapper-to-opentelemetry">4. Distributed
+tracing: from Dapper to OpenTelemetry</h2>
+<h3 id="dapper">Dapper</h3>
+<p>Google described its tracing system, <strong>Dapper</strong>, in a
+2010 technical report by Benjamin Sigelman and colleagues. Dapper set
+the model nearly every tracing system still uses:</p>
+<ul>
+<li>A <strong>trace</strong> is a tree of <strong>spans</strong>. A span
+is one unit of work (an RPC, a database query, a function) with a name,
+start and end timestamps, a span ID, its parent’s span ID, and
+annotations.</li>
+<li>All spans in a trace share a <strong>trace ID</strong>, which is
+passed along with every RPC so downstream services can attach their
+spans to the same trace.</li>
+<li>Instrumentation lives mostly in shared libraries (the RPC framework,
+thread pools, control-flow libraries), so application developers get
+tracing almost for free. That was a key design goal: tracing that
+requires every team to instrument by hand never reaches full
+coverage.</li>
+<li>Tracing everything is too expensive, so Dapper
+<strong>sampled</strong>. The first production version traced 1 out of
+every 1,024 requests, and the paper reports that even at that rate there
+was enough data for the common analyses at Google’s traffic volumes.
+Lower-traffic services later used adaptive sampling so they still got
+enough traces.</li>
+</ul>
+<p>Dapper inspired Twitter’s <strong>Zipkin</strong> (open-sourced in
+2012) and Uber’s <strong>Jaeger</strong> (2017). The industry then went
+through two competing standards for instrumentation APIs, OpenTracing
+and OpenCensus, which merged in 2019 into
+<strong>OpenTelemetry</strong>.</p>
+<figure class="diagram"><svg viewBox="0 0 760 320" role="img" aria-label="A trace as a waterfall of spans across services" font-size="13"><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">One trace, five spans: where did 420 ms go?</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Each bar is a span: one unit of work with a start, an end and a parent.</text><line x1="250.0" y1="64" x2="250.0" y2="270" stroke="var(--cds-chart-axis)" stroke-dasharray="2 4" stroke-width="0.75"></line><text x="250.0" y="284" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">0 ms</text><line x1="360.0" y1="64" x2="360.0" y2="270" stroke="var(--cds-chart-axis)" stroke-dasharray="2 4" stroke-width="0.75"></line><text x="360.0" y="284" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">100 ms</text><line x1="470.0" y1="64" x2="470.0" y2="270" stroke="var(--cds-chart-axis)" stroke-dasharray="2 4" stroke-width="0.75"></line><text x="470.0" y="284" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">200 ms</text><line x1="580.0" y1="64" x2="580.0" y2="270" stroke="var(--cds-chart-axis)" stroke-dasharray="2 4" stroke-width="0.75"></line><text x="580.0" y="284" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">300 ms</text><line x1="690.0" y1="64" x2="690.0" y2="270" stroke="var(--cds-chart-axis)" stroke-dasharray="2 4" stroke-width="0.75"></line><text x="690.0" y="284" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">400 ms</text><text x="24" y="89" font-size="12" fill="var(--cds-text-primary)">api-gateway  GET /checkout</text><rect x="250.0" y="75" width="462.0" height="20" rx="4" fill="var(--cds-chart-categorical-1)" fill-opacity="0.22" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="706.0" y="89" font-size="11" fill="var(--cds-text-primary)" text-anchor="end">420 ms</text><text x="38" y="127" font-size="12" fill="var(--cds-text-primary)">cart-svc  GetCart</text><rect x="261.0" y="113" width="55.0" height="20" rx="4" fill="var(--cds-chart-categorical-2)" fill-opacity="0.22" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="322.0" y="127" font-size="11" fill="var(--cds-text-secondary)">50 ms</text><text x="38" y="165" font-size="12" fill="var(--cds-text-primary)">pricing-svc  Quote</text><rect x="327.0" y="151" width="99.0" height="20" rx="4" fill="var(--cds-chart-categorical-2)" fill-opacity="0.22" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="432.0" y="165" font-size="11" fill="var(--cds-text-secondary)">90 ms</text><text x="38" y="203" font-size="12" fill="var(--cds-text-primary)">payments-svc  Charge</text><rect x="437.0" y="189" width="264.0" height="20" rx="4" fill="var(--cds-chart-categorical-3)" fill-opacity="0.22" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="695.0" y="203" font-size="11" fill="var(--cds-text-primary)" text-anchor="end">240 ms</text><text x="52" y="241" font-size="12" fill="var(--cds-text-primary)">postgres  INSERT order</text><rect x="569.0" y="227" width="110.0" height="20" rx="4" fill="var(--cds-chart-categorical-4)" fill-opacity="0.22" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25"></rect><text x="685.0" y="241" font-size="11" fill="var(--cds-text-secondary)">100 ms</text><text x="24" y="308" font-size="11.5" fill="var(--cds-text-secondary)">Payments takes 240 of the 420 ms, and 100 of those are one database insert.</text></svg></figure>
+<h3 id="opentelemetry">OpenTelemetry</h3>
+<p>OpenTelemetry (OTel), a CNCF project, standardizes how telemetry is
+produced and shipped, without being a storage backend itself. It has
+several parts:</p>
+<ul>
+<li><strong>APIs and SDKs</strong> in many languages for creating spans,
+metrics and logs.</li>
+<li><strong>Auto-instrumentation</strong> for common frameworks and
+libraries (HTTP servers and clients, gRPC, database drivers, message
+queues), continuing Dapper’s idea of instrumenting shared code.</li>
+<li><strong>Semantic conventions</strong>: standard attribute names such
+as <code>http.request.method</code>,
+<code>http.response.status_code</code>, <code>db.system</code> and
+<code>server.address</code>, so every service and every backend agrees
+on what fields mean.</li>
+<li><strong>OTLP</strong>, the wire protocol for sending telemetry.</li>
+<li>The <strong>Collector</strong>, a separately deployed pipeline that
+receives, processes (batching, filtering, sampling, redacting) and
+exports telemetry to one or more backends.</li>
+</ul>
+<p>The main benefit is vendor neutrality: instrument once, then send the
+data to Jaeger, Grafana Tempo, Honeycomb, Datadog or anything else that
+accepts OTLP, and change backends without touching application code.</p>
+<h3 id="context-propagation-and-w3c-trace-context">Context propagation
+and W3C Trace Context</h3>
+<p>Tracing only works if every hop passes the trace ID along. Different
+systems used different headers (<code>X-B3-TraceId</code> for Zipkin,
+<code>uber-trace-id</code> for Jaeger, vendor-specific ones for others),
+so traces broke whenever a request crossed between them. The <strong>W3C
+Trace Context</strong> specification, a W3C Recommendation since
+February 2020, standardizes two HTTP headers:</p>
+<ul>
+<li><code>traceparent</code>: version, a 16-byte trace ID, an 8-byte
+parent span ID, and flags (including whether this trace is sampled). For
+example,
+<code>00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01</code>.</li>
+<li><code>tracestate</code>: optional vendor-specific data that rides
+along.</li>
+</ul>
+<p>OpenTelemetry uses Trace Context by default. A companion W3C spec,
+<strong>Baggage</strong>, carries arbitrary key-value pairs (such as a
+tenant ID) along the same path, so downstream services can add them to
+their own telemetry. Be careful what you put in baggage: it’s sent with
+every downstream request, including to third parties if you don’t strip
+it.</p>
+<p>The hard parts of propagation are the asynchronous ones: message
+queues, background jobs, batch processing. A consumer processing a
+message from Kafka has to read the trace context from the message
+headers. If a job processes a batch of 100 messages from 100 different
+requests, it can’t have one parent. OpenTelemetry uses <strong>span
+links</strong> for this: the batch span links to each message’s
+originating span instead of having a single parent.</p>
+<h2 id="sampling">5. Sampling</h2>
+<p>Tracing every request in a high-traffic system is expensive to
+collect, ship and store. Sampling decides which traces to keep.</p>
+<p><strong>Head-based sampling</strong> decides at the start of a
+request, typically at random (keep 1%), and the decision propagates in
+the <code>traceparent</code> sampled flag so every service keeps or
+drops its spans consistently. It’s cheap and simple. Its weakness is
+that the decision is made before anything interesting happens: it keeps
+1% of errors and 1% of slow requests, which are exactly the traces you
+want most.</p>
+<p><strong>Tail-based sampling</strong> decides after the trace is
+complete: keep every trace with an error, every trace slower than the
+SLO threshold, and a small random fraction of the rest. That’s far more
+useful, but it requires buffering all spans of a trace in one place
+until the trace finishes. The OpenTelemetry Collector’s tail sampling
+processor does this, but you need to route all spans of a trace to the
+same collector instance (usually by load-balancing on trace ID) and size
+memory for the buffer window.</p>
+<p>Common refinements:</p>
+<ul>
+<li><strong>Rate-limited or per-endpoint sampling</strong>, so a
+high-traffic health check doesn’t use the whole budget and rare
+endpoints still get traced.</li>
+<li><strong>Always sample</strong> specific requests, such as those with
+a debug header or from internal test accounts.</li>
+<li><strong>Record the sampling rate</strong> with each kept trace, so
+you can still estimate true counts. If a trace was kept at 1-in-100, it
+represents 100 requests.</li>
+</ul>
+<h2 id="logs-that-work-with-everything-else">6. Logs that work with
+everything else</h2>
+<p>Logging advice is often treated as basic, but a few practices make
+logs dramatically more useful in a distributed system:</p>
+<ul>
+<li><strong>Structured, always.</strong> Key-value or JSON, with
+consistent field names. Free-text logs can’t be filtered by field and
+need fragile regexes.</li>
+<li><strong>Include trace and span IDs</strong> in every log line.
+OpenTelemetry SDKs and many logging libraries do this automatically when
+a span is active.</li>
+<li><strong>Log at the right level of detail.</strong> One rich log line
+(or wide event) at the end of a request, with everything known about it,
+is often more useful than twenty lines scattered through the code.</li>
+<li><strong>Control volume.</strong> Debug logging in a hot path at
+production traffic can cost more than the service itself. Sample
+high-volume, low-value logs, and make verbose logging switchable at
+runtime for specific requests or users.</li>
+<li><strong>Never log secrets or sensitive personal data.</strong>
+Tokens, passwords, card numbers and session cookies end up in logs more
+often than anyone admits. Redact at the source, and add a redaction step
+in the Collector as a second line of defense. The Oct 28 OAuth reading
+noted that leaked bearer tokens are just as good as the original.</li>
+</ul>
+<h2 id="slos-deciding-what-good-enough-means">7. SLOs: deciding what
+“good enough” means</h2>
+<p>Telemetry tells you what’s happening. <strong>Service level
+objectives</strong> tell you whether it matters.</p>
+<ul>
+<li>A <strong>service level indicator (SLI)</strong> is a measurement of
+user experience, usually the ratio of good events to total events. For
+example: the fraction of checkout requests that succeed in under 500
+ms.</li>
+<li>A <strong>service level objective (SLO)</strong> is a target for
+that SLI over a window: 99.9% of checkout requests succeed in under 500
+ms over 30 days.</li>
+<li>The <strong>error budget</strong> is what the SLO allows to fail:
+0.1% of requests. Over 30 days, 99.9% availability allows about 43
+minutes of full downtime, or the equivalent spread over partial
+failures.</li>
+</ul>
+<p>SLOs change how teams make decisions. When there’s budget left, ship
+features and take risks. When the budget is spent, prioritize
+reliability work. The Google SRE book (chapter 4) and <em>The Site
+Reliability Workbook</em> (chapter 2) describe this policy in
+detail.</p>
+<p>Good SLIs are measured as close to the user as possible (at the load
+balancer or in the client, not in the database) and focus on what users
+notice: availability, latency, and for data pipelines, freshness and
+correctness.</p>
+<h2 id="alerting-on-burn-rate">8. Alerting on burn rate</h2>
+<p>A common alerting mistake is to page on symptoms that don’t matter
+(“CPU at 85%”) or on thresholds that fire constantly (“error rate above
+0.1% for 1 minute”). SLOs give a better basis: <strong>alert when you’re
+consuming the error budget too fast</strong>.</p>
+<p><strong>Burn rate</strong> is how fast you’re using the budget
+relative to the SLO’s pace. A burn rate of 1 uses exactly the whole
+budget over the SLO window. A burn rate of 10 would exhaust a 30-day
+budget in 3 days.</p>
+<p><em>The Site Reliability Workbook</em>, chapter 5 (“Alerting on
+SLOs”), works through alerting strategies and recommends
+<strong>multiwindow, multi-burn-rate alerts</strong>. A typical starting
+configuration for a 30-day, 99.9% SLO:</p>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Severity</th>
+<th>Burn rate</th>
+<th>Long window</th>
+<th>Short window</th>
+<th>Budget consumed when it fires</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Page</td>
+<td>14.4</td>
+<td>1 hour</td>
+<td>5 minutes</td>
+<td>2%</td>
+</tr>
+<tr class="even">
+<td>Page</td>
+<td>6</td>
+<td>6 hours</td>
+<td>30 minutes</td>
+<td>5%</td>
+</tr>
+<tr class="odd">
+<td>Ticket</td>
+<td>1</td>
+<td>3 days</td>
+<td>6 hours</td>
+<td>10%</td>
+</tr>
+</tbody>
+</table>
+<p>The <strong>long window</strong> makes the alert significant: a burn
+rate of 14.4 sustained for an hour has used 2% of the month’s budget.
+The <strong>short window</strong> makes it reset quickly: the alert only
+fires if the burn is still happening right now, so it stops paging soon
+after the problem is fixed. Fast burns page someone; slow burns become
+tickets.</p>
+<p>The result is fewer, more meaningful pages. Every page means users
+are being hurt at a rate that threatens the SLO, and every page has a
+clear first question: what’s burning the budget? Traces and logs from
+the burning window answer it.</p>
+<h2 id="debugging-with-the-signals-together">9. Debugging with the
+signals together</h2>
+<p>A typical investigation with well-connected telemetry goes like
+this:</p>
+<ol type="1">
+<li><strong>Alert fires</strong> on a checkout latency SLO burn
+rate.</li>
+<li><strong>Metrics</strong> confirm p99 latency for
+<code>POST /checkout</code> jumped at 02:10, while traffic is flat.
+Error rate is normal. Saturation metrics (USE) show the payments
+service’s database connection pool at its limit.</li>
+<li><strong>Exemplars</strong> on the latency graph link to example slow
+traces.</li>
+<li><strong>Traces</strong> show the time going into
+<code>payments-svc</code> and, within it, a database insert waiting on a
+connection, like the waterfall above.</li>
+<li><strong>Slicing</strong> the traces or wide events by attributes
+shows that slow requests all have
+<code>payment.method = gift_card</code>, a code path that started making
+an extra query in a deploy at 02:05.</li>
+<li><strong>Logs</strong> for those trace IDs show the new query and its
+timing.</li>
+</ol>
+<p>The key step is 5: comparing slow requests against fast ones across
+many dimensions to find what they have in common. Some tools automate
+this (Honeycomb calls it BubbleUp). It only works if the telemetry
+carries enough attributes.</p>
+<h2 id="costs-and-practical-advice">10. Costs and practical advice</h2>
+<p>Observability spending can grow faster than the infrastructure it
+watches. Some guidelines:</p>
+<ul>
+<li><strong>Instrument shared libraries first.</strong>
+Auto-instrumentation for HTTP, gRPC, databases and queues gives broad
+coverage cheaply, as Dapper showed.</li>
+<li><strong>Standardize on OpenTelemetry and semantic
+conventions</strong>, so data is consistent and backends are
+swappable.</li>
+<li><strong>Keep metric labels low-cardinality</strong>, and put
+high-cardinality context in traces, logs or events.</li>
+<li><strong>Sample traces deliberately</strong>: tail-based if you can
+afford the Collector setup, otherwise head-based with rate limits per
+endpoint, and always keep errors.</li>
+<li><strong>Use the Collector as a control point</strong> for filtering,
+redaction, sampling and routing, rather than changing every
+service.</li>
+<li><strong>Define a few SLOs per user journey</strong> and alert on
+burn rate, not on resource thresholds.</li>
+<li><strong>Review dashboards and alerts</strong> periodically. Delete
+what nobody looks at and alerts nobody acts on.</li>
+<li><strong>Watch retention.</strong> Most high-detail data loses value
+within days. Keep aggregates longer and raw events shorter.</li>
+</ul>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Observability means answering questions you didn’t plan for. The
+test is whether you can slice by new dimensions without shipping
+code.</li>
+<li>Metrics are cheap aggregates for dashboards and alerts; logs carry
+per-event detail; traces show a request’s path and timing. Connect them
+with trace IDs and exemplars.</li>
+<li>Use histograms for latency, never averages, and remember you can’t
+average percentiles.</li>
+<li>Metric labels must be low-cardinality. Put user and request IDs in
+traces, logs or wide events.</li>
+<li>Dapper’s model of traces made of spans, propagated IDs, library
+instrumentation and sampling is still the model. OpenTelemetry and W3C
+Trace Context standardize it.</li>
+<li>Head sampling is cheap; tail sampling keeps the interesting
+traces.</li>
+<li>SLOs and error budgets turn telemetry into decisions, and
+multiwindow burn-rate alerts make pages rare and meaningful.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Pick a service you run. Which question about a recent incident could
+you not answer from your telemetry without adding new
+instrumentation?</li>
+<li>Your team wants to add <code>customer_id</code> as a label on
+request metrics so support can see per-customer error rates. What would
+you suggest instead, and why?</li>
+<li>Head-based sampling at 1% keeps only 1% of errors. Under what
+conditions is that still acceptable, and when would you insist on tail
+sampling?</li>
+<li>A batch job processes messages from many different user requests.
+How would you represent that in a trace, and what would you want to see
+when debugging one user’s request?</li>
+<li>Why does a burn-rate alert need both a long and a short window? What
+happens with only the long window? Only the short one?</li>
+<li>Your SLO is 99.9% of requests under 500 ms. Where should you measure
+it: in the service, at the load balancer, or in the client? What does
+each miss?</li>
+<li>Observability costs are growing faster than traffic. Which three
+changes from section 10 would you try first, and what would you measure
+to see if they worked?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Benjamin H. Sigelman et al., “Dapper, a Large-Scale Distributed
+Systems Tracing Infrastructure,” Google Technical Report, 2010,
+https://research.google/pubs/dapper-a-large-scale-distributed-systems-tracing-infrastructure/
+; Adrian Colyer’s summary, The Morning Paper, 2015,
+https://blog.acolyer.org/2015/10/06/dapper-a-large-scale-distributed-systems-tracing-infrastructure/</li>
+<li>W3C, “Trace Context” Recommendation (February 2020; revised edition
+November 2021), https://www.w3.org/TR/trace-context/ ; W3C Baggage
+specification.</li>
+<li>OpenTelemetry documentation: concepts, semantic conventions,
+sampling, Collector tail sampling processor,
+https://opentelemetry.io/docs/</li>
+<li>Betsy Beyer et al. (eds.), <em>Site Reliability Engineering</em>
+(O’Reilly, 2016), chapter 4 “Service Level Objectives” and chapter 6
+“Monitoring Distributed Systems,” https://sre.google/sre-book/</li>
+<li>Betsy Beyer et al. (eds.), <em>The Site Reliability Workbook</em>
+(O’Reilly, 2018), chapter 2 “Implementing SLOs” and chapter 5 “Alerting
+on SLOs,” https://sre.google/workbook/alerting-on-slos/</li>
+<li>Charity Majors, Liz Fong-Jones and George Miranda, <em>Observability
+Engineering</em> (O’Reilly, 2022).</li>
+<li>Jeffrey Dean and Luiz André Barroso, “The Tail at Scale,”
+Communications of the ACM, February 2013.</li>
+<li>Brendan Gregg, “The USE Method,”
+https://www.brendangregg.com/usemethod.html ; Tom Wilkie, “The RED
+Method” (Grafana Labs blog, 2018).</li>
+<li>Prometheus documentation, “Histograms and summaries” and native
+histograms, https://prometheus.io/docs/practices/histograms/</li>
+<li>Jaeger and Zipkin project documentation.</li>
+</ul>
+<p>The Dapper sampling rate and the W3C Trace Context dates were checked
+against the Google Research page and the W3C pages on Oct 31, 2026. The
+burn-rate table follows the Site Reliability Workbook’s example
+configuration. The 63% figure is 1 − 0.99^100.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/observability.html">Observability</a><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a></div>
+          <div class="daynav"><a href="/reading/load-balancing.html"><div class="kicker">← Older · Oct 30</div><div class="t">Load balancing: from DNS to the power of two choices</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
