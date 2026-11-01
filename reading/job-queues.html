@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Job queues: leases, retries, dead letters and backpressure · The Daily Commit</title>
+  <meta name="description" content="How work queues like SQS, RabbitMQ and Postgres-backed job systems really behave, covering at-least-once delivery, visibility timeouts and acks, retries and dead-letter queues, ordering and fairness, backpressure, and what Slack learned when its job queue fell over.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Job queues: leases, retries, dead letters and backpressure</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>17 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#queues-versus-logs">Queues versus logs</a><a href="#at-least-once-is-the-default">At-least-once is the
+default</a><a href="#leases-visibility-timeouts-and-acks">Leases: visibility
+timeouts and acks</a><a href="#retries-backoff-and-dead-letters">Retries, backoff and dead
+letters</a><a href="#ordering-and-fairness">Ordering and fairness</a><a href="#backpressure-and-capacity">Backpressure and capacity</a><a href="#queues-in-your-database">Queues in your database</a><a href="#case-study-slacks-job-queue">Case study: Slack’s job
+queue</a><a href="#other-things-that-bite-in-production">Other things that bite
+in production</a><a href="#choosing-a-queue">Choosing a queue</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 17 min left</div>
+      </nav>
+      <article class="article" data-slug="job-queues" data-minutes="17">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/messaging.html">Messaging</a> · November 1, 2026 · 17 min</div>
+        <h1>Job queues: leases, retries, dead letters and backpressure</h1>
+        <p class="dek">How work queues like SQS, RabbitMQ and Postgres-backed job systems really behave, covering at-least-once delivery, visibility timeouts and acks, retries and dead-letter queues, ordering and fairness, backpressure, and what Slack learned when its job queue fell over.</p>
+<p>Sending an email, resizing an image, charging a card after checkout,
+rebuilding a search index, notifying a webhook: most backends push this
+kind of work onto a queue and let workers process it in the background.
+Job queues look simple. A producer puts a message in, a worker takes it
+out and does the work. Nearly all the interesting behavior lives in the
+gaps: what happens when the worker crashes halfway, when a job fails
+forever, when producers outrun consumers, or when the queue itself
+becomes the bottleneck. This reading covers work queues as distinct from
+Kafka-style logs (the Oct 25 reading), using Amazon SQS, RabbitMQ and
+Postgres-backed job systems as concrete examples, and ends with how
+Slack rebuilt its job queue after it failed during an incident.</p>
+<h2 id="queues-versus-logs">1. Queues versus logs</h2>
+<p>The Kafka reading described a <strong>log</strong>: an append-only
+sequence where messages stay after being read, each consumer tracks its
+own offset, and many consumer groups can read the same data
+independently. A <strong>work queue</strong> is different:</p>
+<ul>
+<li>Each message is meant to be processed by <strong>one</strong>
+worker.</li>
+<li>Once processed, the message is <strong>deleted</strong>.</li>
+<li>Workers compete for messages, and the queue hands out messages one
+at a time (or in small batches) rather than by partition.</li>
+<li>Failed messages can be <strong>retried individually</strong>,
+without blocking the messages behind them.</li>
+</ul>
+<p>That last point is the practical difference. In a Kafka partition, a
+message that keeps failing blocks everything after it in that partition
+unless you build retry topics yourself. In a work queue, a failing
+message goes back for a retry while other workers keep processing the
+rest. That makes queues a natural fit for independent tasks, such as
+“send this email,” where order rarely matters and per-message retries
+matter a lot.</p>
+<p>The trade-off is that a queue usually can’t be replayed (processed
+messages are gone) and doesn’t give you strict ordering at scale.
+Systems that need both patterns often use both: a log as the durable
+record of events, and queues for the tasks those events trigger.</p>
+<h2 id="at-least-once-is-the-default">2. At-least-once is the
+default</h2>
+<p>Every practical queue faces the same problem the exactly-once reading
+on Oct 23 described: a worker takes a message, does the work, and
+crashes before telling the queue it’s done. The queue can’t tell “the
+worker crashed before doing anything” from “the worker finished but the
+acknowledgment was lost.” It has two options:</p>
+<ul>
+<li><strong>Remove the message when it’s handed out</strong>
+(at-most-once). If the worker crashes, the work is lost.</li>
+<li><strong>Keep the message until the worker confirms</strong>
+(at-least-once). If the worker crashes, the message is delivered again,
+and the work may happen twice.</li>
+</ul>
+<p>Almost every job system chooses at-least-once, because lost work is
+usually worse than duplicated work, and duplicates can be made harmless.
+That leads to the most important rule in this reading: <strong>job
+handlers must be idempotent</strong>. Running a job twice must have the
+same effect as running it once. Common techniques:</p>
+<ul>
+<li>Use natural idempotency: “set the user’s plan to Pro” is safe to
+repeat; “add one month to the subscription” isn’t.</li>
+<li>Record a job ID or idempotency key in the same database transaction
+as the job’s effect, and skip jobs already recorded.</li>
+<li>Pass an idempotency key to external APIs that support one (Stripe’s
+API does) so retries don’t charge twice.</li>
+<li>Make side effects conditional on state: “send the receipt if
+<code>receipt_sent_at</code> is null,” then set it.</li>
+</ul>
+<h2 id="leases-visibility-timeouts-and-acks">3. Leases: visibility
+timeouts and acks</h2>
+<p>How does a queue know a worker is done? There are two main
+models.</p>
+<figure class="diagram"><svg viewBox="0 0 760 300" role="img" aria-label="A message lease: receive, then delete, or time out and retry, then dead-letter" font-size="13"><defs><marker id="qa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">A received message is leased, not removed</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">The worker must delete it before the lease (visibility timeout) runs out.</text><rect x="40" y="110" width="150" height="46" rx="9" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.4"></rect><text x="115.0" y="138.0" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Visible</text><rect x="300" y="110" width="160" height="46" rx="9" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.4"></rect><text x="380.0" y="138.0" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">In flight (leased)</text><rect x="580" y="110" width="140" height="46" rx="9" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.4"></rect><text x="650.0" y="138.0" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Deleted (done)</text><rect x="300" y="220" width="160" height="46" rx="9" fill="var(--cds-chart-categorical-4)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-4)" stroke-width="1.4"></rect><text x="380.0" y="248.0" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Dead-letter queue</text><path d="M190,125 L298,125" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#qa)"></path><text x="244" y="117" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">receive</text><path d="M460,133 L578,133" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#qa)"></path><text x="519" y="125" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">delete</text><path d="M300,145 L192,145" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#qa)"></path><text x="246" y="170" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">lease expires</text><text x="246" y="184" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">(crash or too slow)</text><path d="M380,156 L380,218" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#qa)"></path><text x="390" y="196" text-anchor="start" font-size="11.5" fill="var(--cds-text-secondary)">received too many times</text></svg></figure>
+<h3 id="sqs-the-visibility-timeout">SQS: the visibility timeout</h3>
+<p>Amazon SQS, launched in 2006 and one of AWS’s first services, uses a
+<strong>lease</strong>. When a worker calls <code>ReceiveMessage</code>,
+SQS doesn’t remove the message. It hides it for the <strong>visibility
+timeout</strong> (30 seconds by default, configurable up to 12 hours).
+If the worker calls <code>DeleteMessage</code> with the message’s
+receipt handle before the timeout expires, the message is gone. If not,
+because the worker crashed, hung, or is simply slow, the message becomes
+visible again and another worker receives it.</p>
+<p>The visibility timeout is the most important SQS setting, and it’s
+easy to get wrong:</p>
+<ul>
+<li><strong>Too short</strong>, and a job that’s still running becomes
+visible again, and a second worker starts it. Now two workers are doing
+the same work at once. Idempotency protects correctness, but you waste
+capacity, and slow jobs can snowball as each one is picked up again and
+again.</li>
+<li><strong>Too long</strong>, and a crashed worker’s message sits
+invisible for that whole time before anyone retries it.</li>
+</ul>
+<p>The usual solution is a moderate timeout plus
+<strong>heartbeating</strong>: a long-running worker periodically calls
+<code>ChangeMessageVisibility</code> to extend its lease while it’s
+still making progress. Most SQS client libraries can do this for
+you.</p>
+<p>A few other SQS details shape how you use it:</p>
+<ul>
+<li><strong>Long polling.</strong> <code>ReceiveMessage</code> with
+<code>WaitTimeSeconds</code> (up to 20 seconds) waits for messages to
+arrive instead of returning empty immediately. It reduces cost and empty
+responses dramatically.</li>
+<li><strong>Retention.</strong> Messages are kept for 4 days by default,
+configurable up to 14 days. A message nobody processes in that time is
+silently deleted.</li>
+<li><strong>Size.</strong> The maximum message payload was 256 KiB for
+many years. AWS raised it to 1 MiB in August 2025. For anything bigger,
+store the payload in S3 and put a pointer in the message.</li>
+<li><strong>Delay.</strong> Messages can be delayed up to 15 minutes
+before becoming visible, which is handy for simple deferred work but too
+short for real scheduling.</li>
+<li><strong>Standard vs FIFO.</strong> Standard queues offer
+at-least-once delivery with best-effort ordering and nearly unlimited
+throughput. FIFO queues give ordering within a message group and
+deduplication within a 5-minute window, at lower throughput limits.</li>
+</ul>
+<h3 id="rabbitmq-acknowledgments-and-prefetch">RabbitMQ: acknowledgments
+and prefetch</h3>
+<p>RabbitMQ (and other AMQP 0-9-1 brokers) push messages to consumers
+over a long-lived connection. A consumer with manual acknowledgments
+sends <code>basic.ack</code> when it’s done. If the consumer’s
+connection or channel closes before it acks, the broker
+<strong>requeues</strong> the message for another consumer. There’s no
+timer by default: the lease lasts as long as the connection (RabbitMQ
+does enforce a delivery acknowledgment timeout, 30 minutes by default in
+recent versions, to catch consumers that never ack).</p>
+<p>Consumers can also reject a message with <code>basic.nack</code> or
+<code>basic.reject</code>, either requeueing it or sending it to a
+dead-letter exchange.</p>
+<p>The setting that matters most for performance is
+<strong>prefetch</strong> (<code>basic.qos</code>): how many
+unacknowledged messages the broker will push to one consumer at a time.
+With no limit, a fast producer can push thousands of messages into one
+consumer’s memory, starving other consumers and losing all of them back
+to the queue if that consumer dies. With prefetch 1, every message waits
+for a round trip, and throughput suffers. RabbitMQ’s documentation
+suggests values in the range of roughly 100 to 300 as a reasonable
+starting point for many workloads, then tuning from there. For slow
+jobs, a small prefetch keeps work spread evenly across consumers.</p>
+<p>RabbitMQ’s routing model is also worth knowing. Producers publish to
+<strong>exchanges</strong>, not queues. A <strong>direct</strong>
+exchange routes by exact key, a <strong>topic</strong> exchange by
+pattern (<code>orders.*.created</code>), a <strong>fanout</strong>
+exchange to every bound queue. This makes it easy to have one event feed
+several queues, each with its own consumers.</p>
+<p>For durability, modern RabbitMQ uses <strong>quorum queues</strong>,
+introduced in version 3.8 in 2019 and replicated with Raft (the Oct 27
+reading). Classic mirrored queues, the older replication mechanism, were
+removed in RabbitMQ 4.0 in 2024.</p>
+<h2 id="retries-backoff-and-dead-letters">4. Retries, backoff and dead
+letters</h2>
+<p>Jobs fail for two very different reasons, and a good retry policy
+treats them differently.</p>
+<p><strong>Transient failures</strong>: a timeout, a 503 from a
+dependency, a deadlock, a rate limit. Retrying later will probably
+work.</p>
+<p><strong>Permanent failures</strong>: malformed data, a bug in the
+handler, a deleted record, a validation error. Retrying will never
+work.</p>
+<p>The problem is that a handler usually can’t tell which kind it’s
+facing, so queues use a combination of policies.</p>
+<p><strong>Exponential backoff with jitter.</strong> Wait longer between
+each retry (for example 1s, 2s, 4s, 8s, plus randomness) so a struggling
+dependency gets breathing room and retries from many jobs don’t arrive
+in lockstep. The rate-limiting reading on Oct 22 covered why jitter
+matters. SQS has no built-in per-message backoff, but you can
+approximate it by setting a longer visibility timeout on failure with
+<code>ChangeMessageVisibility</code>. Job frameworks such as Sidekiq,
+Celery, Oban and BullMQ build backoff in.</p>
+<p><strong>Maximum attempts.</strong> After a fixed number of tries,
+stop. In SQS this is the <strong>redrive policy</strong>: when a
+message’s receive count exceeds <code>maxReceiveCount</code>, SQS moves
+it to a configured <strong>dead-letter queue (DLQ)</strong>. RabbitMQ
+uses dead-letter exchanges, and quorum queues can enforce a delivery
+limit.</p>
+<p><strong>Dead-letter queues</strong> are where poison messages go to
+stop hurting everything else. A message that crashes every worker that
+touches it would otherwise loop forever, consuming capacity and filling
+logs. A DLQ isolates it. But a DLQ only helps if someone looks at
+it:</p>
+<ul>
+<li><strong>Alert on DLQ depth.</strong> A DLQ that silently fills up is
+lost work with extra steps.</li>
+<li><strong>Keep the failure reason</strong> with the message
+(exception, attempt count, timestamps), or in logs linked by message
+ID.</li>
+<li><strong>Have a redrive process.</strong> Once the bug is fixed, move
+messages back to the main queue. SQS supports redrive from a DLQ back to
+the source queue directly.</li>
+<li><strong>Set DLQ retention longer than the source queue’s</strong>,
+so failed messages don’t expire before anyone investigates.</li>
+</ul>
+<p><strong>Classify errors where you can.</strong> If the handler knows
+an error is permanent, such as a validation failure, send the message
+straight to the DLQ or drop it with a log entry, rather than burning
+retries.</p>
+<h2 id="ordering-and-fairness">5. Ordering and fairness</h2>
+<h3 id="ordering">Ordering</h3>
+<p>Work queues generally don’t guarantee order. SQS standard queues are
+best-effort. Even with a strictly ordered queue, parallel workers finish
+in different orders, and retries reorder things further. If ordering
+matters for some jobs (all updates to one account, say), you need to
+partition:</p>
+<ul>
+<li><strong>SQS FIFO</strong> queues guarantee ordering within a
+<strong>message group ID</strong>. Only one message per group is in
+flight at a time, so different groups process in parallel while each
+group is serial.</li>
+<li><strong>Kafka</strong>, by partition key, gives the same guarantee
+per key.</li>
+<li><strong>Application-level versioning</strong> is often simpler:
+include a version or timestamp in each job and have the handler ignore
+jobs older than the state it already has.</li>
+</ul>
+<p>A useful question to ask before requiring ordering: can the handler
+instead fetch the current state and act on it? “Sync user 42’s profile
+to the CRM” is order-independent if the job reads the latest profile
+when it runs, rather than carrying a snapshot.</p>
+<h3 id="fairness-and-priorities">Fairness and priorities</h3>
+<p>Shared queues have a noisy-neighbor problem. If one customer enqueues
+a million jobs, everyone else’s jobs wait behind them. Common fixes:</p>
+<ul>
+<li><strong>Separate queues per priority</strong> (critical, default,
+bulk), with workers polling higher priorities first or with dedicated
+worker pools per queue. Sidekiq supports weighted queue polling for
+this.</li>
+<li><strong>Per-tenant queues or rate limits</strong>, so one tenant
+can’t take more than a fair share. Some systems shard queues by tenant
+and round-robin across them.</li>
+<li><strong>Concurrency limits per job type</strong>, so a flood of slow
+report jobs can’t occupy every worker.</li>
+</ul>
+<p>Don’t put very different job types on one queue with one worker pool.
+A 50 ms email job and a 10-minute export job have different timeouts,
+different retry needs and different scaling, and the slow ones will
+block the fast ones.</p>
+<h2 id="backpressure-and-capacity">6. Backpressure and capacity</h2>
+<p>A queue absorbs bursts: producers can briefly outrun consumers, and
+the backlog drains later. That’s its main benefit. But if producers
+<em>consistently</em> outrun consumers, the queue grows without bound,
+latency for every job grows with it, and eventually something breaks:
+memory on the broker, retention limits, or the business tolerance for
+delay.</p>
+<p><strong>Little’s Law</strong> gives the basic relationship: the
+average number of jobs in the system equals the arrival rate multiplied
+by the average time each job spends in it. If 200 jobs per second arrive
+and each takes 0.5 seconds, you need at least 100 concurrent workers
+just to keep up, and more to drain a backlog.</p>
+<p>The metrics that matter for a queue:</p>
+<ul>
+<li><strong>Age of the oldest message</strong>, not just queue depth.
+Depth tells you how much work is waiting; age tells you how late it is.
+SQS exposes <code>ApproximateAgeOfOldestMessage</code> in CloudWatch,
+and it’s the best single alerting signal for most queues.</li>
+<li><strong>Arrival and completion rates</strong>, so you can see
+whether the backlog is growing.</li>
+<li><strong>Failure and retry rates</strong>, and DLQ depth.</li>
+<li><strong>Processing time per job type</strong>, as a histogram (see
+the observability reading from Oct 31).</li>
+</ul>
+<p><strong>Autoscaling workers</strong> on queue age or depth is the
+standard response. Kubernetes KEDA and AWS’s own guidance scale
+consumers on backlog per worker. But scaling consumers has limits: the
+downstream dependency the jobs call (a database, a third-party API) has
+its own capacity, and doubling workers can just double the load on a
+struggling database. A worker pool should respect the capacity of what
+it calls, with concurrency limits or rate limits.</p>
+<p><strong>Backpressure</strong> means pushing the problem back to
+producers when the system is overloaded, instead of letting queues grow
+forever:</p>
+<ul>
+<li>Bounded queues that reject new work when full (RabbitMQ supports
+<code>x-max-length</code> with a configurable overflow behavior that can
+reject publishes).</li>
+<li>Producers that check queue age and shed or defer low-priority
+work.</li>
+<li>Making the slowness visible to users (“your export will be ready in
+about an hour”) rather than accepting work with an implied promise you
+can’t keep.</li>
+</ul>
+<h2 id="queues-in-your-database">7. Queues in your database</h2>
+<p>A popular alternative to a separate broker is to keep the queue in
+the database you already run. Postgres made this practical with
+<code>SELECT ... FOR UPDATE SKIP LOCKED</code>, added in version 9.5
+(2016). A worker claims a job like this:</p>
+<pre class="sql"><code>UPDATE jobs SET state = &#39;running&#39;, locked_at = now(), attempts = attempts + 1
+WHERE id = (
+  SELECT id FROM jobs
+  WHERE state = &#39;available&#39; AND run_at &lt;= now()
+  ORDER BY priority, run_at
+  FOR UPDATE SKIP LOCKED
+  LIMIT 1
+)
+RETURNING *;</code></pre>
+<p><code>SKIP LOCKED</code> makes each worker skip rows that other
+workers have already locked, instead of waiting on them, so many workers
+can claim jobs concurrently without contention. Libraries built on this
+include Oban (Elixir), GoodJob and Solid Queue (Ruby; Solid Queue is the
+default in Rails 8), River (Go) and graphile-worker (Node).</p>
+<p>The big advantage is <strong>transactional enqueueing</strong>. You
+can insert the job in the same transaction as the business change it
+relates to. If the transaction rolls back, the job never existed. If it
+commits, the job is guaranteed to be there. With a separate broker,
+“write to the database, then publish the message” can fail between the
+two steps, which is exactly the problem the transactional outbox pattern
+(Oct 23 reading) exists to solve. A database queue gives you the outbox
+for free.</p>
+<p>The trade-offs:</p>
+<ul>
+<li><strong>Throughput.</strong> Every claim and completion is a row
+update. Postgres handles thousands of jobs per second comfortably on
+good hardware, but not the hundreds of thousands per second a dedicated
+broker can.</li>
+<li><strong>Table bloat.</strong> Constant updates and deletes create
+dead tuples that vacuum must clean (the Oct 24 Postgres MVCC reading
+explains why). Busy job tables need aggressive autovacuum settings, and
+long-running transactions elsewhere in the database can stop vacuum from
+cleaning up, slowing every claim query.</li>
+<li><strong>Shared fate.</strong> A job backlog competes with your
+application for database CPU, I/O and connections.</li>
+</ul>
+<p>For many applications, especially early on, a Postgres queue is the
+right default: one fewer system to run, and transactional guarantees
+that are hard to get otherwise. Move to a dedicated broker when
+throughput or isolation demands it.</p>
+<h2 id="case-study-slacks-job-queue">8. Case study: Slack’s job
+queue</h2>
+<p>Slack’s 2017 post “Scaling Slack’s Job Queue” describes a queue under
+real stress. Slack’s original system used <strong>Redis</strong> as the
+queue: web servers enqueued jobs (message posting side effects, push
+notifications, link unfurling, billing tasks) into Redis lists, and
+worker machines dequeued and ran them.</p>
+<p>The post describes an incident in which a slowdown in a database used
+by some jobs caused a large backlog to build in Redis. Redis ran out of
+memory, and once it was full, jobs couldn’t be enqueued, and because
+dequeuing in their design also needed some free memory, workers couldn’t
+make progress either. The queue that was supposed to absorb the problem
+became the outage.</p>
+<p>The lessons Slack drew are general ones:</p>
+<ul>
+<li><strong>An in-memory queue has a hard ceiling.</strong> A backlog is
+precisely when the queue needs the most room, and that’s when an
+in-memory queue runs out.</li>
+<li><strong>Enqueue and dequeue need to be decoupled.</strong> If a full
+queue blocks consumers, there’s no way to drain it.</li>
+<li><strong>Scaling the queue shouldn’t require downtime or painful
+reconfiguration.</strong></li>
+</ul>
+<p>Slack’s fix was to put <strong>Kafka in front of Redis</strong>. Web
+servers now write jobs to Kafka through a small service the post calls
+Kafkagate. A relay service, JQRelay, reads from Kafka and feeds jobs
+into Redis at a rate the workers can handle. Kafka, with its durable,
+disk-based log, absorbs backlogs of almost any size, while Redis remains
+a small working set for the workers. They migrated gradually, with
+traffic shifted queue by queue, without stopping the existing
+system.</p>
+<p>It’s a good example of combining patterns: a log for durable
+buffering, a queue for job distribution, and a buffer between them that
+provides backpressure.</p>
+<h2 id="other-things-that-bite-in-production">9. Other things that bite
+in production</h2>
+<p><strong>Scheduled and delayed jobs.</strong> “Send a reminder in 3
+days” needs a scheduler, not just a queue. SQS delays cap at 15 minutes.
+Database queues handle this naturally with a <code>run_at</code> column.
+Redis-based systems (Sidekiq, BullMQ) use sorted sets keyed by time.
+Cron-style recurring jobs need a single leader, or a uniqueness
+constraint, so that ten workers don’t each run the nightly report.</p>
+<p><strong>Unique jobs.</strong> Enqueueing “reindex product 42” ten
+times in a second should usually produce one job. Use a uniqueness key
+with a time window (many frameworks support this) or let idempotency
+absorb the duplicates.</p>
+<p><strong>Large payloads.</strong> Pass references, not data. Put the
+product ID in the job, not the whole product, so the job reads current
+data and the queue stays small.</p>
+<p><strong>Deploys and in-flight jobs.</strong> When workers restart,
+running jobs are interrupted. Handle <code>SIGTERM</code> by stopping
+new claims and finishing (or releasing) current jobs within a grace
+period. Long jobs should be resumable, with checkpoints, so a restart
+doesn’t start from zero.</p>
+<p><strong>Schema changes.</strong> Jobs enqueued by the old code are
+processed by the new code. Treat job payloads like an API with
+versioning, as in the Oct 26 API design reading: add fields compatibly,
+and keep handlers able to process the old format until old jobs have
+drained.</p>
+<p><strong>Observability.</strong> Propagate trace context in message
+attributes (the Oct 31 reading), so a slow job links back to the request
+that created it, and log job ID, type, attempt number and queue latency
+with every job.</p>
+<h2 id="choosing-a-queue">10. Choosing a queue</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Need</th>
+<th>Good fit</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Simple managed queue, unlimited scale, AWS</td>
+<td>SQS standard, with a DLQ</td>
+</tr>
+<tr class="even">
+<td>Per-key ordering, deduplication, moderate rate</td>
+<td>SQS FIFO with message group IDs</td>
+</tr>
+<tr class="odd">
+<td>Flexible routing, fanout, self-hosted</td>
+<td>RabbitMQ with quorum queues</td>
+</tr>
+<tr class="even">
+<td>Transactional enqueueing, modest throughput, already on
+Postgres</td>
+<td>Postgres with <code>SKIP LOCKED</code> (Oban, River, GoodJob, Solid
+Queue)</td>
+</tr>
+<tr class="odd">
+<td>Language-native jobs with scheduling and UI</td>
+<td>Sidekiq or BullMQ on Redis (watch memory), Celery</td>
+</tr>
+<tr class="even">
+<td>Replay, multiple independent consumers, huge throughput</td>
+<td>A log (Kafka), possibly feeding queues</td>
+</tr>
+</tbody>
+</table>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Work queues give each message to one worker and retry messages
+individually; logs keep messages and let many consumers replay
+them.</li>
+<li>Delivery is at-least-once in practice, so every job handler must be
+idempotent.</li>
+<li>A received message is leased: SQS uses a visibility timeout,
+RabbitMQ uses acks tied to the connection. Tune the lease to job
+duration and heartbeat long jobs.</li>
+<li>Retries need exponential backoff with jitter, a maximum attempt
+count, and a dead-letter queue that someone monitors and can
+redrive.</li>
+<li>Ordering costs parallelism; use message groups or partitions only
+where needed, or design handlers to read current state.</li>
+<li>Alert on the age of the oldest message, scale workers on backlog,
+and respect downstream capacity.</li>
+<li>Postgres with <code>SKIP LOCKED</code> gives transactional
+enqueueing for free and is often the right default at moderate
+scale.</li>
+<li>Slack’s outage shows that an in-memory queue fails exactly when a
+backlog builds, and that a durable log in front can absorb it.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>A job calls a payment API, then updates a database row. The worker
+crashes between the two steps and the job is retried. What happens, and
+how would you make the job safe to retry?</li>
+<li>Your SQS jobs usually take 10 seconds but occasionally take 5
+minutes. How would you set the visibility timeout, and what would you
+add?</li>
+<li>Your DLQ has 40,000 messages after a weekend. What process would you
+follow before redriving them?</li>
+<li>When would you move a Postgres-backed queue to a dedicated broker?
+What metrics would tell you it’s time?</li>
+<li>One customer enqueues a million low-priority jobs. Design a setup so
+other customers’ jobs still run within a minute.</li>
+<li>Slack put Kafka in front of Redis rather than replacing Redis. What
+does each layer contribute, and what new failure modes does the extra
+layer add?</li>
+<li>Which background jobs in your systems are not idempotent today, and
+what would break if one ran twice?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Amazon SQS Developer Guide: visibility timeout, dead-letter queues
+and redrive, long polling, message quotas, FIFO queues,
+https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/</li>
+<li>AWS, “Amazon SQS increases maximum message payload size to 1 MiB”
+(August 2025),
+https://aws.amazon.com/about-aws/whats-new/2025/08/amazon-sqs-max-payload-size-1mib</li>
+<li>RabbitMQ documentation: “Consumer Acknowledgements and Publisher
+Confirms,” “Consumer Prefetch,” “Quorum Queues,” “Dead Letter
+Exchanges,” “Queue Length Limit,” https://www.rabbitmq.com/docs</li>
+<li>Slack Engineering, “Scaling Slack’s Job Queue” (2017),
+https://slack.engineering/scaling-slacks-job-queue/</li>
+<li>PostgreSQL documentation,
+<code>SELECT ... FOR UPDATE SKIP LOCKED</code> (since 9.5),
+https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE</li>
+<li>Oban, River, GoodJob and Solid Queue project documentation.</li>
+<li>Sidekiq wiki, “Best Practices” (idempotency, small payloads) and
+“Error Handling,” https://github.com/sidekiq/sidekiq/wiki</li>
+<li>Marc Brooker, “Exponential Backoff And Jitter,” AWS Architecture
+Blog, 2015.</li>
+<li>John D. C. Little, “A Proof for the Queuing Formula: L = λW,”
+Operations Research, 1961.</li>
+</ul>
+<p>The SQS payload limit change was confirmed against AWS’s August 2025
+announcement on Nov 1, 2026, and the Slack post was located the same
+day. SQS’s other limits and the RabbitMQ defaults come from their
+documentation as I know it, so check the current docs before relying on
+a specific number.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/messaging.html">Messaging</a><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a></div>
+          <div class="daynav"><a href="/reading/observability-tracing.html"><div class="kicker">← Older · Oct 31</div><div class="t">Observability: metrics, logs, traces and SLOs that actually help</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
