@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spanner, TrueTime and the problem of time in distributed databases · The Daily Commit</title>
+  <meta name="description" content="Why clocks are the hard part of globally distributed SQL, how Google Spanner uses TrueTime and commit wait to get external consistency, how CockroachDB and YugabyteDB manage without atomic clocks, and how cloud clock services like AWS ClockBound changed the trade-off.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Spanner, TrueTime and the problem of time in distributed databases</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>14 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#why-time-matters-to-a-database">Why time matters to a
+database</a><a href="#why-clocks-are-hard">Why clocks are hard</a><a href="#truetime">TrueTime</a><a href="#commit-wait">Commit wait</a><a href="#the-rest-of-spanners-design">The rest of Spanner’s
+design</a><a href="#cap-and-spanner">CAP and Spanner</a><a href="#doing-without-atomic-clocks-cockroachdb">Doing without atomic
+clocks: CockroachDB</a><a href="#the-cloud-clocks-catch-up">The cloud clocks catch up</a><a href="#what-this-means-in-practice">What this means in practice</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 14 min left</div>
+      </nav>
+      <article class="article" data-slug="spanner-truetime" data-minutes="14">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/databases.html">Databases</a> · November 2, 2026 · 14 min</div>
+        <h1>Spanner, TrueTime and the problem of time in distributed databases</h1>
+        <p class="dek">Why clocks are the hard part of globally distributed SQL, how Google Spanner uses TrueTime and commit wait to get external consistency, how CockroachDB and YugabyteDB manage without atomic clocks, and how cloud clock services like AWS ClockBound changed the trade-off.</p>
+<p>Ask a single-node database what happened first and it can always tell
+you: there’s one clock and one log. Spread the database across
+continents and that question gets surprisingly hard. Each machine’s
+clock drifts, network delays vary, and two transactions on opposite
+sides of the world can each believe they committed first. Most
+distributed databases either give up on real-time ordering or route
+everything through a single coordinator. Google’s Spanner did something
+different: it measured clock uncertainty precisely and made the database
+wait it out. This reading explains the problem, how Spanner’s TrueTime
+and commit wait solve it, how open-source systems like CockroachDB
+approximate it with ordinary clocks, and how cheap, precise cloud clocks
+are now bringing the Spanner approach to everyone.</p>
+<h2 id="why-time-matters-to-a-database">1. Why time matters to a
+database</h2>
+<p>A database needs to order transactions for several reasons:</p>
+<ul>
+<li><strong>Snapshot reads.</strong> A read at time T should see every
+transaction that committed before T and none after. MVCC (the Oct 24
+Postgres reading) gives each version a timestamp, and a snapshot is just
+“versions with timestamp ≤ T.”</li>
+<li><strong>Conflict detection.</strong> Two transactions that touch the
+same data must be ordered, so one wins.</li>
+<li><strong>Consistent backups and analytics.</strong> Reading the whole
+database “as of 10:00:00” only means something if timestamps are
+comparable across machines.</li>
+</ul>
+<p>On a single machine, a counter or the local clock works. Across
+machines, you need timestamps that agree with each other, and ideally
+with <strong>real time</strong>.</p>
+<h3 id="the-anomaly-to-avoid">The anomaly to avoid</h3>
+<p>Consider this sequence:</p>
+<ol type="1">
+<li>Alice removes Bob from a shared photo album. The transaction commits
+on server A and Alice is told it succeeded.</li>
+<li>Alice then uploads a private photo to the album. That transaction
+commits on server B.</li>
+</ol>
+<p>Any reader should see either neither change, the first only, or both,
+never the photo without the removal. With timestamps from server clocks,
+that’s not guaranteed: if server B’s clock is 50 ms behind server A’s,
+the upload can get an <em>earlier</em> timestamp than the removal. A
+snapshot read between those two timestamps would show Bob the private
+photo while he’s still in the album.</p>
+<p>The property that rules this out is what the Spanner paper calls
+<strong>external consistency</strong>: if transaction T1 commits before
+T2 starts (in real time, as observed by anyone outside the system), then
+T1’s commit timestamp is smaller than T2’s. It’s equivalent to
+<strong>strict serializability</strong>, serializability plus agreement
+with real-time order. It’s the strongest isolation level, and the one
+users intuitively expect.</p>
+<h2 id="why-clocks-are-hard">2. Why clocks are hard</h2>
+<p>Computer clocks are quartz oscillators that drift, typically by tens
+of parts per million, depending on temperature and hardware. NTP
+corrects them by asking time servers over the network, but its accuracy
+depends on network delay, and asymmetric or congested paths can leave
+clocks off by milliseconds, sometimes far more. Virtual machines add
+pauses. Leap seconds have broken many systems. And worst of all,
+<strong>a clock doesn’t know how wrong it is</strong>. A server that
+thinks it’s 10:00:00.000 might really be at 09:59:59.950 or
+10:00:00.100, and nothing tells it which.</p>
+<p>Distributed systems theory has two classic responses:</p>
+<ul>
+<li><strong>Logical clocks</strong> (Lamport, 1978): counters that
+increase with each event and travel with messages, so causally related
+events are ordered. They ignore real time entirely, so two transactions
+with no message between them (Alice’s two transactions on different
+servers, linked only through Alice herself) can be ordered wrongly.</li>
+<li><strong>A central timestamp oracle</strong>: one service hands out
+increasing timestamps. Google’s earlier Percolator system did this, and
+TiDB uses a “placement driver” timestamp oracle today. It’s simple and
+correct, but every transaction needs a round trip to one place, which is
+costly across continents and a single point to scale.</li>
+</ul>
+<p>Spanner’s insight was a third option: <strong>use real clocks, but
+know exactly how uncertain they are</strong>.</p>
+<h2 id="truetime">3. TrueTime</h2>
+<p>Spanner was described in the 2012 OSDI paper “Spanner: Google’s
+Globally-Distributed Database” by James Corbett and many colleagues. Its
+foundation is an API called <strong>TrueTime</strong>.</p>
+<p>TrueTime doesn’t return a single time. <code>TT.now()</code> returns
+an <strong>interval</strong> <code>[earliest, latest]</code>, with a
+guarantee: the true absolute time is somewhere inside it. The interval’s
+half-width is called <strong>ε</strong> (epsilon), the instantaneous
+uncertainty. Two helper calls follow from it: <code>TT.after(t)</code>
+is true if <code>t</code> has definitely passed, and
+<code>TT.before(t)</code> is true if <code>t</code> definitely hasn’t
+arrived yet.</p>
+<p>Making that guarantee hold took hardware. Each Google datacenter has
+<strong>time masters</strong>: most with GPS receivers, and some
+(“Armageddon masters”) with atomic clocks, so the two kinds fail in
+different ways (GPS can suffer antenna or radio interference; atomic
+clocks drift slowly but independently of GPS). Every machine runs a
+daemon that polls several masters, across datacenters, rejects outliers,
+and synchronizes its local clock.</p>
+<p>Between polls, the local clock drifts, so the daemon widens its
+uncertainty over time, assuming a conservative worst-case drift rate
+(200 microseconds per second in the paper). With polls every 30 seconds,
+uncertainty forms a sawtooth: it’s small right after a poll and grows
+until the next one. The paper reports that ε typically varied between
+about 1 and 7 ms, averaging about 4 ms. If a machine’s clock is found to
+drift worse than the bound, it’s evicted.</p>
+<p>The clever part isn’t that Spanner’s clocks are accurate; it’s that
+their <strong>error is bounded and known</strong>. A system that knows
+“the true time is within ±4 ms of what I see” can reason about ordering
+safely.</p>
+<h2 id="commit-wait">4. Commit wait</h2>
+<figure class="diagram"><svg viewBox="0 0 760 290" role="img" aria-label="Spanner commit wait: pick timestamp at the top of the uncertainty interval, then wait until it is surely past" font-size="13"><defs><marker id="cwa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Commit wait: don't reveal a write until its timestamp has surely passed</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">TrueTime returns an interval [earliest, latest] that contains the real time.</text><line x1="40" y1="200" x2="730" y2="200" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#cwa)"></line><text x="722" y="220" text-anchor="end" font-size="11.5" fill="var(--cds-text-secondary)">real time</text><rect x="120" y="80" width="200" height="26" rx="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.18" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="220.0" y="97" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">TT.now() at commit start</text><text x="120" y="74" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">earliest</text><text x="320" y="74" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">latest = s</text><line x1="320" y1="106" x2="320" y2="200" stroke="var(--cds-chart-categorical-3)" stroke-width="2"></line><text x="326" y="190" font-size="11.5" fill="var(--cds-text-primary)">commit timestamp s</text><rect x="330" y="130" width="200" height="26" rx="5" fill="var(--cds-chart-categorical-2)" fill-opacity="0.18" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="430.0" y="147" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">wait until TT.now().earliest > s</text><line x1="530" y1="156" x2="530" y2="200" stroke="var(--cds-chart-axis)" stroke-width="1.5" stroke-dasharray="4 3"></line><text x="536" y="190" font-size="11.5" fill="var(--cds-text-primary)">release locks, reply</text><text x="24" y="244" font-size="11.5" fill="var(--cds-text-secondary)">The wait is about twice the clock uncertainty (a few ms in the 2012 paper).</text><text x="24" y="264" font-size="11.5" fill="var(--cds-text-secondary)">Any transaction that starts after the reply gets a larger timestamp, so timestamp order matches real-time order.</text></svg></figure>
+<p>Spanner uses TrueTime to assign commit timestamps that respect real
+time. For a read-write transaction, roughly:</p>
+<ol type="1">
+<li>The transaction acquires locks (Spanner uses two-phase locking for
+read-write transactions) and does its work.</li>
+<li>The coordinating leader picks a commit timestamp <code>s</code> no
+smaller than <code>TT.now().latest</code>. Since true time is at most
+<code>latest</code>, <code>s</code> is at least the current true
+time.</li>
+<li><strong>Commit wait</strong>: the leader waits until
+<code>TT.after(s)</code> is true, meaning
+<code>TT.now().earliest &gt; s</code>, so <code>s</code> has definitely
+passed in real time.</li>
+<li>Only then does it release locks and tell the client the transaction
+committed.</li>
+</ol>
+<p>Why does this give external consistency? Suppose T1 commits and its
+client sees the reply. Because of commit wait, the real time at that
+moment is already later than T1’s timestamp <code>s1</code>. If T2 then
+starts, anything it does happens later still, and its own timestamp will
+be at least <code>TT.now().latest</code> at some point after that, which
+is greater than the real time, which is greater than <code>s1</code>. So
+<code>s2 &gt; s1</code>, matching real time order. The uncertainty is
+absorbed by waiting, not by trusting clocks.</p>
+<p>The cost is the wait itself: about 2ε on average, a few milliseconds
+in the 2012 paper. Spanner overlaps that wait with the Paxos replication
+it has to do anyway (the commit record must be replicated to a majority
+of replicas, which often takes longer than the wait), so in practice
+commit wait adds little latency. The paper makes the point directly:
+lowering ε matters, because it directly bounds commit latency. Google
+invested in better time infrastructure for exactly this reason.</p>
+<h2 id="the-rest-of-spanners-design">5. The rest of Spanner’s
+design</h2>
+<p>TrueTime is the famous part, but it sits inside a carefully layered
+system.</p>
+<p><strong>Splits and Paxos groups.</strong> Data is divided into ranges
+of keys (Spanner calls them splits). Each split is replicated, typically
+across three or five zones or regions, by its own <strong>Paxos</strong>
+group, with a long-lived leader holding a lease. This is the same
+multi-group design as the multi-Raft systems in the Oct 27 Raft reading.
+Spanner’s leader leases are themselves based on TrueTime, so leaders
+know their leases are disjoint.</p>
+<p><strong>Transactions across splits.</strong> A transaction touching
+several splits uses <strong>two-phase commit</strong> across their Paxos
+leaders. One leader acts as coordinator. Each participant prepares,
+picks a prepare timestamp, and logs the prepare through Paxos. The
+coordinator chooses a commit timestamp at least as large as every
+participant’s prepare timestamp and <code>TT.now().latest</code>, does
+commit wait, and then everyone commits. Because each participant is a
+replicated Paxos group, the classic 2PC weakness, a coordinator failure
+blocking everyone, is much less severe: the coordinator’s state is
+replicated and a new leader takes over.</p>
+<p><strong>Lock-free snapshot reads.</strong> Read-only transactions
+don’t take locks. They pick a timestamp (by default
+<code>TT.now().latest</code>, for a strong read) and read the MVCC
+versions at that timestamp. A replica can serve a read at time
+<code>t</code> if it knows it has seen every write up to <code>t</code>,
+which Spanner tracks as a “safe time” per replica. Followers can
+therefore serve consistent reads, which matters enormously for
+read-heavy global workloads. Clients can also ask for <strong>stale
+reads</strong> (for example, “as of 15 seconds ago”), which any replica
+can usually serve immediately without contacting the leader.</p>
+<p><strong>Schema and data placement.</strong> Spanner lets you
+interleave child tables in their parent (a customer’s orders stored next
+to the customer), so related rows usually land in the same split and
+transactions stay single-group. Choosing primary keys that avoid
+hotspots matters too: a monotonically increasing key sends all inserts
+to one split, a problem the consistent hashing pack reading on Oct 27
+discussed.</p>
+<h2 id="cap-and-spanner">6. CAP and Spanner</h2>
+<p>Spanner is a CP system in CAP terms: during a partition, a minority
+side can’t accept writes. Eric Brewer, who coined CAP and later joined
+Google, wrote a 2017 paper, “Spanner, TrueTime and the CAP Theorem,”
+arguing that Spanner is “effectively CA”: technically CP, but with
+partitions so rare in Google’s private network, and availability so high
+(he reported Spanner exceeding five nines in practice), that users can
+treat it as both consistent and available.</p>
+<p>The lesson isn’t that CAP is wrong. It’s that availability in
+practice depends at least as much on the network and operations as on
+the theoretical model. Spanner’s availability comes from Google’s
+private global network, redundant links and careful operations, and not
+everyone can say the same about theirs.</p>
+<h2 id="doing-without-atomic-clocks-cockroachdb">7. Doing without atomic
+clocks: CockroachDB</h2>
+<p>CockroachDB, inspired by Spanner, runs on ordinary hardware with NTP.
+Its clocks aren’t bounded tightly or provably, so it can’t use commit
+wait without waiting hundreds of milliseconds per transaction. Instead
+it uses a different combination.</p>
+<p><strong>Hybrid logical clocks (HLC).</strong> Each node keeps a
+timestamp combining physical time with a logical counter (from Kulkarni,
+Demirbas and colleagues’ 2014 HLC paper). It stays close to physical
+time but, like a Lamport clock, always moves forward past any timestamp
+the node has seen in a message. Causally related events are ordered
+correctly even if clocks disagree.</p>
+<p><strong>A configured maximum clock offset.</strong> Operators promise
+that clocks are within a maximum offset of each other, 500 ms by
+default. Nodes continuously measure their offset from peers, and a node
+that finds itself too far out of sync with the rest of the cluster shuts
+itself down rather than risk violating consistency.</p>
+<p><strong>Uncertainty intervals.</strong> When a transaction with
+timestamp <code>t</code> reads a key and finds a value with a timestamp
+slightly above <code>t</code>, but within <code>t + max_offset</code>,
+it can’t tell whether that write happened before or after it in real
+time. The clocks might simply disagree. So it treats the value as
+uncertain and <strong>restarts</strong> the read at a higher timestamp
+that includes it. This guarantees that a transaction sees any write that
+finished before it started, even with skewed clocks.</p>
+<p>The result is <strong>serializable isolation with strong guarantees
+for single-key and causally related operations</strong>, but CockroachDB
+has historically been careful not to claim full strict serializability
+for all transactions. Its documentation and the 2016 blog post “Living
+without atomic clocks” explain that transactions touching disjoint keys
+with no causal link can, in a narrow window, be ordered differently from
+real time. In exchange, it avoids commit wait on every transaction and
+pays instead with occasional read restarts, which appear as
+<code>ReadWithinUncertaintyIntervalError</code> retries. High restart
+rates are a classic sign of clock trouble, and reducing clock skew
+directly reduces them.</p>
+<p>YugabyteDB takes a similar approach, with HLC and a configured
+maximum clock skew, and also supports using AWS’s precise clock service
+to tighten it.</p>
+<h2 id="the-cloud-clocks-catch-up">8. The cloud clocks catch up</h2>
+<p>For years, the gap between Spanner and everyone else was hardware:
+GPS and atomic clocks in every datacenter, plus software that bounded
+the error. That gap has narrowed.</p>
+<p><strong>Amazon Time Sync Service</strong> provides time from
+satellite-connected and atomic reference clocks in each AWS region, and
+on supported EC2 instances it delivers time through the local Nitro
+hardware with <strong>microsecond-range accuracy</strong>. AWS also
+open-sourced <strong>ClockBound</strong>, a daemon and library that,
+like TrueTime, returns the current time as an interval with a bounded
+error, computed from the chrony time daemon’s own uncertainty
+estimates.</p>
+<p>That’s exactly what’s needed for Spanner-style commit wait, and AWS
+uses it. <strong>Amazon Aurora DSQL</strong>, announced in December
+2024, is a distributed SQL database whose design posts (“Everything you
+don’t need to know about Amazon Aurora DSQL”) describe using these
+precise, bounded clocks to give transactions consistent timestamps
+across regions without a central timestamp service. Marc Brooker, one of
+its engineers, has written that cheap, accurate time is one of the key
+building blocks that changed what distributed databases can do.</p>
+<p>Google Cloud exposes Spanner itself as a managed service, and Google
+has published improvements to TrueTime over the years that shrink
+uncertainty further. As error bounds fall from milliseconds to
+microseconds, commit wait becomes nearly free, and the trade-offs in
+section 7 matter less.</p>
+<h2 id="what-this-means-in-practice">9. What this means in practice</h2>
+<p>You may never build a database, but these ideas show up whenever you
+choose or use one.</p>
+<p><strong>Know your isolation level.</strong> “Distributed SQL”
+products differ in what they actually guarantee. Spanner offers strict
+serializability. CockroachDB offers serializable with the clock caveats
+above. Many others default to snapshot isolation or read committed.
+Check the docs, and look for independent testing such as Jepsen
+analyses.</p>
+<p><strong>Watch your clocks.</strong> If you run CockroachDB,
+YugabyteDB or anything with a max-offset setting, monitor clock offset
+as a first-class metric. Use chrony with a good time source (in the
+cloud, the provider’s time service), and treat clock alerts as seriously
+as disk alerts. A node that drifts past the limit will shut itself down,
+and if a shared time source misbehaves, many nodes can do so at
+once.</p>
+<p><strong>Use stale reads where they’re fine.</strong> Both Spanner and
+CockroachDB let you read slightly in the past (“bounded staleness” or
+<code>AS OF SYSTEM TIME</code>). Those reads are served by nearby
+replicas without coordination, which is far faster in multi-region
+setups. Dashboards, search indexing and analytics rarely need the last
+second.</p>
+<p><strong>Design keys and locality.</strong> Commit latency in a global
+database is dominated by where replicas live and where the leaders are.
+Put leaders near the users who write, keep related rows together, and
+avoid sequential keys that create hotspots.</p>
+<p><strong>Don’t use wall clocks for ordering in your own code.</strong>
+If you compare <code>updated_at</code> timestamps from different servers
+to decide which write wins, you’ve rebuilt the photo-album bug. Use
+version numbers, database-assigned timestamps from a single source, or
+the database’s own transactional guarantees.</p>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Ordering transactions across machines is a clock problem. External
+consistency (strict serializability) requires timestamps that agree with
+real-time order.</li>
+<li>Clocks drift and don’t know their own error; logical clocks ignore
+real time; a central oracle adds a global round trip.</li>
+<li>TrueTime returns an interval guaranteed to contain true time, backed
+by GPS and atomic clocks, with uncertainty of a few milliseconds in
+2012.</li>
+<li>Commit wait picks a timestamp at the top of the interval and waits
+until it has surely passed, which costs about 2ε and gives external
+consistency.</li>
+<li>Spanner combines this with Paxos-replicated splits, two-phase commit
+across groups and lock-free snapshot reads.</li>
+<li>CockroachDB uses hybrid logical clocks, a maximum clock offset, and
+uncertainty restarts to get close without special hardware.</li>
+<li>Precise cloud clock services with error bounds, such as AWS
+ClockBound, now make Spanner-style designs practical outside
+Google.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Walk through the photo-album example with Spanner’s commit wait. At
+what exact point would Bob’s read be ordered after the removal?</li>
+<li>If TrueTime’s ε doubled overnight, what would happen to Spanner’s
+write latency and throughput? What about read latency?</li>
+<li>CockroachDB restarts reads that hit values in the uncertainty
+window. What workload pattern would cause the most restarts, and how
+would you reduce them?</li>
+<li>Why do clock-based systems shut down nodes whose clocks are too far
+off, rather than just logging a warning?</li>
+<li>Brewer calls Spanner “effectively CA.” Would that argument hold for
+a Spanner-like system running across three public cloud regions
+connected over the internet?</li>
+<li>TiDB uses a central timestamp oracle instead of clocks. When is that
+the better design?</li>
+<li>Where in your own systems do you compare timestamps from different
+machines to decide ordering, and what could go wrong?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>James C. Corbett et al., “Spanner: Google’s Globally-Distributed
+Database,” OSDI 2012,
+https://www.cs.princeton.edu/courses/archive/fall15/cos518/papers/spanner.pdf</li>
+<li>David F. Bacon et al., “Spanner: Becoming a SQL System,” SIGMOD
+2017.</li>
+<li>Eric Brewer, “Spanner, TrueTime and the CAP Theorem,” Google,
+2017.</li>
+<li>Leslie Lamport, “Time, Clocks, and the Ordering of Events in a
+Distributed System,” CACM, 1978.</li>
+<li>Sandeep Kulkarni, Murat Demirbas et al., “Logical Physical Clocks
+and Consistent Snapshots in Globally Distributed Databases” (hybrid
+logical clocks), 2014.</li>
+<li>Cockroach Labs, “Living Without Atomic Clocks” (2016) and
+CockroachDB documentation on clock synchronization,
+<code>--max-offset</code> and transaction retries,
+https://www.cockroachlabs.com/docs/stable/architecture/transaction-layer</li>
+<li>Netdata, “CockroachDB ReadWithinUncertaintyInterval restarts” and
+“clock synchronization error” guides,
+https://www.netdata.cloud/guides/cockroachdb/cockroachdb-readwithinuncertainty-restarts/</li>
+<li>AWS Database Blog, “Everything you don’t need to know about Amazon
+Aurora DSQL, Part 5: How the service uses clocks,”
+https://aws.amazon.com/blogs/database/everything-you-dont-need-to-know-about-amazon-aurora-dsql-part-5-how-the-service-uses-clocks</li>
+<li>AWS, “It’s About Time: Microsecond-Accurate Clocks on Amazon EC2
+Instances,” and the ClockBound project,
+https://github.com/aws/clock-bound</li>
+<li>Daniel Peng and Frank Dabek, “Large-scale Incremental Processing
+Using Distributed Transactions and Notifications” (Percolator), OSDI
+2010.</li>
+<li>YugabyteDB documentation on hybrid time and clock skew.</li>
+</ul>
+<p>The TrueTime figures (1 to 7 ms uncertainty, 200 μs/s drift
+assumption, 30-second polls) are from the 2012 paper. CockroachDB’s 500
+ms default offset was confirmed in search results on Nov 2, 2026, and
+the Aurora DSQL clocks post was located the same day. The “five nines”
+claim is Brewer’s, as I recall it from his 2017 paper.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/databases.html">Databases</a><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a></div>
+          <div class="daynav"><a href="/reading/job-queues.html"><div class="kicker">← Older · Nov 1</div><div class="t">Job queues: leases, retries, dead letters and backpressure</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
