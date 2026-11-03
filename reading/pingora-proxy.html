@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Why Cloudflare replaced NGINX with Pingora · The Daily Commit</title>
+  <meta name="description" content="A case study in rebuilding core infrastructure. Covers how proxies like NGINX are structured, why its process-per-core model hurt Cloudflare&#x27;s connection reuse and tail latency, how Pingora&#x27;s multithreaded Rust design fixed it, the results, and when a rewrite like this is worth it.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Why Cloudflare replaced NGINX with Pingora</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>14 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#what-a-reverse-proxy-does">What a reverse proxy does</a><a href="#how-nginx-is-built">How NGINX is built</a><a href="#where-it-broke-down-for-cloudflare">Where it broke down for
+Cloudflare</a><a href="#how-pingora-is-designed">How Pingora is designed</a><a href="#results">Results</a><a href="#open-sourcing-pingora">Open-sourcing Pingora</a><a href="#how-this-compares-to-envoy-and-others">How this compares to
+Envoy and others</a><a href="#when-is-a-rewrite-worth-it">When is a rewrite worth it?</a><a href="#lessons-that-apply-everywhere">Lessons that apply
+everywhere</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 14 min left</div>
+      </nav>
+      <article class="article" data-slug="pingora-proxy" data-minutes="14">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/case-study.html">Case Study</a> · November 3, 2026 · 14 min</div>
+        <h1>Why Cloudflare replaced NGINX with Pingora</h1>
+        <p class="dek">A case study in rebuilding core infrastructure. Covers how proxies like NGINX are structured, why its process-per-core model hurt Cloudflare&#x27;s connection reuse and tail latency, how Pingora&#x27;s multithreaded Rust design fixed it, the results, and when a rewrite like this is worth it.</p>
+<p>For most of its history, a large share of Cloudflare’s traffic to
+origin servers went through NGINX, the most widely deployed web server
+and reverse proxy on the internet. In 2022, Cloudflare announced it had
+replaced that layer with <strong>Pingora</strong>, a proxy it wrote from
+scratch in Rust, serving over a trillion requests a day while using
+about a third of the CPU and memory. In 2024 it open-sourced Pingora as
+a framework. It’s a rare, well-documented example of a company
+rebuilding a piece of infrastructure that almost everyone else treats as
+a given. This reading looks at how proxies like NGINX work, what
+specifically went wrong at Cloudflare’s scale, what Pingora did
+differently, and what the story teaches about when a rewrite is actually
+justified.</p>
+<h2 id="what-a-reverse-proxy-does">1. What a reverse proxy does</h2>
+<p>A <strong>reverse proxy</strong> sits in front of servers and handles
+client connections on their behalf. Cloudflare’s network is a giant one:
+a client’s request arrives at a Cloudflare data center near them,
+Cloudflare checks its cache and applies security rules, and if it needs
+to, it forwards the request to the customer’s <strong>origin</strong>
+server and relays the response back.</p>
+<p>For each request, a proxy does work like this:</p>
+<ol type="1">
+<li>Accept the client’s TCP connection and complete the TLS handshake
+(the Oct 21 TLS reading covered this).</li>
+<li>Parse the HTTP request.</li>
+<li>Run logic: routing, header changes, authentication, caching
+decisions, rate limits.</li>
+<li>Pick an origin server and get a connection to it, ideally an
+existing one.</li>
+<li>Forward the request, stream the response back, and log what
+happened.</li>
+</ol>
+<p>Steps 1 and 4 are where much of the cost hides. Opening a new
+connection to an origin means a TCP handshake and usually a TLS
+handshake, which cost round trips and CPU on both sides. If the origin
+is on another continent, a new connection can add hundreds of
+milliseconds before the first byte of the request is even sent. So a
+proxy wants to <strong>keep connections to origins open and reuse
+them</strong> across many requests. That one goal, connection reuse,
+ends up at the center of the Pingora story.</p>
+<h2 id="how-nginx-is-built">2. How NGINX is built</h2>
+<p>NGINX, first released by Igor Sysoev in 2004, was designed to solve
+the “C10K problem”: handling ten thousand simultaneous connections on
+one machine, at a time when servers like Apache typically used a process
+or thread per connection. NGINX’s answer was an
+<strong>event-driven</strong> design:</p>
+<ul>
+<li>A <strong>master process</strong> reads configuration and manages
+workers.</li>
+<li>Several <strong>worker processes</strong>, typically one per CPU
+core, each run a single-threaded event loop. A worker uses
+<code>epoll</code> (on Linux) to wait for activity on thousands of
+sockets at once and handles each event without blocking.</li>
+<li>Each worker is independent. It accepts connections, processes their
+requests from start to finish, and keeps its own state, including its
+own <strong>pool of upstream connections</strong>.</li>
+</ul>
+<p>This design is excellent for the problem it was built for. There’s no
+locking between workers, a crash in one worker doesn’t take down the
+others, and a single machine handles enormous numbers of mostly idle
+connections with little memory. NGINX became the default front door for
+a large share of the web.</p>
+<p>Extending NGINX means writing C modules compiled into it, or using
+<strong>OpenResty</strong>, which embeds LuaJIT so logic can be written
+in Lua scripts that run inside the request phases. Cloudflare used both
+heavily.</p>
+<h2 id="where-it-broke-down-for-cloudflare">3. Where it broke down for
+Cloudflare</h2>
+<p>Cloudflare’s 2022 post “How we built Pingora, the proxy that connects
+Cloudflare to the Internet,” lays out the problems it ran into. None of
+them is a bug in NGINX. They’re consequences of its architecture meeting
+Cloudflare’s particular scale and workload.</p>
+<h3 id="connection-reuse-was-fragmented">Connection reuse was
+fragmented</h3>
+<figure class="diagram"><svg viewBox="0 0 760 300" role="img" aria-label="Per-worker connection pools versus one shared pool" font-size="13"><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Why connection reuse improved: one pool instead of one per worker</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Same origin, same traffic. Each line is a kept-alive connection to the origin.</text><text x="190" y="82" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">NGINX: process per core</text><text x="570" y="82" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Pingora: threads share a pool</text><rect x="40" y="100" width="66" height="30" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="73" y="120" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">worker 1</text><rect x="40" y="150" width="66" height="24" rx="6" fill="var(--cds-chart-categorical-2)" fill-opacity="0.1" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="73" y="166" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">pool</text><line x1="73" y1="174" x2="190" y2="230" stroke="var(--cds-chart-axis)" stroke-width="1.2"></line><rect x="120" y="100" width="66" height="30" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="153" y="120" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">worker 2</text><rect x="120" y="150" width="66" height="24" rx="6" fill="var(--cds-chart-categorical-2)" fill-opacity="0.1" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="153" y="166" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">pool</text><line x1="153" y1="174" x2="190" y2="230" stroke="var(--cds-chart-axis)" stroke-width="1.2"></line><rect x="200" y="100" width="66" height="30" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="233" y="120" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">worker 3</text><rect x="200" y="150" width="66" height="24" rx="6" fill="var(--cds-chart-categorical-2)" fill-opacity="0.1" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="233" y="166" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">pool</text><line x1="233" y1="174" x2="190" y2="230" stroke="var(--cds-chart-axis)" stroke-width="1.2"></line><rect x="280" y="100" width="66" height="30" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="313" y="120" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">worker 4</text><rect x="280" y="150" width="66" height="24" rx="6" fill="var(--cds-chart-categorical-2)" fill-opacity="0.1" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="313" y="166" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">pool</text><line x1="313" y1="174" x2="190" y2="230" stroke="var(--cds-chart-axis)" stroke-width="1.2"></line><rect x="130" y="230" width="120" height="30" rx="6" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="190" y="250" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">origin</text><text x="190" y="282" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">a request can only reuse its own worker's idle connections</text><rect x="420" y="100" width="66" height="30" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="453" y="120" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">thread 1</text><line x1="453" y1="130" x2="570" y2="150" stroke="var(--cds-chart-axis)" stroke-width="1.2" stroke-dasharray="4 3"></line><rect x="500" y="100" width="66" height="30" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="533" y="120" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">thread 2</text><line x1="533" y1="130" x2="570" y2="150" stroke="var(--cds-chart-axis)" stroke-width="1.2" stroke-dasharray="4 3"></line><rect x="580" y="100" width="66" height="30" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="613" y="120" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">thread 3</text><line x1="613" y1="130" x2="570" y2="150" stroke="var(--cds-chart-axis)" stroke-width="1.2" stroke-dasharray="4 3"></line><rect x="660" y="100" width="66" height="30" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="693" y="120" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">thread 4</text><line x1="693" y1="130" x2="570" y2="150" stroke="var(--cds-chart-axis)" stroke-width="1.2" stroke-dasharray="4 3"></line><rect x="470" y="150" width="200" height="24" rx="6" fill="var(--cds-chart-categorical-2)" fill-opacity="0.1" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="570" y="166" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">shared connection pool</text><line x1="570" y1="174" x2="570" y2="230" stroke="var(--cds-chart-axis)" stroke-width="1.2"></line><rect x="510" y="230" width="120" height="30" rx="6" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="570" y="250" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">origin</text><text x="570" y="282" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">any idle connection serves any request</text></svg></figure>
+<p>Because each NGINX worker has its own connection pool, a request
+handled by worker 3 can only reuse idle origin connections that worker 3
+happens to hold. If worker 1 has an idle connection to the same origin,
+it doesn’t help. As machines got more cores, Cloudflare ran more
+workers, and each pool got a smaller slice of traffic, so reuse got
+worse. Every miss meant a new TCP and TLS handshake to the origin:
+slower for the user, more expensive for Cloudflare, and more load on the
+customer’s server. The post calls this the most critical problem for its
+use cases.</p>
+<h3 id="load-was-unbalanced-across-cores">Load was unbalanced across
+cores</h3>
+<p>In NGINX, the worker that accepts a connection handles every request
+on it, start to finish. If one request is expensive (a big response to
+compress, heavy Lua logic, a slow disk read for cache), it occupies that
+worker’s event loop, and every other request on that worker waits, even
+if other cores are idle. Cloudflare saw unbalanced load across CPU cores
+and latency spikes for requests that happened to share a worker with a
+slow one. In an event loop, one blocking operation stalls everything on
+that loop.</p>
+<h3 id="it-was-hard-to-extend-safely">It was hard to extend safely</h3>
+<p>Cloudflare needed behavior NGINX didn’t support well. The post gives
+an example: when retrying a failed request to a different origin, it
+wanted to change the request headers for the new attempt, which NGINX
+didn’t allow. More generally, adding features meant either patching
+NGINX’s C code or writing Lua. C changes risked memory-safety bugs in a
+component that handles untrusted input from the whole internet.
+Cloudflare knew this risk firsthand: in 2017 a bug in an HTML parser
+running inside its NGINX-based stack, nicknamed
+<strong>Cloudbleed</strong>, leaked memory contents into responses. Lua
+was safer but slower, and large dynamically typed codebases are hard to
+maintain.</p>
+<h3 id="fixing-it-inside-nginx-wasnt-practical">Fixing it inside NGINX
+wasn’t practical</h3>
+<p>Cloudflare considered three options: keep investing in NGINX, adopt
+another proxy (Envoy was the obvious candidate), or build its own.
+Changing NGINX’s process model would mean rewriting its core, at which
+point it would no longer really be NGINX. Other proxies would also need
+deep changes to fit Cloudflare’s scale and features. Building in-house
+was the most expensive option up front, but the post argues it was the
+one with the best long-term payoff, given how central this proxy was to
+the business.</p>
+<h2 id="how-pingora-is-designed">4. How Pingora is designed</h2>
+<p>Pingora’s design choices map directly onto the problems above.</p>
+<p><strong>Rust, for memory safety without giving up
+performance.</strong> Rust gives C-like control over memory and
+performance, while its ownership system rules out whole classes of bugs,
+such as use-after-free and buffer overflows, at compile time. For a
+proxy that parses untrusted traffic all day, that’s the most important
+property. The post states that in the time Pingora had been running,
+serving a few hundred trillion requests, it had yet to crash because of
+Pingora’s own code. (Crashes from other causes, like hardware or kernel
+bugs, still happen.)</p>
+<p><strong>Threads instead of processes, so connection pools can be
+shared.</strong> Pingora runs as one multithreaded process. All threads
+share one connection pool per origin, so any idle connection can serve
+any request, regardless of which thread accepted the client. Sharing
+memory between threads needs synchronization, and Rust’s type system
+helps make that safe.</p>
+<p><strong>Async with work stealing, so one slow task doesn’t stall
+others.</strong> Pingora is built on <strong>Tokio</strong>, Rust’s most
+widely used async runtime. Each request is a lightweight task, and
+Tokio’s scheduler uses <strong>work stealing</strong>: if one thread is
+busy, idle threads take tasks from its queue. Load spreads across cores
+automatically instead of being tied to whichever worker accepted the
+connection.</p>
+<p><strong>Its own HTTP implementation.</strong> Cloudflare sees every
+kind of HTTP traffic on the internet, including plenty that doesn’t
+follow the RFCs exactly. Rather than use an existing Rust HTTP library
+like hyper, Pingora has its own HTTP/1 and HTTP/2 implementation, built
+to tolerate odd but real-world traffic in ways Cloudflare controls.
+Pingora also supports HTTP/2 to origins, which made gRPC proxying
+possible.</p>
+<p><strong>A programmable request lifecycle.</strong> Pingora exposes
+the request’s life as a series of phases, each with a callback (a
+“filter”) that application code can implement: when the request headers
+arrive, when an upstream is chosen, when the response headers come back,
+when the request finishes. This is similar in spirit to NGINX’s phases
+and OpenResty’s Lua hooks, but written in typed Rust, compiled with the
+rest of the proxy. Features like changing headers on retry become simple
+code in the right callback.</p>
+<p><strong>Graceful upgrades.</strong> A proxy restart can’t drop
+millions of in-flight connections. Pingora supports upgrading to a new
+binary without dropping traffic, handing listening sockets from the old
+process to the new one, which then takes new connections while the old
+one finishes its existing work.</p>
+<h2 id="results">5. Results</h2>
+<p>The 2022 post reported these outcomes, measured against the
+NGINX-based service it replaced:</p>
+<ul>
+<li><strong>Resources.</strong> For the same traffic, Pingora used about
+70% less CPU and 67% less memory, which the post summarizes as about a
+third of the resources.</li>
+<li><strong>Connection reuse.</strong> Pingora created only a third as
+many new connections per second. For one major customer, the reuse ratio
+went from 87.1% to 99.92%, which cut new connections to their origins by
+160 times.</li>
+<li><strong>Latency.</strong> Median time to first byte improved by 5 ms
+and the 95th percentile by 80 ms. The post says this isn’t because the
+code runs faster, but because reused connections skip handshakes. Tail
+latency benefits most, because the slowest requests were often the ones
+that had to open new connections to far-away origins.</li>
+<li><strong>Handshake time saved.</strong> Cloudflare estimated the
+improved reuse saves its customers and users a combined 434 years of
+handshake time every day.</li>
+<li><strong>Scale.</strong> Pingora was serving over a trillion requests
+a day.</li>
+</ul>
+<p>The interesting point is <em>where</em> the gains came from. They
+didn’t come from Rust being faster than C. They came from architecture:
+sharing connection pools across threads, and scheduling work across
+cores. A C rewrite with the same architecture could, in principle, have
+achieved similar efficiency. What Rust added was the confidence to write
+a large, concurrent, shared-memory program handling untrusted input
+without the memory-safety bugs that usually come with one.</p>
+<h2 id="open-sourcing-pingora">6. Open-sourcing Pingora</h2>
+<p>In February 2024, Cloudflare open-sourced Pingora under the Apache
+2.0 license, in the post “Open sourcing Pingora: our Rust framework for
+building programmable network services.” What it released isn’t a
+ready-made proxy server like NGINX with a configuration file. It’s a
+<strong>framework</strong>: a set of Rust libraries for building your
+own proxies, load balancers and other network services. You write a Rust
+program that implements the lifecycle callbacks (for example, choosing
+an upstream in <code>upstream_peer</code>), and Pingora handles
+connections, HTTP, TLS, pooling, load balancing between upstreams and
+graceful restarts. The repository includes examples such as a simple
+load balancer across two upstream servers.</p>
+<p>By then, the post said, Pingora had handled nearly a quadrillion
+requests across Cloudflare. It also noted that Pingora was being used
+beyond the original origin proxy, as the basis for other Cloudflare
+services.</p>
+<p>The framework approach reflects how Cloudflare uses it: not as one
+proxy with lots of configuration, but as a toolkit for building many
+specialized services. It’s a different philosophy from NGINX’s
+configuration-driven model, and it suits teams that want to write their
+proxy logic in code.</p>
+<h2 id="how-this-compares-to-envoy-and-others">7. How this compares to
+Envoy and others</h2>
+<p>It’s worth comparing Pingora to Envoy, the other modern proxy
+discussed in the load-balancing reading on Oct 30.</p>
+<p><strong>Envoy</strong> (C++, from Lyft, 2016) is multithreaded, with
+one event loop per worker thread. Connections are assigned to a worker
+thread for their lifetime, and each worker keeps <strong>its
+own</strong> upstream connection pools, mostly to avoid locking. So
+Envoy shares some of NGINX’s pool fragmentation at the thread level,
+though it’s configurable, supports per-request load balancing well, and
+is mostly used in environments like service meshes where origins are
+nearby and new connections are cheap. Envoy is configured through a rich
+API (xDS) and extended with C++ filters, Lua, or WebAssembly.</p>
+<p><strong>HAProxy</strong> moved from a process model to multithreading
+in version 1.8 and 2.0, partly to share state and connections across
+threads, a similar journey to the one Cloudflare took, done inside an
+existing project.</p>
+<p><strong>Other Rust proxies</strong> have appeared since Pingora, and
+Rust has become a common choice for new network infrastructure for the
+same memory-safety reasons. Linkerd’s data-plane proxy, for example, has
+been written in Rust since 2018.</p>
+<p>The general trend is clear: shared-nothing process models were the
+right answer for C10K-era hardware, but on many-core machines talking to
+far-away origins, sharing state across cores matters again, and
+memory-safe languages make it practical to do safely.</p>
+<h2 id="when-is-a-rewrite-worth-it">8. When is a rewrite worth it?</h2>
+<p>Rewrites of core infrastructure have a bad reputation, deservedly.
+Joel Spolsky’s 2000 essay “Things You Should Never Do” argued that
+rewriting working software from scratch throws away years of accumulated
+bug fixes and knowledge, and many teams have learned that the hard way.
+So what made Pingora a reasonable bet?</p>
+<p><strong>The problem was architectural, not incidental.</strong>
+Per-worker connection pools are inherent to NGINX’s design. No amount of
+tuning or patching would give a process-per-core proxy a shared pool.
+When the limitation is in the foundation, incremental fixes run out.</p>
+<p><strong>The scale made the payoff huge.</strong> At over a trillion
+requests a day, a two-thirds cut in CPU and memory means a lot of
+servers, and better connection reuse helps every customer. At a smaller
+scale, the same rewrite would never pay for itself.</p>
+<p><strong>The component was core to the business.</strong> The proxy is
+Cloudflare’s product, not a side system. Owning it means owning the
+roadmap: features like modifying requests on retry no longer depend on
+someone else’s priorities.</p>
+<p><strong>There was a strong team and a migration path.</strong>
+Cloudflare had engineers who knew the old system’s behavior in detail
+and could replace it gradually, traffic slice by traffic slice,
+comparing results. A rewrite without a way to migrate incrementally and
+verify behavior is much riskier.</p>
+<p><strong>Safety was a requirement, not a preference.</strong> After
+Cloudbleed, memory safety in code that parses untrusted traffic was a
+business risk, not just an engineering nicety.</p>
+<p>A fair counterpoint: most organizations have none of these
+conditions. For them, NGINX, Envoy, HAProxy or a managed load balancer
+is the right choice, and the lesson to take from Pingora is not “rewrite
+your proxy.” It’s the reasoning: measure where the cost actually comes
+from (here, handshakes from poor reuse, not slow code), find whether the
+limit is architectural, and only then decide between tuning, replacing
+or building.</p>
+<h2 id="lessons-that-apply-everywhere">9. Lessons that apply
+everywhere</h2>
+<p>Even if you never build a proxy, Pingora’s story has practical
+lessons:</p>
+<ul>
+<li><strong>Connection reuse is a performance feature.</strong> Check
+that your HTTP clients, database drivers and service-to-service calls
+actually reuse connections. A misconfigured client that opens a new TLS
+connection per request can dominate latency. Metrics like new
+connections per second, compared with requests per second, show it
+immediately.</li>
+<li><strong>Per-worker or per-process state fragments.</strong> Caches,
+pools and rate-limit counters held per process get less effective as you
+add processes. That applies to Gunicorn or Puma workers in Python and
+Ruby, Node.js cluster workers, and any app server with a process
+model.</li>
+<li><strong>Event loops hate blocking.</strong> One CPU-heavy or
+blocking call stalls everything sharing its loop. Move heavy work off
+the loop, or use a runtime with work stealing.</li>
+<li><strong>Look at the tail.</strong> Pingora’s biggest latency
+improvement was at p95, not the median, because the expensive cases (new
+connections to far origins) were rare but slow. The Oct 31 observability
+reading explains why tails matter.</li>
+<li><strong>Memory safety matters most at the boundary.</strong> Code
+that parses untrusted input is where memory-safe languages pay off
+first.</li>
+</ul>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>NGINX’s process-per-core, shared-nothing design was ideal for the
+C10K era, but it fragments connection pools and ties requests to one
+core’s event loop.</li>
+<li>At Cloudflare’s scale, poor connection reuse to origins meant many
+extra TCP and TLS handshakes, which cost latency, CPU and origin
+load.</li>
+<li>Pingora uses Rust for memory safety, threads sharing one connection
+pool, and Tokio’s work-stealing scheduler to balance load across
+cores.</li>
+<li>Results reported: about 70% less CPU and 67% less memory, a third as
+many new connections, reuse for one customer from 87.1% to 99.92%, and 5
+ms (median) and 80 ms (p95) faster time to first byte.</li>
+<li>The gains came mainly from architecture, not from Rust being faster;
+Rust made the shared-memory design safe to write.</li>
+<li>Pingora was open-sourced in 2024 under Apache 2.0 as a framework for
+building proxies, not a drop-in NGINX replacement.</li>
+<li>Rewrites pay off when the limitation is architectural, the scale is
+large, the component is core, and there’s a safe migration path.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Why does adding CPU cores make connection reuse worse with NGINX’s
+model? Would running fewer, larger workers fix it, and what would it
+cost?</li>
+<li>Pingora’s median latency improved by only 5 ms, but p95 improved by
+80 ms. Explain why, using what you know about connection setup.</li>
+<li>Envoy keeps per-thread connection pools, like NGINX’s per-worker
+pools. Why might that be a sensible choice for a service mesh but not
+for Cloudflare’s edge?</li>
+<li>If your company ran into NGINX’s limits, what would you measure
+before considering a rewrite, and what alternatives would you try
+first?</li>
+<li>Cloudflare wrote its own HTTP parser instead of using an existing
+library. What are the risks and benefits of that decision?</li>
+<li>Where in your own systems do you have per-process state (pools,
+caches, counters) that gets less effective as you scale out?</li>
+<li>Pingora was released as a framework rather than a configurable
+server. Which would you rather operate, and why?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Yuchen Wu and Andrew Hauck, “How we built Pingora, the proxy that
+connects Cloudflare to the Internet,” Cloudflare blog, September 14,
+2022,
+https://blog.cloudflare.com/how-we-built-pingora-the-proxy-that-connects-cloudflare-to-the-internet/</li>
+<li>Cloudflare, “Open sourcing Pingora: our Rust framework for building
+programmable network services,” February 28, 2024,
+https://blog.cloudflare.com/pingora-open-source ; repository
+https://github.com/cloudflare/pingora</li>
+<li>InfoQ, “Cloudflare Open Sources Pingora,” March 2024,
+https://www.infoq.com/news/2024/03/cloudflare-open-sources-pingora</li>
+<li>Cloudflare, “Incident report on memory leak caused by Cloudflare
+parser bug” (Cloudbleed), February 2017.</li>
+<li>NGINX documentation, “Inside NGINX: How We Designed for Performance
+&amp; Scale” (2015), and Dan Kegel, “The C10K problem.”</li>
+<li>Envoy documentation, “Threading model” and “Connection pooling,”
+https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/intro/threading_model</li>
+<li>Tokio documentation, “Scheduler” (work stealing),
+https://tokio.rs</li>
+<li>Joel Spolsky, “Things You Should Never Do, Part I,” Joel on
+Software, 2000.</li>
+</ul>
+<p>The Pingora figures were read from Cloudflare’s two posts on Nov 3,
+2026. Some of them came from a summary of the posts’ later sections, not
+the verbatim text, so check the original if you plan to quote a number.
+The Envoy and HAProxy comparisons summarize their documentation as I
+know it.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/case-study.html">Case Study</a><a class="chip" href="/topics/networking.html">Networking</a></div>
+          <div class="daynav"><a href="/reading/spanner-truetime.html"><div class="kicker">← Older · Nov 2</div><div class="t">Spanner, TrueTime and the problem of time in distributed databases</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
