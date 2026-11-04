@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Passkeys and WebAuthn: logins that can&#x27;t be phished · The Daily Commit</title>
+  <meta name="description" content="Why passwords and one-time codes keep failing, how WebAuthn&#x27;s public-key ceremonies work, what makes passkeys phishing-resistant, synced versus device-bound credentials, attestation, account recovery, and how to roll passkeys out in a real product.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Passkeys and WebAuthn: logins that can&#x27;t be phished</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>15 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#whats-wrong-with-what-we-have">What’s wrong with what we
+have</a><a href="#the-core-idea-public-keys-bound-to-origins">The core idea:
+public keys bound to origins</a><a href="#the-ceremonies">The ceremonies</a><a href="#from-security-keys-to-passkeys">From security keys to
+passkeys</a><a href="#signing-in-across-devices">Signing in across devices</a><a href="#attestation-do-you-need-to-know-which-authenticator-it-is">Attestation: do you need to know which authenticator it is?</a><a href="#the-user-experience-is-the-hard-part">The user experience is
+the hard part</a><a href="#account-recovery-is-where-security-leaks-back-out">Account
+recovery is where security leaks back out</a><a href="#portability-and-lock-in">Portability and lock-in</a><a href="#rolling-out-passkeys-a-practical-plan">Rolling out passkeys:
+a practical plan</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 15 min left</div>
+      </nav>
+      <article class="article" data-slug="passkeys-webauthn" data-minutes="15">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/security.html">Security</a> · November 4, 2026 · 15 min</div>
+        <h1>Passkeys and WebAuthn: logins that can&#x27;t be phished</h1>
+        <p class="dek">Why passwords and one-time codes keep failing, how WebAuthn&#x27;s public-key ceremonies work, what makes passkeys phishing-resistant, synced versus device-bound credentials, attestation, account recovery, and how to roll passkeys out in a real product.</p>
+<p>Most account takeovers don’t involve clever cryptography. They
+involve a reused password, a convincing fake login page, or a one-time
+code typed into the wrong site. Two decades of fixes (complexity rules,
+rotation policies, SMS codes, authenticator apps) have each helped a
+little and moved attackers to the next weak point. Passkeys, built on
+the W3C’s WebAuthn standard and the FIDO Alliance’s specifications, are
+the first mainstream login method designed so that a user <em>can’t</em>
+hand their credential to the wrong site, even if they’re fooled. This
+reading explains why that’s true, how the protocol works, the trade-offs
+between kinds of passkeys, and what changes when you add them to a real
+product.</p>
+<h2 id="whats-wrong-with-what-we-have">1. What’s wrong with what we
+have</h2>
+<p><strong>Passwords</strong> are shared secrets. The user knows it and
+the server stores something derived from it, so a password can be stolen
+from either side: phished from the user, guessed, or cracked from a
+breached database. Because people reuse passwords, one breach leads to
+<strong>credential stuffing</strong>: attackers try leaked username and
+password pairs on other sites, at scale. Verizon’s annual Data Breach
+Investigations Report has consistently found stolen credentials among
+the most common ways attackers get in.</p>
+<p><strong>One-time codes</strong> (SMS, email, authenticator app TOTP
+codes) add a second factor, which stops credential stuffing. But they’re
+still something the user reads and types, so a phishing page can simply
+ask for the code too and relay it to the real site in real time.
+Off-the-shelf “adversary in the middle” phishing kits do exactly this,
+proxying the whole login and stealing the session cookie afterward. SMS
+adds its own weaknesses, like SIM-swap attacks.</p>
+<p><strong>Push approvals</strong> (“Is this you signing in? Yes / No”)
+are easy to use but vulnerable to <strong>MFA fatigue</strong>:
+attackers trigger prompts repeatedly until a tired user taps yes. Uber’s
+2022 breach reportedly involved exactly this, combined with social
+engineering over chat.</p>
+<p>The common thread: in every case, the secret or approval is something
+<strong>the user can be tricked into giving to the wrong party</strong>.
+Fixing that requires taking the user’s judgment out of the loop for the
+one question they’re worst at answering: “Is this really the site I
+think it is?”</p>
+<h2 id="the-core-idea-public-keys-bound-to-origins">2. The core idea:
+public keys bound to origins</h2>
+<p>WebAuthn (Web Authentication) replaces shared secrets with
+<strong>public-key cryptography</strong>:</p>
+<ul>
+<li>When a user registers, their device (the
+<strong>authenticator</strong>) generates a new key pair just for that
+site. The <strong>private key</strong> stays on the authenticator. The
+<strong>public key</strong> goes to the site, which stores it.</li>
+<li>To sign in, the site sends a random <strong>challenge</strong>. The
+authenticator signs it with the private key, and the site verifies the
+signature with the stored public key.</li>
+</ul>
+<p>That alone fixes the server-side problems. The server stores only
+public keys, so a database breach leaks nothing an attacker can log in
+with. Each site gets a different key pair, so there’s nothing to reuse
+across sites. And there’s no secret to guess.</p>
+<p>The phishing resistance comes from a second property: <strong>the
+browser, not the user, tells the authenticator which site is
+asking</strong>. Every key pair is scoped to a <strong>relying party
+ID</strong> (RP ID), normally the site’s domain, such as
+<code>example.com</code>. When a page calls the WebAuthn API, the
+browser checks that the page’s origin matches the RP ID, and includes
+the real origin in the data that gets signed. A phishing page at
+<code>examp1e-login.com</code> can’t ask for <code>example.com</code>’s
+credential, because the browser won’t allow it, and the authenticator
+has no credential for the phishing domain. Even if the user is
+completely fooled by the page, there’s nothing they can hand over.</p>
+<p>That is the fundamental shift. Passwords and codes rely on the user
+to recognize the right site. WebAuthn relies on the browser, which
+checks the actual origin and never gets fooled by a lookalike
+domain.</p>
+<h2 id="the-ceremonies">3. The ceremonies</h2>
+<p>WebAuthn calls its two flows <strong>ceremonies</strong>, since they
+involve the user as well as machines.</p>
+<h3 id="registration">Registration</h3>
+<ol type="1">
+<li>The server creates options: a random challenge, the RP ID and name,
+a user handle (an opaque, stable user ID, not an email address), the
+algorithms it accepts (for example ES256 and RS256), and preferences
+such as whether to create a discoverable credential and whether to
+require user verification.</li>
+<li>The page calls
+<code>navigator.credentials.create({ publicKey: options })</code>.</li>
+<li>The browser checks the RP ID against the page’s origin and asks the
+authenticator to create a credential. The authenticator asks the user to
+verify, with a fingerprint, face, or device PIN.</li>
+<li>The authenticator generates a key pair and returns the
+<strong>credential ID</strong>, the <strong>public key</strong>, and
+optionally an <strong>attestation</strong> statement (section 6), all
+wrapped with <code>clientDataJSON</code>, which records the challenge,
+the origin and the ceremony type.</li>
+<li>The server checks that the challenge matches what it issued, that
+the origin is its own, and that the RP ID hash in the authenticator data
+matches, and then stores the credential ID and public key against the
+user account.</li>
+</ol>
+<h3 id="authentication">Authentication</h3>
+<figure class="diagram"><svg viewBox="0 0 760 370" role="img" aria-label="Passkey sign-in: the server sends a challenge, the authenticator signs it with a key scoped to the site, the server verifies with the stored public key" font-size="13"><defs><marker id="wa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Signing in with a passkey</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">The private key never leaves the authenticator; the browser ties every signature to the real origin.</text><rect x="15" y="66" width="190" height="34" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="110" y="88" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Authenticator</text><line x1="110" y1="100" x2="110" y2="336" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4"></line><rect x="285" y="66" width="190" height="34" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="380" y="88" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Browser</text><line x1="380" y1="100" x2="380" y2="336" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4"></line><rect x="555" y="66" width="190" height="34" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="650" y="88" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Server (relying party)</text><line x1="650" y1="100" x2="650" y2="336" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4"></line><line x1="650" y1="132" x2="384" y2="132" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#wa)"></line><text x="388" y="124" font-size="11.5" fill="var(--cds-text-primary)">1. random challenge, rpId</text><line x1="380" y1="172" x2="114" y2="172" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#wa)"></line><text x="118" y="164" font-size="11.5" fill="var(--cds-text-primary)">2. challenge, origin, rpId</text><text x="118" y="200" font-size="11.5" fill="var(--cds-text-primary)">3. user verifies (face, finger, PIN)</text><text x="118" y="216" font-size="11.5" fill="var(--cds-text-primary)">and signs with this site's key</text><line x1="110" y1="254" x2="376" y2="254" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#wa)"></line><text x="118" y="246" font-size="11.5" fill="var(--cds-text-primary)">4. signature + credential ID</text><line x1="380" y1="294" x2="646" y2="294" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#wa)"></line><text x="388" y="286" font-size="11.5" fill="var(--cds-text-primary)">5. assertion + clientDataJSON</text><text x="640" y="318" font-size="11.5" fill="var(--cds-text-primary)" text-anchor="end">6. check origin, challenge and</text><text x="640" y="334" font-size="11.5" fill="var(--cds-text-primary)" text-anchor="end">signature using stored public key</text><text x="24" y="360" font-size="11.5" fill="var(--cds-text-secondary)">A phishing site has a different origin: no key exists for it, and its signature would fail the check.</text></svg></figure>
+<ol type="1">
+<li>The server creates a fresh random challenge (and, if it already
+knows the user, optionally a list of their credential IDs).</li>
+<li>The page calls
+<code>navigator.credentials.get({ publicKey: options })</code>.</li>
+<li>The authenticator finds a credential for this RP ID, verifies the
+user, and signs the authenticator data plus a hash of
+<code>clientDataJSON</code> (which contains the challenge and
+origin).</li>
+<li>The server looks up the public key by credential ID, verifies the
+signature, and checks the challenge, origin, RP ID hash and flags.</li>
+</ol>
+<p>Two flags in the authenticator data matter for security
+decisions:</p>
+<ul>
+<li><strong>User Present (UP)</strong>: someone interacted with the
+authenticator, such as a touch.</li>
+<li><strong>User Verified (UV)</strong>: the authenticator verified
+<em>who</em> that someone is, with biometrics or a PIN. With UV, a
+single passkey is effectively <strong>multi-factor</strong>: something
+you have (the device holding the key) plus something you are or know
+(the biometric or PIN that unlocks it). That’s why passkeys can replace
+both the password and the second factor.</li>
+</ul>
+<p>Authenticators also return a <strong>signature counter</strong> that
+increases with use, which can help detect cloned keys. Synced passkeys
+(next section) typically report zero, so servers shouldn’t rely on
+it.</p>
+<h3 id="libraries-do-the-heavy-lifting">Libraries do the heavy
+lifting</h3>
+<p>The server side involves parsing CBOR, COSE keys and several
+attestation formats. Don’t write this by hand. Use a maintained library:
+SimpleWebAuthn (TypeScript), <code>py_webauthn</code> (Python),
+<code>webauthn4j</code> or Yubico’s <code>java-webauthn-server</code>
+(Java), <code>go-webauthn</code> (Go), <code>webauthn-rs</code> (Rust).
+They handle the verification steps the spec requires, which are easy to
+get subtly wrong.</p>
+<h2 id="from-security-keys-to-passkeys">4. From security keys to
+passkeys</h2>
+<p>WebAuthn became a W3C Recommendation in March 2019 (Level 1),
+followed by Level 2 in 2021. W3C has since advanced Level 3, which adds
+features that matter for passkeys, such as hints and better support for
+related origins. Together with the FIDO Alliance’s <strong>CTAP</strong>
+protocol (how browsers talk to external authenticators over USB, NFC or
+Bluetooth), WebAuthn makes up <strong>FIDO2</strong>.</p>
+<p>In the early years, WebAuthn was mostly used with <strong>hardware
+security keys</strong> such as YubiKeys, typically as a second factor.
+Google reported in 2018 that after requiring security keys for its
+employees, it had no confirmed account takeovers via phishing. But
+security keys have a usability problem: lose the key and you lose the
+credential, so users need backups, and few consumers will buy and manage
+two keys.</p>
+<p><strong>Passkeys</strong> are the consumer-friendly version. In May
+2022, Apple, Google and Microsoft jointly committed to support passkeys,
+and each shipped them over the following year. A passkey is simply a
+WebAuthn credential that’s:</p>
+<ul>
+<li><strong>Discoverable</strong> (also called a resident key): stored
+on the authenticator together with the user handle, so the user doesn’t
+need to type a username first. The site can call <code>get()</code>
+without listing credential IDs, and the authenticator offers the
+matching accounts.</li>
+<li><strong>Usually synced</strong>: backed up and synchronized across
+the user’s devices by their platform or password manager, such as iCloud
+Keychain, Google Password Manager, or third-party managers like
+1Password and Bitwarden. Lose your phone, sign in on the new one, and
+your passkeys come with you.</li>
+</ul>
+<p>“Passkey” is now used for both synced credentials and
+<strong>device-bound</strong> ones (like those on a hardware security
+key), but the distinction matters for some decisions.</p>
+<h3 id="synced-versus-device-bound">Synced versus device-bound</h3>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th></th>
+<th>Synced passkeys</th>
+<th>Device-bound passkeys</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Where the key lives</td>
+<td>Encrypted in a cloud keychain, on all the user’s devices</td>
+<td>On one device or security key only</td>
+</tr>
+<tr class="even">
+<td>Survives device loss</td>
+<td>Yes</td>
+<td>No, so you need backups</td>
+</tr>
+<tr class="odd">
+<td>Phishing-resistant</td>
+<td>Yes</td>
+<td>Yes</td>
+</tr>
+<tr class="even">
+<td>Security depends on</td>
+<td>The sync provider’s account security and end-to-end encryption</td>
+<td>Physical possession of the device</td>
+</tr>
+<tr class="odd">
+<td>Attestation</td>
+<td>Usually none</td>
+<td>Often available</td>
+</tr>
+<tr class="even">
+<td>Best for</td>
+<td>Consumer accounts</td>
+<td>High-assurance workforce and admin access</td>
+</tr>
+</tbody>
+</table>
+<p>The authenticator data includes <strong>backup eligibility
+(BE)</strong> and <strong>backup state (BS)</strong> flags, so a server
+can tell whether a credential is a synced passkey. Some high-security
+applications require device-bound credentials for privileged accounts
+and accept synced passkeys elsewhere.</p>
+<p>The trade-off with synced passkeys is real but usually favorable. The
+private key is no longer confined to one piece of hardware, so the
+security of the sync account (say, the user’s Apple or Google account)
+matters. In return, account recovery is far easier, which removes the
+biggest reason people fall back to weaker methods. For nearly all
+consumer accounts, a synced passkey is dramatically better than a
+password plus SMS code.</p>
+<h2 id="signing-in-across-devices">5. Signing in across devices</h2>
+<p>What if your passkey is on your phone but you’re signing in on a
+borrowed laptop? WebAuthn’s <strong>hybrid transport</strong> (formerly
+caBLE) handles this. The laptop’s browser shows a QR code. You scan it
+with your phone, which uses the QR data plus a <strong>Bluetooth Low
+Energy proximity check</strong> to confirm it’s physically near the
+laptop, and then completes the ceremony through an encrypted tunnel
+relayed over the internet. The phone signs; the laptop never sees the
+private key.</p>
+<p>The Bluetooth check is what keeps this phishing-resistant: an
+attacker can’t send you a QR code from across the world and have your
+phone sign in for them, because your phone has to detect the laptop
+nearby. After a hybrid sign-in, many sites offer to create a new passkey
+on the laptop itself so next time is direct.</p>
+<h2 id="attestation-do-you-need-to-know-which-authenticator-it-is">6.
+Attestation: do you need to know which authenticator it is?</h2>
+<p>During registration, an authenticator can include an
+<strong>attestation statement</strong>: a signature by a key embedded by
+the manufacturer, which proves the credential was created by, say, a
+particular model of YubiKey. Servers can check it against the FIDO
+Metadata Service to learn the authenticator’s certification level.</p>
+<p>For consumer sites, the usual advice is to <strong>not require
+attestation</strong> (request <code>attestation: "none"</code>). Synced
+passkey providers generally don’t provide it, requiring it would block
+most users, and it adds privacy concerns. Attestation matters in
+regulated or enterprise settings where policy says “only these approved
+hardware keys may be used for admin accounts.” There, you request
+attestation and enforce an allowlist.</p>
+<h2 id="the-user-experience-is-the-hard-part">7. The user experience is
+the hard part</h2>
+<p>The cryptography is solved. Adoption depends on UX, and a few
+patterns have emerged.</p>
+<p><strong>Autofill (conditional UI).</strong> Instead of a separate
+“Sign in with a passkey” button, the site calls
+<code>navigator.credentials.get()</code> with
+<code>mediation: "conditional"</code> when the login page loads, and
+adds <code>autocomplete="username webauthn"</code> to the username
+field. The browser then shows available passkeys in the normal autofill
+dropdown alongside saved passwords. Users who have a passkey pick it;
+others type as usual. It makes passkeys feel like the familiar autofill
+rather than a new concept.</p>
+<p><strong>Offer creation at the right moment.</strong> Prompt users to
+create a passkey right after a successful sign-in, after a password
+reset, or in account security settings, not in the middle of checkout.
+Newer platform features let a password manager automatically upgrade an
+existing password account to a passkey when the user signs in, which
+removes the prompt entirely for some users.</p>
+<p><strong>Name things clearly.</strong> Show users which passkeys they
+have (“iCloud Keychain, created Oct 3”), using the authenticator’s
+AAGUID (an identifier for the authenticator type) to display a provider
+name and icon, and let them delete ones they no longer use.</p>
+<p><strong>Keep the user handle opaque.</strong> The user handle is
+stored on the authenticator and returned on sign-in. Use a random ID,
+not an email address, since it may be visible to the authenticator and
+shouldn’t leak personal data.</p>
+<p>Large deployments have reported encouraging results. Google, for
+example, has published that passkey sign-ins succeed more often and
+faster than passwords, and companies like Amazon, PayPal and others have
+reported similar improvements in their own announcements. Results vary
+by product, so measure your own success and fallback rates.</p>
+<h2 id="account-recovery-is-where-security-leaks-back-out">8. Account
+recovery is where security leaks back out</h2>
+<p>The strongest login method is only as strong as the weakest way to
+get into the account. If a user who “lost their passkey” can recover the
+account with an SMS code or a security question, an attacker can too,
+and phishing resistance disappears.</p>
+<p>Recovery design is a policy choice with no perfect answer:</p>
+<ul>
+<li><strong>Encourage multiple passkeys</strong>, for example a synced
+passkey plus a second one on a different platform or a security key.
+Synced passkeys already survive device loss, which handles most
+cases.</li>
+<li><strong>Treat recovery as a high-risk event</strong>: send
+notifications to all known channels, add delays before sensitive changes
+take effect, and require stronger proof for high-value accounts.</li>
+<li><strong>Be honest about fallbacks.</strong> Many consumer services
+keep a password or email-link fallback during the transition. That’s
+reasonable, but understand it means accounts are only as
+phishing-resistant as the fallback. For high-risk users, offer an option
+to disable weaker methods entirely (Google’s Advanced Protection Program
+works this way).</li>
+<li><strong>For workforce accounts</strong>, use the identity provider’s
+verified onboarding and recovery processes, ideally in person or with a
+manager’s verification, and issue device-bound keys for privileged
+roles.</li>
+</ul>
+<h2 id="portability-and-lock-in">9. Portability and lock-in</h2>
+<p>An early worry about synced passkeys was lock-in: if your passkeys
+live in Apple’s keychain, can you move them to Google’s or to a
+third-party manager? In October 2024, the FIDO Alliance published drafts
+of the <strong>Credential Exchange Protocol (CXP)</strong> and
+<strong>Credential Exchange Format (CXF)</strong>, which define a secure
+way to move passkeys and other credentials between providers, encrypted
+end to end during transfer, with several major password managers
+participating. Support has since started rolling out in some providers.
+It’s an important piece for long-term trust, since users shouldn’t have
+to choose between security and the freedom to switch tools.</p>
+<p>Separately, platforms now let third-party password managers act as
+passkey providers on iOS, macOS, Android and Windows, so users aren’t
+forced into the platform’s own keychain in the first place.</p>
+<h2 id="rolling-out-passkeys-a-practical-plan">10. Rolling out passkeys:
+a practical plan</h2>
+<p>For a typical web product:</p>
+<ol type="1">
+<li><strong>Add passkeys alongside passwords</strong>, not instead of
+them, at first. Store multiple credentials per user.</li>
+<li><strong>Use a maintained library</strong> and follow its
+verification steps: challenge, origin, RP ID hash, UV flag,
+signature.</li>
+<li><strong>Choose the RP ID carefully.</strong> It’s usually your
+registrable domain (<code>example.com</code>) so credentials work across
+subdomains. Changing it later invalidates existing passkeys. If you need
+to share credentials across different domains you own, look at related
+origin requests (a Level 3 feature) rather than working around it.</li>
+<li><strong>Require user verification</strong>
+(<code>userVerification: "required"</code>) if you want passkeys to
+count as multi-factor.</li>
+<li><strong>Turn on conditional UI</strong> on your login page.</li>
+<li><strong>Prompt for creation</strong> after sign-ins and recoveries,
+and support platform auto-upgrade where available.</li>
+<li><strong>Build a credential management page</strong>: list, name and
+delete passkeys.</li>
+<li><strong>Redesign recovery</strong> so it doesn’t silently undo the
+security gain.</li>
+<li><strong>Measure</strong>: passkey creation rate, sign-in success
+rate, time to sign in, fallback rate, and account takeover rate compared
+with password users.</li>
+<li><strong>Over time, nudge toward passwordless</strong>: let users
+remove their password, and for high-risk or admin accounts, require
+phishing-resistant authentication.</li>
+</ol>
+<p>For <strong>APIs and services</strong>, passkeys aren’t directly
+relevant: machines should authenticate with keys, mTLS or workload
+identity, as the Oct 26 secrets and Oct 28 OAuth readings describe. But
+passkeys fit well into OAuth and OIDC flows: the user signs in to the
+identity provider with a passkey, and the rest of the token machinery
+stays the same. That’s how many organizations adopt them, by enabling
+passkeys at their identity provider (Okta, Entra ID, Google Workspace
+and others support them) and getting phishing-resistant login for every
+app behind it.</p>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Passwords and one-time codes fail because users can be tricked into
+giving them to the wrong site.</li>
+<li>WebAuthn uses a separate key pair per site; the server stores only
+public keys, so breaches and reuse stop mattering.</li>
+<li>Phishing resistance comes from the browser binding every credential
+and signature to the real origin, not from the user’s judgment.</li>
+<li>With user verification, a passkey combines possession and biometrics
+or a PIN, so it can replace both password and second factor.</li>
+<li>Synced passkeys survive device loss and suit consumers; device-bound
+keys with attestation suit high-assurance access.</li>
+<li>Hybrid sign-in uses a QR code plus a Bluetooth proximity check,
+which keeps cross-device login phishing-resistant.</li>
+<li>UX (autofill, timely prompts) drives adoption, and account recovery
+decides whether the security gain survives.</li>
+<li>The FIDO Credential Exchange specs address portability between
+passkey providers.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Explain to a non-technical colleague why a perfect fake login page
+can’t steal a passkey, but can steal a password plus an authenticator
+app code.</li>
+<li>Your product’s account recovery uses an email link. After adding
+passkeys, how much phishing resistance have you actually gained, and
+what would you change?</li>
+<li>Would you accept synced passkeys for an internal admin console? What
+would make you require device-bound keys instead?</li>
+<li>Why should the user handle be a random ID rather than the user’s
+email address?</li>
+<li>What would happen to your users’ passkeys if you changed your RP ID
+from <code>app.example.com</code> to <code>example.com</code>? How would
+you plan that migration?</li>
+<li>Passkeys move trust to the sync provider’s account. Is that better
+or worse than today’s situation, where email accounts are already the
+recovery path for most services?</li>
+<li>Which metrics would tell you that a passkey rollout is working, and
+which would warn you it’s being bypassed?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>W3C, “Web Authentication: An API for accessing Public Key
+Credentials,” Level 1 (Recommendation, March 2019), Level 2 (2021) and
+Level 3, https://www.w3.org/TR/webauthn/</li>
+<li>Reports on the W3C advancing WebAuthn Level 3 (2026), for example
+https://ssojet.com/blog/webauthn-level-3-changes-for-passkey-implementers</li>
+<li>FIDO Alliance, “Client to Authenticator Protocol (CTAP)”
+specifications and passkeys overview,
+https://fidoalliance.org/passkeys/</li>
+<li>FIDO Alliance, Credential Exchange Protocol and Format working
+drafts (October 2024); TechTarget, “FIDO unveils new specifications to
+transfer passkeys,”
+https://www.techtarget.com/searchsecurity/news/366613642/FIDO-unveils-new-specifications-to-transfer-passkeys</li>
+<li>Apple, Google and Microsoft joint announcement on expanding FIDO
+sign-in support (May 2022).</li>
+<li>passkeys.dev (W3C WebAuthn Community Adoption Group and FIDO),
+implementation guidance on conditional UI, AAGUIDs and device support,
+https://passkeys.dev</li>
+<li>web.dev and Google Identity documentation on passkeys and form
+autofill, https://web.dev/articles/passkey-form-autofill</li>
+<li>Yubico developer documentation on WebAuthn, attestation and user
+verification, https://developers.yubico.com/WebAuthn/</li>
+<li>Brian Krebs, “Google: Security Keys Neutralized Employee Phishing,”
+KrebsOnSecurity, July 2018.</li>
+<li>Verizon, Data Breach Investigations Report (annual).</li>
+<li>SimpleWebAuthn documentation, https://simplewebauthn.dev</li>
+</ul>
+<p>The WebAuthn Level 3 status and the FIDO credential exchange specs
+were found in searches on Nov 4, 2026. Other details come from the
+specifications and vendor documentation as I know them. Adoption figures
+vary by company and I haven’t quoted specific numbers, so check the
+companies’ own posts for those.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/security.html">Security</a><a class="chip" href="/topics/apis.html">APIs</a></div>
+          <div class="daynav"><a href="/reading/pingora-proxy.html"><div class="kicker">← Older · Nov 3</div><div class="t">Why Cloudflare replaced NGINX with Pingora</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
