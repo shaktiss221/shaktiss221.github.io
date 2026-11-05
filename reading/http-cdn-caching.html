@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HTTP and CDN caching: Cache-Control, keys, purges and poisoning · The Daily Commit</title>
+  <meta name="description" content="How HTTP caching actually decides what to store and serve, covering freshness and validation, Cache-Control directives, stale-while-revalidate, cache keys and Vary, CDN tiers, targeted headers, purging with surrogate keys, and the cache poisoning and deception attacks that come from getting keys wrong.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>HTTP and CDN caching: Cache-Control, keys, purges and poisoning</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>15 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#the-model-shared-and-private-caches">The model: shared and
+private caches</a><a href="#freshness">Freshness</a><a href="#validation-cheap-re-checks">Validation: cheap re-checks</a><a href="#cache-control-directive-by-directive">Cache-Control,
+directive by directive</a><a href="#cache-keys-and-vary">Cache keys and Vary</a><a href="#cdn-architecture">CDN architecture</a><a href="#invalidation-purges-and-surrogate-keys">Invalidation: purges
+and surrogate keys</a><a href="#when-caching-becomes-a-security-bug">When caching becomes a
+security bug</a><a href="#a-caching-checklist">A caching checklist</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 15 min left</div>
+      </nav>
+      <article class="article" data-slug="http-cdn-caching" data-minutes="15">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/caching.html">Caching</a> · November 5, 2026 · 15 min</div>
+        <h1>HTTP and CDN caching: Cache-Control, keys, purges and poisoning</h1>
+        <p class="dek">How HTTP caching actually decides what to store and serve, covering freshness and validation, Cache-Control directives, stale-while-revalidate, cache keys and Vary, CDN tiers, targeted headers, purging with surrogate keys, and the cache poisoning and deception attacks that come from getting keys wrong.</p>
+<p>The fastest request is one that never reaches your servers. HTTP
+caching, in browsers, reverse proxies and CDNs, is the most effective
+performance and cost tool most web systems have, and it’s also one of
+the most misunderstood. A single header can decide whether a page is
+served from a cache a few kilometers from the user or from your origin
+on another continent, whether a deploy shows up instantly or an hour
+later, and whether one user’s private data ends up served to everyone.
+The Oct 24 reading covered application caches such as memcache. This one
+covers the HTTP layer: the rules in RFC 9111, the directives that
+matter, how CDNs extend them, and the security bugs that come from
+getting cache keys wrong.</p>
+<h2 id="the-model-shared-and-private-caches">1. The model: shared and
+private caches</h2>
+<p>HTTP caching, standardized today in <strong>RFC 9111</strong> (June
+2022, replacing the caching part of RFC 7234), distinguishes two kinds
+of cache:</p>
+<ul>
+<li><strong>Private caches</strong> belong to one user, most importantly
+the browser’s HTTP cache. They can store personalized responses.</li>
+<li><strong>Shared caches</strong> serve many users: CDNs, reverse
+proxies like Varnish or NGINX, corporate proxies. They must never store
+a response meant for one user and serve it to another.</li>
+</ul>
+<p>A cache stores a response under a <strong>cache key</strong>, by
+default the request method and URL. When a later request has the same
+key, the cache can answer from storage, if the stored response is
+<strong>fresh</strong>, or after checking with the origin that it’s
+still valid. Nearly everything in HTTP caching is about those two
+questions: how long is a response fresh, and how do you cheaply check it
+once it isn’t?</p>
+<h2 id="freshness">2. Freshness</h2>
+<p>A stored response is fresh for its <strong>freshness
+lifetime</strong>, and its <strong>age</strong> is how long it has been
+since the origin generated it. While age is below lifetime, a cache can
+serve the response without contacting the origin at all.</p>
+<p>The lifetime comes from, in priority order:</p>
+<ol type="1">
+<li><code>Cache-Control: s-maxage=N</code> (shared caches only).</li>
+<li><code>Cache-Control: max-age=N</code>.</li>
+<li>The <code>Expires</code> header (an absolute date; older and
+clock-dependent, so prefer <code>max-age</code>).</li>
+<li>A <strong>heuristic</strong>, if none of the above is present and
+the status is cacheable by default. Caches commonly use 10% of the time
+since <code>Last-Modified</code>. This is a frequent surprise: a
+response with a <code>Last-Modified</code> header and no
+<code>Cache-Control</code> can be cached for hours, simply because the
+file is old.</li>
+</ol>
+<p>The <code>Age</code> response header tells downstream caches how long
+the response has already spent in caches upstream, so a response cached
+for 50 seconds at a CDN arrives at the browser with
+<code>Age: 50</code>, and the browser knows it has only
+<code>max-age</code> minus 50 seconds of freshness left.</p>
+<h2 id="validation-cheap-re-checks">3. Validation: cheap re-checks</h2>
+<p>When a response goes stale, a cache doesn’t have to download it
+again. It can <strong>revalidate</strong> with a conditional
+request:</p>
+<ul>
+<li>If the response had an <code>ETag</code> (an opaque version
+identifier), the cache sends
+<code>If-None-Match: "&lt;etag&gt;"</code>.</li>
+<li>If it had a <code>Last-Modified</code> date, it sends
+<code>If-Modified-Since: &lt;date&gt;</code>.</li>
+</ul>
+<p>If nothing changed, the origin replies
+<strong><code>304 Not Modified</code></strong> with headers but no body,
+and the cache refreshes its stored copy’s freshness. For a large page or
+asset, that’s the difference between megabytes and a few hundred bytes,
+and the origin often doesn’t have to re-render anything if it can
+compute the ETag cheaply (for example from a version number or content
+hash).</p>
+<p>ETags come in two strengths. A <strong>strong</strong> ETag means
+byte-for-byte identical. A <strong>weak</strong> ETag
+(<code>W/"abc"</code>) means semantically equivalent, so it works for
+things like content that varies only in insignificant whitespace or
+compression. The Oct 26 API design reading showed ETags used with
+<code>If-Match</code> for concurrency control. That’s the same header,
+used for writes instead of reads.</p>
+<h2 id="cache-control-directive-by-directive">4. Cache-Control,
+directive by directive</h2>
+<p><code>Cache-Control</code> is where most caching decisions live. The
+response directives that matter most:</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Directive</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>max-age=N</code></td>
+<td>Fresh for N seconds in any cache</td>
+</tr>
+<tr class="even">
+<td><code>s-maxage=N</code></td>
+<td>Overrides <code>max-age</code> for shared caches only</td>
+</tr>
+<tr class="odd">
+<td><code>public</code></td>
+<td>May be stored by shared caches even if normally not (for example,
+with <code>Authorization</code>)</td>
+</tr>
+<tr class="even">
+<td><code>private</code></td>
+<td>Only the user’s own (browser) cache may store it</td>
+</tr>
+<tr class="odd">
+<td><code>no-cache</code></td>
+<td>May be stored, but <strong>must be revalidated</strong> before every
+use</td>
+</tr>
+<tr class="even">
+<td><code>no-store</code></td>
+<td>Must not be stored anywhere</td>
+</tr>
+<tr class="odd">
+<td><code>must-revalidate</code></td>
+<td>Once stale, never serve without successful revalidation</td>
+</tr>
+<tr class="even">
+<td><code>immutable</code></td>
+<td>Won’t change while fresh, so don’t revalidate even on reload (RFC
+8246)</td>
+</tr>
+<tr class="odd">
+<td><code>stale-while-revalidate=N</code></td>
+<td>May serve stale for N seconds while refreshing in the background
+(RFC 5861)</td>
+</tr>
+<tr class="even">
+<td><code>stale-if-error=N</code></td>
+<td>May serve stale for N seconds if the origin errors (RFC 5861)</td>
+</tr>
+</tbody>
+</table>
+<p>The single most common mistake is reading <code>no-cache</code> as
+“don’t cache.” It actually means “cache, but check with the origin every
+time,” which is often what you want for HTML. If something truly must
+not be stored, such as a page with bank account details, use
+<code>no-store</code>.</p>
+<h3 id="patterns-that-work">Patterns that work</h3>
+<p><strong>Fingerprinted static assets</strong>
+(<code>app.3f9a2c.js</code>, where the hash changes whenever the content
+does):</p>
+<pre><code>Cache-Control: public, max-age=31536000, immutable</code></pre>
+<p>The URL changes when the content changes, so the old URL can be
+cached for a year. This is the highest-leverage caching pattern on the
+web, and build tools produce fingerprinted filenames by default.</p>
+<p><strong>HTML pages</strong> that reference those assets:</p>
+<pre><code>Cache-Control: no-cache
+ETag: &quot;v42&quot;</code></pre>
+<p>Every load checks with the origin, but usually gets a cheap
+<code>304</code>. Deploys show up immediately, because the HTML is
+always validated and points at the new asset URLs.</p>
+<p><strong>Shared content that can be a bit stale</strong>, such as a
+product page or API response for anonymous users:</p>
+<pre><code>Cache-Control: public, max-age=60, stale-while-revalidate=30, stale-if-error=600</code></pre>
+<figure class="diagram"><svg viewBox="0 0 760 280" role="img" aria-label="Lifetime of a cached response: fresh, stale-while-revalidate, stale-if-error" font-size="13"><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">One cached response over time</text><text x="24" y="50" font-size="12" fill="var(--cds-text-secondary)" font-family="monospace">Cache-Control: max-age=60, stale-while-revalidate=30, stale-if-error=600</text><rect x="40" y="80" width="240" height="36" rx="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.18" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="160.0" y="103" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">fresh</text><rect x="280" y="80" width="200" height="36" rx="5" fill="var(--cds-chart-categorical-2)" fill-opacity="0.18" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="380.0" y="103" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">stale-while-revalidate</text><rect x="480" y="80" width="240" height="36" rx="5" fill="var(--cds-chart-categorical-3)" fill-opacity="0.18" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="600.0" y="103" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">stale-if-error window</text><text x="40" y="134" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">0 s</text><text x="280" y="134" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">60 s</text><text x="480" y="134" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">90 s</text><text x="720" y="134" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">660 s</text><rect x="40" y="157" width="16" height="16" rx="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.18" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="66" y="170" font-size="12" fill="var(--cds-text-primary)">Serve from cache. No request to the origin.</text><rect x="40" y="185" width="16" height="16" rx="5" fill="var(--cds-chart-categorical-2)" fill-opacity="0.18" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="66" y="198" font-size="12" fill="var(--cds-text-primary)">Serve the stale copy now; refresh it in the background.</text><rect x="40" y="213" width="16" height="16" rx="5" fill="var(--cds-chart-categorical-3)" fill-opacity="0.18" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="66" y="226" font-size="12" fill="var(--cds-text-primary)">Must revalidate before serving; if the origin errors, the stale copy may still be served.</text><text x="24" y="268" font-size="11.5" fill="var(--cds-text-secondary)">Revalidation can be cheap: If-None-Match with the ETag returns 304 Not Modified and no body.</text></svg></figure>
+<p><strong>Personalized content</strong>:</p>
+<pre><code>Cache-Control: private, no-cache</code></pre>
+<p>or <code>no-store</code> if it’s sensitive.</p>
+<h3
+id="stale-while-revalidate-and-stale-if-error">stale-while-revalidate
+and stale-if-error</h3>
+<p>These two directives, from RFC 5861, are among the most valuable and
+underused tools in HTTP caching.</p>
+<p><strong><code>stale-while-revalidate</code></strong> lets a cache
+serve a slightly stale response immediately and refresh it in the
+background. Users never wait for the origin on a popular resource, and
+the origin sees one refresh request instead of a burst. It’s the HTTP
+equivalent of the stampede protection discussed in the Oct 24 caching
+reading.</p>
+<p><strong><code>stale-if-error</code></strong> lets a cache keep
+serving the last good response if the origin returns errors or is
+unreachable. A CDN with a ten-minute <code>stale-if-error</code> keeps a
+site’s cached pages up through a short origin outage. Many CDNs offer an
+equivalent “serve stale” setting even without the header.</p>
+<h2 id="cache-keys-and-vary">5. Cache keys and Vary</h2>
+<p>By default, the key is the method plus URL. But responses often
+depend on request headers too: the <code>Accept-Encoding</code> (gzip,
+Brotli or none), <code>Accept-Language</code>, or a cookie. The
+<strong><code>Vary</code></strong> response header tells caches which
+request headers were used to choose the response, so they become part of
+the key:</p>
+<pre><code>Vary: Accept-Encoding</code></pre>
+<p>Now a gzip response and a Brotli response for the same URL are stored
+separately, and a client that doesn’t support Brotli never gets it.</p>
+<p><code>Vary</code> is powerful and easy to misuse:</p>
+<ul>
+<li><strong><code>Vary: User-Agent</code></strong> effectively disables
+shared caching, since there are thousands of distinct user agents. If
+you need device-specific responses, normalize first (CDNs can compute a
+<code>device-type</code> value from the user agent) and vary on
+that.</li>
+<li><strong><code>Vary: Cookie</code></strong> splits the cache per
+session, which for logged-in traffic means no sharing at all. Usually
+better to strip irrelevant cookies at the edge, or not cache
+personalized pages in shared caches.</li>
+<li><strong><code>Vary: *</code></strong> means the response can’t be
+reused at all.</li>
+<li><strong>Forgetting <code>Vary</code></strong> is worse than
+overusing it. If a response depends on a header that isn’t in the key, a
+cache may serve one user’s variant to another: the wrong language, the
+wrong format, or someone else’s data. Section 9 shows how attackers
+exploit this.</li>
+</ul>
+<p>CDNs also let you customize the key directly: ignore certain query
+parameters (marketing <code>utm_*</code> tags shouldn’t fragment the
+cache), sort query parameters, or include a header or cookie value. Key
+design is one of the most important caching decisions, and it’s mostly
+done in CDN configuration.</p>
+<h2 id="cdn-architecture">6. CDN architecture</h2>
+<p>A <strong>CDN</strong> is a large, geographically distributed shared
+cache. Requests reach a nearby <strong>edge</strong> location, typically
+via anycast or DNS, as described in the Oct 30 load-balancing reading.
+If the edge has a fresh copy, it answers. If not, it fetches from the
+origin, stores the response, and serves it.</p>
+<p>A few architectural features matter for how you use one.</p>
+<p><strong>Tiered caching (origin shield).</strong> With hundreds of
+edge locations, a cache miss at each edge means hundreds of requests to
+the origin for the same object. Tiered caching puts a few regional or
+central cache layers between the edges and the origin: edges miss to an
+upper tier, and only the upper tier talks to the origin. Hit ratio at
+the origin goes up dramatically, and origin load goes down. Cloudflare’s
+Tiered Cache, Fastly’s shielding and CloudFront’s Regional Edge Caches
+and Origin Shield all work this way.</p>
+<p><strong>Request collapsing (coalescing).</strong> If a thousand users
+request the same uncached object at once, a good CDN sends one request
+to the origin and makes the other 999 wait for it, instead of forwarding
+all of them. This protects origins from stampedes on popular new
+content. Varnish and most CDNs do this by default for cacheable
+responses, but it requires the response to be cacheable. A popular
+uncacheable response gets no protection.</p>
+<p><strong>Hit ratio isn’t one number.</strong> A CDN may report a 95%
+hit ratio by requests while the origin still serves most of the bytes,
+because large files miss more often. Or the edge hit ratio is high but
+the origin sees a lot of revalidation requests. Look at hit ratio by
+requests and by bytes, at the edge and at the origin.</p>
+<p><strong>Long tail.</strong> CDN caches are large but finite, and they
+evict unpopular content (usually with some form of LRU). An object
+requested once a day may be evicted between requests at a small edge
+location, even with a long <code>max-age</code>. Tiered caching helps
+here too.</p>
+<h2
+id="targeted-headers-telling-the-cdn-and-the-browser-different-things">7.
+Targeted headers: telling the CDN and the browser different things</h2>
+<p>You often want a CDN to cache a response for a long time (because you
+can purge it instantly) while browsers cache it only briefly (because
+you can’t purge a browser). <code>s-maxage</code> helps, but it applies
+to every shared cache, including corporate proxies you don’t
+control.</p>
+<p><strong>RFC 9213</strong> (“Targeted HTTP Cache Control,” June 2022)
+adds headers that target specific caches.
+<strong><code>CDN-Cache-Control</code></strong> applies only to CDNs,
+and individual CDNs can define their own (such as
+<code>Cloudflare-CDN-Cache-Control</code>). For example:</p>
+<pre><code>Cache-Control: public, max-age=60
+CDN-Cache-Control: max-age=86400</code></pre>
+<p>Browsers cache for a minute; the CDN caches for a day; when content
+changes, you purge the CDN. Many CDNs also strip their targeted header
+before forwarding the response, so it doesn’t confuse other caches.</p>
+<p><strong>RFC 9211</strong> (“The Cache-Status HTTP Response Header
+Field,” 2022) standardizes how each cache reports what it did: hit or
+miss, why it forwarded the request, the remaining TTL. Before it, every
+CDN had its own <code>X-Cache</code> header format. Cache-Status makes
+debugging caching across layers much easier.</p>
+<h2 id="invalidation-purges-and-surrogate-keys">8. Invalidation: purges
+and surrogate keys</h2>
+<p>Phil Karlton’s line that cache invalidation is one of the two hard
+things in computer science applies fully to CDNs. Options, from simplest
+to most powerful:</p>
+<ul>
+<li><strong>Don’t invalidate; change the URL.</strong> Fingerprinted
+assets never need purging. Use this wherever you can.</li>
+<li><strong>Short TTLs.</strong> Accept up to N seconds of staleness.
+Simple and robust, combined with
+<code>stale-while-revalidate</code>.</li>
+<li><strong>Purge by URL.</strong> Tell the CDN to drop a specific URL.
+Fine for a few objects, impractical when one change affects thousands of
+pages.</li>
+<li><strong>Purge by tag (surrogate keys).</strong> The origin labels
+each response with tags in a header, such as
+<code>Surrogate-Key: product-123 category-shoes</code> (Fastly’s
+convention) or <code>Cache-Tag</code> (Cloudflare’s). When product 123
+changes, one API call purges every cached page that included it: the
+product page, category listings, search results. Fastly built much of
+its reputation on fast, tag-based purging, and it’s the key enabler for
+caching dynamic content for long periods.</li>
+<li><strong>Soft purge.</strong> Mark content stale rather than deleting
+it, so <code>stale-while-revalidate</code> and
+<code>stale-if-error</code> still apply. This avoids a sudden flood of
+misses to the origin right after a large purge.</li>
+</ul>
+<p>Combining these gives a powerful pattern for dynamic sites: cache
+pages at the CDN with long TTLs (via <code>CDN-Cache-Control</code>),
+tag every response with the entities it contains, purge by tag when data
+changes, and keep browser TTLs short. The origin renders each page
+roughly once per change instead of once per visitor.</p>
+<h2 id="when-caching-becomes-a-security-bug">9. When caching becomes a
+security bug</h2>
+<p>Shared caches serve one stored response to many users. If an attacker
+can control what gets stored, or trick the cache into storing something
+private, the cache amplifies the attack to everyone.</p>
+<h3 id="web-cache-poisoning">Web cache poisoning</h3>
+<p>James Kettle of PortSwigger popularized this class of attack with his
+2018 research “Practical Web Cache Poisoning.” The core problem is an
+<strong>unkeyed input</strong>: a part of the request that changes the
+response but isn’t part of the cache key.</p>
+<p>A classic example: an application builds absolute URLs using the
+<code>X-Forwarded-Host</code> header, so a page includes
+<code>&lt;script src="https://{X-Forwarded-Host}/app.js"&gt;</code>. The
+CDN’s cache key is just the URL. An attacker sends a request for the
+home page with <code>X-Forwarded-Host: evil.example</code>. The
+response, with a script tag pointing at the attacker’s server, gets
+cached under the normal home page key. Every visitor for the next N
+minutes receives the poisoned page and runs the attacker’s script.</p>
+<p>Kettle’s follow-up research, “Web Cache Entanglement” (2020), found
+more ways to create such mismatches: caches and applications parsing
+URLs differently, query parameters the cache ignores but the application
+uses, and fat GET requests with bodies.</p>
+<p>Defenses:</p>
+<ul>
+<li><strong>Don’t use request headers to build responses unless they’re
+in the cache key.</strong> Configure the CDN to drop or overwrite
+headers like <code>X-Forwarded-Host</code> before they reach the
+application.</li>
+<li><strong>Make keys match what the application actually uses</strong>,
+including any query parameters it reads.</li>
+<li><strong>Don’t cache error pages or redirects for long</strong> if
+they might reflect attacker input.</li>
+</ul>
+<h3 id="web-cache-deception">Web cache deception</h3>
+<p>Omer Gil described the reverse in 2017: tricking a cache into storing
+a <strong>private</strong> page. Suppose a CDN caches anything ending in
+<code>.css</code>, and the application ignores trailing path segments,
+so <code>https://bank.example/account/settings/nonexistent.css</code>
+returns the user’s settings page. An attacker sends a victim that link.
+The victim’s browser loads it with their session cookie, the application
+returns their private page, and the CDN, seeing <code>.css</code>,
+caches it publicly. The attacker then requests the same URL and gets the
+victim’s page from the cache.</p>
+<p>Defenses:</p>
+<ul>
+<li><strong>Base caching on the origin’s <code>Cache-Control</code>
+headers</strong>, not on file extensions or path patterns. Make sure
+private pages send <code>Cache-Control: private</code> or
+<code>no-store</code>.</li>
+<li><strong>Return 404 for unknown paths</strong> rather than silently
+serving a parent route.</li>
+<li><strong>Check content types</strong>: a CDN rule that caches
+<code>.css</code> should require the response to actually be
+<code>text/css</code>. Several CDNs added this kind of check after the
+research.</li>
+</ul>
+<p>The common lesson: <strong>the cache and the origin must agree on
+what a request means</strong>. Any mismatch in how they parse the URL,
+which headers matter, or what’s private is a potential
+vulnerability.</p>
+<h2 id="a-caching-checklist">10. A caching checklist</h2>
+<ol type="1">
+<li><strong>Fingerprint static assets</strong> and serve them with
+<code>max-age=31536000, immutable</code>.</li>
+<li><strong>Send <code>no-cache</code> plus an ETag for HTML</strong> so
+deploys appear immediately and revalidation is cheap.</li>
+<li><strong>Set <code>Cache-Control</code> explicitly on every
+response.</strong> Don’t rely on heuristics. Use <code>private</code> or
+<code>no-store</code> for anything user-specific.</li>
+<li><strong>Use <code>stale-while-revalidate</code> and
+<code>stale-if-error</code></strong> for shared content.</li>
+<li><strong>Design cache keys deliberately</strong>: normalize query
+strings, strip irrelevant cookies, set <code>Vary</code> correctly, and
+avoid <code>Vary: User-Agent</code>.</li>
+<li><strong>Use tiered caching and request collapsing</strong> to
+protect the origin.</li>
+<li><strong>Separate CDN and browser lifetimes</strong> with
+<code>CDN-Cache-Control</code> or <code>s-maxage</code>, and
+<strong>purge by surrogate key</strong> when data changes.</li>
+<li><strong>Audit for unkeyed inputs</strong> and path confusion; never
+let headers like <code>X-Forwarded-Host</code> reach the app
+unchecked.</li>
+<li><strong>Monitor</strong> hit ratio by requests and bytes at the edge
+and the origin, plus <code>Cache-Status</code> in debugging.</li>
+</ol>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>A cache serves a stored response while it’s fresh, then revalidates
+it cheaply with ETags and <code>304 Not Modified</code>.</li>
+<li><code>no-cache</code> means “revalidate before use,” not “don’t
+store”; <code>no-store</code> means don’t store.</li>
+<li>Fingerprinted URLs with <code>immutable</code> are the most
+effective caching pattern, and HTML should revalidate on every
+load.</li>
+<li><code>stale-while-revalidate</code> hides origin latency and
+stampedes; <code>stale-if-error</code> keeps a site up through origin
+outages.</li>
+<li>The cache key (URL plus <code>Vary</code> headers plus CDN rules)
+decides who shares a response. Too broad leaks data; too narrow wastes
+the cache.</li>
+<li>CDNs add tiered caching, request collapsing, targeted headers (RFC
+9213) and tag-based purging.</li>
+<li>Cache poisoning exploits inputs that change a response but aren’t in
+the key; cache deception tricks a cache into storing private pages. Both
+come from the cache and origin disagreeing about what a request
+means.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>A teammate set <code>Cache-Control: no-cache</code> on a page with
+account details, thinking it prevents caching. What actually happens,
+and what should it be?</li>
+<li>Your CDN reports a 92% hit ratio, but origin bandwidth hasn’t
+dropped. What might explain that, and what would you measure?</li>
+<li>You deploy a new version and some users see a broken page for an
+hour: new HTML with old JavaScript. What caching setup causes this, and
+how do you fix it?</li>
+<li>When would you choose short TTLs over surrogate-key purging, and
+vice versa?</li>
+<li>Find an unkeyed input in a typical setup: which request headers does
+your application read that your CDN doesn’t include in the cache
+key?</li>
+<li>Why does serving stale content on errors sometimes make outages
+worse instead of better?</li>
+<li>Should API responses for logged-in users ever go through a shared
+cache? Under what conditions?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>RFC 9111, “HTTP Caching” (June 2022),
+https://www.rfc-editor.org/rfc/rfc9111.html ; RFC 9110, “HTTP Semantics”
+(conditional requests).</li>
+<li>RFC 5861, “HTTP Cache-Control Extensions for Stale Content” (2010);
+RFC 8246, “HTTP Immutable Responses” (2017).</li>
+<li>RFC 9213, “Targeted HTTP Cache Control” (June 2022),
+https://www.rfc-editor.org/rfc/rfc9213.html ; RFC 9211, “The
+Cache-Status HTTP Response Header Field” (June 2022).</li>
+<li>MDN Web Docs, “HTTP caching” and “Cache-Control,”
+https://developer.mozilla.org/en-US/docs/Web/HTTP/Caching</li>
+<li>Mark Nottingham, “Caching Tutorial for Web Authors and Webmasters,”
+https://www.mnot.net/cache_docs/</li>
+<li>James Kettle, “Practical Web Cache Poisoning,” PortSwigger Research,
+2018, https://portswigger.net/research/practical-web-cache-poisoning ;
+“Web Cache Entanglement: Novel Pathways to Poisoning,” 2020,
+https://portswigger.net/research/web-cache-entanglement</li>
+<li>Omer Gil, “Web Cache Deception Attack,” Black Hat USA 2017.</li>
+<li>Fastly documentation, “Purging” and “Surrogate keys”; Cloudflare
+documentation, “Tiered Cache” and “Purge cache by cache-tags”; Amazon
+CloudFront documentation, “Origin Shield.”</li>
+<li>Varnish Cache documentation, “Request coalescing” and grace
+mode.</li>
+</ul>
+<p>The RFC 9213 publication date was confirmed against the RFC Editor
+page on Nov 5, 2026, and the PortSwigger research pages were located the
+same day. CDN product names and features are from vendor documentation
+as I know it, so check the current docs for exact behavior.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/caching.html">Caching</a><a class="chip" href="/topics/networking.html">Networking</a></div>
+          <div class="daynav"><a href="/reading/passkeys-webauthn.html"><div class="kicker">← Older · Nov 4</div><div class="t">Passkeys and WebAuthn: logins that can&#x27;t be phished</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
