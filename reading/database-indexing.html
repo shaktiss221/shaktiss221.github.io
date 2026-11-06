@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Database indexes in practice: how queries find rows · The Daily Commit</title>
+  <meta name="description" content="How B-tree indexes really work, the left-prefix rule for composite indexes, covering and partial indexes, when the planner ignores your index and why, specialized index types (GIN, BRIN, hash), reading EXPLAIN, and the write-side cost every index adds, with Postgres as the running example.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Database indexes in practice: how queries find rows</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>15 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#why-tables-need-indexes">Why tables need indexes</a><a href="#the-b-tree">The B-tree</a><a href="#composite-indexes-and-the-left-prefix-rule">Composite indexes
+and the left-prefix rule</a><a href="#covering-indexes-and-index-only-scans">Covering indexes and
+index-only scans</a><a href="#partial-and-expression-indexes">Partial and expression
+indexes</a><a href="#how-the-planner-chooses">How the planner chooses</a><a href="#beyond-b-trees">Beyond B-trees</a><a href="#the-cost-side-every-index-taxes-writes">The cost side: every
+index taxes writes</a><a href="#patterns-from-real-systems">Patterns from real systems</a><a href="#a-workflow-for-slow-queries">A workflow for slow
+queries</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 15 min left</div>
+      </nav>
+      <article class="article" data-slug="database-indexing" data-minutes="15">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/databases.html">Databases</a> · November 6, 2026 · 15 min</div>
+        <h1>Database indexes in practice: how queries find rows</h1>
+        <p class="dek">How B-tree indexes really work, the left-prefix rule for composite indexes, covering and partial indexes, when the planner ignores your index and why, specialized index types (GIN, BRIN, hash), reading EXPLAIN, and the write-side cost every index adds, with Postgres as the running example.</p>
+<p>Most slow database queries aren’t slow because the database is slow.
+They’re slow because the database has to read far more data than the
+answer needs, and the usual fix is an index. But indexes are often added
+by guesswork: one per column, or whatever an ORM suggested, and then a
+query still does a full table scan and nobody knows why. This reading
+builds a working mental model of indexes from the data structure up: how
+a B-tree finds rows, why column order in a composite index matters so
+much, how covering and partial indexes cut work further, how the query
+planner decides whether to use an index at all, and what every index
+costs on the write side. The examples use PostgreSQL, but the ideas
+carry over to MySQL, SQL Server and most other relational databases.</p>
+<h2 id="why-tables-need-indexes">1. Why tables need indexes</h2>
+<p>A table in Postgres is a <strong>heap</strong>: rows stored in pages
+(8 KB each by default) in no particular order. Finding all orders for
+customer 42 without an index means a <strong>sequential scan</strong>:
+read every page, check every row. For a table with a hundred million
+rows, that’s gigabytes of reading to return maybe a dozen rows.</p>
+<p>An <strong>index</strong> is a separate data structure that keeps
+some columns in sorted order, with a pointer back to each row’s location
+in the heap (in Postgres, a tuple ID: page number plus position).
+Finding customer 42’s orders becomes: search the index for 42, read the
+few matching entries, then fetch just those rows. The work now depends
+on the size of the answer, not the size of the table.</p>
+<p>Markus Winand’s book and website <em>Use The Index, Luke</em> is
+still the best practical guide to this topic, and his core message
+shapes this whole reading: <strong>indexing is a developer’s
+job</strong>, because only the person writing the query knows which
+access paths the application needs.</p>
+<h2 id="the-b-tree">2. The B-tree</h2>
+<p>The default index in nearly every relational database is the
+<strong>B-tree</strong> (strictly, a B+tree). Its structure:</p>
+<ul>
+<li><strong>Leaf pages</strong> hold index entries (key plus row
+pointer) in sorted order, and each leaf links to its neighbors, forming
+a doubly linked list across the whole index.</li>
+<li><strong>Internal pages</strong> above them hold separator keys that
+say which child page covers which key range.</li>
+<li>A single <strong>root</strong> page sits on top.</li>
+</ul>
+<p>Each page holds hundreds of entries, so the tree is very shallow.
+Three or four levels index hundreds of millions of rows, and the upper
+levels are almost always in memory. Finding a key means walking from the
+root to one leaf (a few page reads), and then reading neighbors along
+the leaf chain for a range.</p>
+<p>This gives B-trees their two fundamental operations:</p>
+<ol type="1">
+<li><strong>Seek</strong>: jump directly to the first entry matching a
+value or range start. Cost: tree depth, a few pages.</li>
+<li><strong>Scan</strong>: read entries in order from there. Cost:
+proportional to the number of matching entries.</li>
+</ol>
+<p>Everything about using indexes well comes down to arranging for
+queries to need <strong>one seek and a short scan</strong>, rather than
+many seeks or a long scan.</p>
+<h3 id="the-hidden-cost-fetching-rows">The hidden cost: fetching
+rows</h3>
+<p>The index gives row pointers, but the query usually needs columns
+that aren’t in the index, so the database must also visit the heap. If
+10,000 matching rows are scattered across 10,000 different heap pages,
+that’s 10,000 random page reads, which can be slower than just scanning
+the table sequentially. This is why the planner sometimes ignores an
+index that technically matches the query (section 6), and why
+<strong>covering indexes</strong> (section 4) are so effective.</p>
+<p>Postgres softens the scattered-fetch problem with a <strong>bitmap
+scan</strong>: it first collects all matching row pointers from the
+index, sorts them by page, and then reads each needed heap page once, in
+physical order. You’ll often see <code>Bitmap Index Scan</code> feeding
+a <code>Bitmap Heap Scan</code> in query plans for medium-selectivity
+queries.</p>
+<h2 id="composite-indexes-and-the-left-prefix-rule">3. Composite indexes
+and the left-prefix rule</h2>
+<figure class="diagram"><svg viewBox="0 0 760 330" role="img" aria-label="A composite index sorted by tenant then date, and which queries can seek into it" font-size="13"><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Index on (tenant_id, created_at): entries sorted by tenant, then date</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Leaf entries in key order. Each points to a row in the table.</text><rect x="40" y="70" width="230" height="26" rx="4" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="70" y="88" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">7</text><text x="180" y="88" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">2026-10-01</text><rect x="40" y="100" width="230" height="26" rx="4" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="70" y="118" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">7</text><text x="180" y="118" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">2026-10-14</text><rect x="40" y="130" width="230" height="26" rx="4" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="70" y="148" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">7</text><text x="180" y="148" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">2026-11-02</text><rect x="40" y="160" width="230" height="26" rx="4" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="70" y="178" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">9</text><text x="180" y="178" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">2026-09-30</text><rect x="40" y="190" width="230" height="26" rx="4" fill="var(--cds-chart-categorical-2)" fill-opacity="0.2" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="70" y="208" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">9</text><text x="180" y="208" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">2026-10-20</text><rect x="40" y="220" width="230" height="26" rx="4" fill="var(--cds-chart-categorical-2)" fill-opacity="0.2" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="70" y="238" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">9</text><text x="180" y="238" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">2026-10-28</text><rect x="40" y="250" width="230" height="26" rx="4" fill="var(--cds-chart-categorical-2)" fill-opacity="0.2" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="70" y="268" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">9</text><text x="180" y="268" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">2026-11-03</text><rect x="40" y="280" width="230" height="26" rx="4" fill="none" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="70" y="298" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">12</text><text x="180" y="298" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">2026-10-05</text><line x1="100" y1="70" x2="100" y2="310" stroke="var(--cds-chart-axis)" stroke-width="0.75"></line><text x="300" y="96" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">WHERE tenant_id = 9 AND created_at >= '2026-10-15'</text><text x="300" y="114" font-size="11.5" fill="var(--cds-text-secondary)">Seek to (9, 2026-10-15), read 3 adjacent entries, stop.</text><text x="300" y="170" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">WHERE tenant_id = 9 ORDER BY created_at DESC LIMIT 2</text><text x="300" y="188" font-size="11.5" fill="var(--cds-text-secondary)">Seek to tenant 9's end and walk backward. No sort needed.</text><text x="300" y="244" font-size="12" fill="var(--cds-text-primary)" font-family="monospace">WHERE created_at >= '2026-10-15'</text><text x="300" y="262" font-size="11.5" fill="var(--cds-text-secondary)">Matches are scattered across every tenant. No single seek;</text><text x="300" y="278" font-size="11.5" fill="var(--cds-text-secondary)">needs a full index scan, or skip scan (Postgres 18+).</text></svg></figure>
+<p>A <strong>composite</strong> (multi-column) index sorts by the first
+column, then by the second within equal first-column values, and so on,
+like a phone book sorted by last name, then first name. That ordering
+determines which queries can seek into it.</p>
+<p>For an index on <code>(tenant_id, created_at)</code>:</p>
+<ul>
+<li><code>WHERE tenant_id = 9</code>: seek to tenant 9, scan its
+entries. Works.</li>
+<li><code>WHERE tenant_id = 9 AND created_at &gt;= '2026-10-15'</code>:
+seek to <code>(9, 2026-10-15)</code>, scan to the end of tenant 9.
+Ideal: one seek, short scan.</li>
+<li><code>WHERE tenant_id = 9 ORDER BY created_at DESC LIMIT 20</code>:
+seek to the end of tenant 9 and read backward 20 entries. No sort, no
+reading of older rows. This is the pattern behind fast feeds, inboxes
+and the cursor pagination in the Oct 26 API design reading.</li>
+<li><code>WHERE created_at &gt;= '2026-10-15'</code> alone: matches are
+spread across every tenant in the index. There’s no single place to seek
+to.</li>
+</ul>
+<p>That last case is the <strong>left-prefix rule</strong>: a B-tree
+index can be used efficiently for conditions on a <strong>leading
+prefix</strong> of its columns. You can phone-book search by last name,
+or last name plus first name, but not by first name alone.</p>
+<p>PostgreSQL 18 (released September 2025) added <strong>skip
+scan</strong> for B-trees, which softens this rule. When the leading
+column has few distinct values, the planner can do a separate seek for
+each value of the first column (tenant 7, tenant 9, tenant 12…), each
+one jumping straight to the matching dates. Oracle and MySQL 8.0 have
+had similar features. It helps when the leading column has low
+cardinality, but it’s no substitute for the right column order when the
+query is common.</p>
+<h3 id="choosing-column-order">Choosing column order</h3>
+<p>The traditional advice, “most selective column first,” is incomplete.
+A better rule of thumb:</p>
+<ol type="1">
+<li><strong>Equality columns first</strong>: columns compared with
+<code>=</code> (or <code>IN</code>), since every value of them narrows
+to one contiguous range.</li>
+<li><strong>Then the range or sort column</strong>: the column used with
+<code>&lt;</code>, <code>&gt;</code>, <code>BETWEEN</code> or
+<code>ORDER BY</code>.</li>
+<li><strong>Range conditions end the useful prefix.</strong> In an index
+on <code>(a, b, c)</code> with
+<code>WHERE a = 1 AND b &gt; 5 AND c = 3</code>, the seek uses
+<code>a</code> and <code>b</code>. The <code>c = 3</code> condition can
+still filter entries during the scan, but it doesn’t narrow the seek,
+because within <code>b &gt; 5</code> the <code>c</code> values aren’t
+sorted. Putting <code>c</code> before <code>b</code> would make the seek
+exact.</li>
+</ol>
+<p>Design composite indexes around your most important queries, not
+around columns. One well-ordered index often serves several queries that
+share a prefix: an index on <code>(tenant_id, status, created_at)</code>
+supports filtering by tenant, by tenant and status, and listing by date
+within both.</p>
+<h2 id="covering-indexes-and-index-only-scans">4. Covering indexes and
+index-only scans</h2>
+<p>If every column a query needs is in the index, the database can
+answer from the index alone and skip the heap entirely. That’s an
+<strong>index-only scan</strong>, and for queries that return many rows
+it can be dramatically faster.</p>
+<p>Postgres (since version 11) supports <code>INCLUDE</code> columns,
+which are stored in leaf entries but not part of the sort key:</p>
+<pre class="sql"><code>CREATE INDEX orders_by_customer
+  ON orders (customer_id, created_at)
+  INCLUDE (status, total_cents);</code></pre>
+<p>Now
+<code>SELECT created_at, status, total_cents FROM orders WHERE customer_id = 42 ORDER BY created_at DESC</code>
+can be served without touching the table. <code>INCLUDE</code> columns
+don’t affect ordering, so they can be added without changing which
+queries can seek.</p>
+<p>There’s a Postgres-specific catch. Because of MVCC (the Oct 24 pack
+reading), an index entry doesn’t say whether its row version is visible
+to your transaction. Postgres checks the <strong>visibility
+map</strong>, a per-page bit saying “every row on this page is visible
+to everyone.” For pages marked all-visible, the index-only scan really
+skips the heap. For other pages it must still check the heap. Vacuum
+sets those bits, so on a table with heavy updates and lagging vacuum, an
+“index-only scan” quietly turns into a regular index scan.
+<code>EXPLAIN (ANALYZE)</code> shows this as
+<code>Heap Fetches</code>.</p>
+<p>The trade-off: covering indexes are bigger, so they take more memory
+and make writes more expensive. Use them for hot, read-heavy queries,
+not everywhere.</p>
+<h2 id="partial-and-expression-indexes">5. Partial and expression
+indexes</h2>
+<p><strong>Partial indexes</strong> index only the rows matching a
+condition:</p>
+<pre class="sql"><code>CREATE INDEX jobs_pending ON jobs (run_at) WHERE state = &#39;pending&#39;;</code></pre>
+<p>If 99% of jobs are completed and only a few thousand are pending,
+this index stays tiny and hot in memory, while still serving the query
+that workers run constantly
+(<code>WHERE state = 'pending' ORDER BY run_at</code>). The Postgres job
+queues from the Nov 1 reading benefit enormously from exactly this.
+Partial indexes are also useful for enforcing conditional
+uniqueness:</p>
+<pre class="sql"><code>CREATE UNIQUE INDEX one_active_subscription
+  ON subscriptions (user_id) WHERE status = &#39;active&#39;;</code></pre>
+<p>The planner only uses a partial index when it can prove the query’s
+<code>WHERE</code> clause implies the index’s condition, so the query
+must include a matching predicate.</p>
+<p><strong>Expression indexes</strong> index a computed value:</p>
+<pre class="sql"><code>CREATE INDEX users_email_lower ON users (lower(email));</code></pre>
+<p>A query with <code>WHERE lower(email) = 'a@b.com'</code> can use it.
+Without it, wrapping an indexed column in a function hides it from the
+index: <code>WHERE lower(email) = ...</code> can’t use a plain index on
+<code>email</code>. The same happens with type casts and arithmetic
+(<code>WHERE created_at::date = '2026-11-06'</code>, or
+<code>WHERE price * 1.18 &gt; 100</code>). Rewrite the condition to keep
+the column bare
+(<code>created_at &gt;= '2026-11-06' AND created_at &lt; '2026-11-07'</code>)
+or index the expression.</p>
+<h2 id="how-the-planner-chooses">6. How the planner chooses</h2>
+<p>Having an index doesn’t mean it gets used. Postgres’s
+<strong>cost-based planner</strong> estimates the cost of each possible
+plan (sequential scan, index scan, bitmap scan, index-only scan, and
+join strategies for multi-table queries) and picks the cheapest.</p>
+<p>The estimates depend on <strong>statistics</strong> gathered by
+<code>ANALYZE</code> (run automatically by autovacuum): per column, the
+fraction of nulls, the number of distinct values, a list of the most
+common values with their frequencies, and a histogram of the rest. From
+these, the planner estimates <strong>selectivity</strong>: what fraction
+of rows a condition will match.</p>
+<p>The planner then weighs I/O using settings like
+<code>seq_page_cost</code> (1.0 by default) and
+<code>random_page_cost</code> (4.0 by default). The default assumes a
+random page read costs four times a sequential one, which reflects
+spinning disks more than modern SSDs. Many teams on SSDs lower
+<code>random_page_cost</code> to around 1.1 to 2, which makes the
+planner more willing to use indexes.</p>
+<p>Common reasons an index isn’t used:</p>
+<ul>
+<li><strong>The condition matches a large fraction of rows.</strong> If
+<code>WHERE status = 'active'</code> matches 80% of the table, a
+sequential scan really is cheaper. This is the planner being right.</li>
+<li><strong>The statistics are wrong.</strong> After bulk loads or big
+deletes, before autovacuum has run <code>ANALYZE</code>, estimates can
+be wildly off. Run <code>ANALYZE</code> and check again.</li>
+<li><strong>Correlated columns.</strong> The planner assumes conditions
+are independent by default.
+<code>WHERE city = 'Mumbai' AND country = 'India'</code> gets
+underestimated, because it multiplies the two selectivities. Postgres’s
+extended statistics (<code>CREATE STATISTICS</code>, since version 10)
+can capture such dependencies.</li>
+<li><strong>The column is wrapped in a function or cast</strong>
+(section 5), or compared with a mismatched type.</li>
+<li><strong>Leading wildcards</strong>: <code>LIKE '%term'</code> can’t
+use a B-tree. Use a trigram index (<code>pg_trgm</code> with GIN) or
+full-text search.</li>
+<li><strong>The index doesn’t match the left prefix</strong> (section
+3).</li>
+<li><strong>Small tables.</strong> For a few pages, a sequential scan is
+cheapest and that’s fine.</li>
+</ul>
+<h3 id="reading-explain">Reading EXPLAIN</h3>
+<p><code>EXPLAIN</code> shows the chosen plan;
+<code>EXPLAIN (ANALYZE, BUFFERS)</code> runs the query and shows what
+actually happened. Things to look for:</p>
+<ul>
+<li><strong>Estimated vs actual rows.</strong> <code>rows=10</code>
+estimated versus <code>actual rows=50000</code> means bad statistics,
+and the plan was chosen for the wrong situation. This is the single most
+useful thing to check.</li>
+<li><strong>The scan type</strong>: <code>Seq Scan</code>,
+<code>Index Scan</code>, <code>Index Only Scan</code> (check
+<code>Heap Fetches</code>), <code>Bitmap Heap Scan</code>.</li>
+<li><strong>Rows Removed by Filter</strong>: many removed rows means the
+index narrowed poorly, often a sign that column order is wrong or a
+condition isn’t in the index.</li>
+<li><strong>Buffers</strong>: <code>shared hit</code> (from memory) and
+<code>read</code> (from disk) show how much data the query really
+touched.</li>
+<li><strong>Sort and its method</strong>: an external sort
+(<code>Sort Method: external merge</code>) spills to disk. An index that
+matches the <code>ORDER BY</code> can remove the sort entirely.</li>
+</ul>
+<p><code>pg_stat_statements</code> tells you which queries cost the most
+in total across all calls. Start there, not with whichever query someone
+complained about.</p>
+<h2 id="beyond-b-trees">7. Beyond B-trees</h2>
+<p>Postgres ships several other index types for data that B-trees can’t
+handle well:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Type</th>
+<th>Good for</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><strong>Hash</strong></td>
+<td>Equality only; rarely better than B-tree in practice</td>
+<td><code>WHERE token = ...</code></td>
+</tr>
+<tr class="even">
+<td><strong>GIN</strong> (generalized inverted index)</td>
+<td>Values containing many elements: arrays, <code>jsonb</code>,
+full-text, trigrams</td>
+<td><code>WHERE tags @&gt; '{urgent}'</code>,
+<code>WHERE doc @&gt; '{"type":"invoice"}'</code></td>
+</tr>
+<tr class="odd">
+<td><strong>GiST</strong></td>
+<td>Overlap and nearness: geometry, ranges, exclusion constraints</td>
+<td>PostGIS, “no two bookings overlap”</td>
+</tr>
+<tr class="even">
+<td><strong>SP-GiST</strong></td>
+<td>Space-partitioned data: IP ranges, some geometric data</td>
+<td><code>inet</code> lookups</td>
+</tr>
+<tr class="odd">
+<td><strong>BRIN</strong> (block range index)</td>
+<td>Huge tables whose physical order follows a column</td>
+<td>Append-only events by timestamp</td>
+</tr>
+</tbody>
+</table>
+<p><strong>GIN</strong> works like a search engine’s inverted index: for
+each element (a word, a JSON key-value pair, an array item), it stores
+the list of rows containing it. Lookups are fast, updates are expensive,
+which is why GIN has a “pending list” to batch insertions.</p>
+<p><strong>BRIN</strong> is the opposite of a B-tree in size. It stores,
+for each range of table pages (128 pages by default), just the minimum
+and maximum value of a column. For an append-only events table where
+<code>created_at</code> increases with physical position, a BRIN index
+might be a few hundred kilobytes where a B-tree would be gigabytes.
+Queries skip every block range whose min-max doesn’t overlap the
+condition. It only works if the physical order correlates with the
+column; on randomly ordered data it’s useless.</p>
+<p>Vector similarity search (<code>pgvector</code> with HNSW or IVFFlat
+indexes) has become another major index type in recent years, for
+embedding search. It’s approximate by design, a different trade-off from
+everything above.</p>
+<h2 id="the-cost-side-every-index-taxes-writes">8. The cost side: every
+index taxes writes</h2>
+<p>Indexes speed up reads and slow down everything else.</p>
+<ul>
+<li><strong>Every insert</strong> must add an entry to every index on
+the table.</li>
+<li><strong>Every update</strong> that changes an indexed column must
+update that index. In Postgres, an update usually creates a new row
+version, and unless the update qualifies as a <strong>HOT</strong>
+(heap-only tuple) update, which requires that no indexed column changed
+and that the page has free space, <em>every</em> index gets a new entry,
+even indexes on unchanged columns. More indexes means fewer HOT updates
+and more write amplification. Uber’s 2016 post on moving from Postgres
+to MySQL cited exactly this write amplification as one of its
+reasons.</li>
+<li><strong>Every delete</strong> leaves index entries for vacuum to
+clean up.</li>
+<li><strong>Storage and memory</strong>: indexes compete with table data
+for the buffer cache. An index that doesn’t fit in memory makes every
+lookup slower.</li>
+<li><strong>Vacuum and maintenance</strong> work grows with the number
+and size of indexes.</li>
+</ul>
+<p>So indexes should be deliberate. Practical habits:</p>
+<ul>
+<li><strong>Find unused indexes.</strong>
+<code>pg_stat_user_indexes.idx_scan</code> counts how often each index
+is used. An index with zero scans over weeks (on every replica, since
+replicas have their own counters) is a candidate to drop.</li>
+<li><strong>Find redundant indexes.</strong> An index on
+<code>(a)</code> is usually redundant if one exists on
+<code>(a, b)</code>, since the composite can serve the same queries (the
+single-column one is smaller and may still be slightly faster).</li>
+<li><strong>Create and drop without blocking.</strong>
+<code>CREATE INDEX CONCURRENTLY</code> builds an index without blocking
+writes (it takes longer and can fail, leaving an invalid index to drop).
+<code>DROP INDEX CONCURRENTLY</code> likewise. On a busy production
+table, a plain <code>CREATE INDEX</code> blocks writes for the whole
+build.</li>
+<li><strong>Watch for bloat.</strong> Indexes on heavily updated columns
+can bloat. Postgres 13’s B-tree deduplication and bottom-up deletion in
+version 14 reduced this a lot, and <code>REINDEX CONCURRENTLY</code>
+(version 12+) rebuilds without downtime.</li>
+</ul>
+<h2 id="patterns-from-real-systems">9. Patterns from real systems</h2>
+<p><strong>Multi-tenant SaaS.</strong> Almost every query includes
+<code>tenant_id</code>, so most indexes should start with it:
+<code>(tenant_id, ...)</code>. This keeps each tenant’s data contiguous
+in the index and makes per-tenant queries a single seek. It also makes
+later sharding by tenant easier.</p>
+<p><strong>Feeds and timelines.</strong>
+<code>(user_id, created_at DESC)</code> plus keyset pagination
+(<code>WHERE user_id = ? AND created_at &lt; ? ORDER BY created_at DESC LIMIT 20</code>)
+gives constant-time pages regardless of depth.</p>
+<p><strong>Soft deletes.</strong> If every query says
+<code>WHERE deleted_at IS NULL</code>, make the important indexes
+partial on that condition so deleted rows don’t bloat them.</p>
+<p><strong>Uniqueness and foreign keys.</strong> Unique constraints are
+indexes. Foreign keys in Postgres are <em>not</em> automatically indexed
+on the referencing side. Without an index on
+<code>orders.customer_id</code>, deleting a customer scans the whole
+orders table to check for references, and joins on that column can’t use
+an index either. A missing foreign key index is one of the most common
+performance bugs.</p>
+<p><strong>Status queues.</strong> Partial indexes on the small “active”
+subset (pending jobs, open tickets, unpaid invoices) keep the hot path
+tiny.</p>
+<h2 id="a-workflow-for-slow-queries">10. A workflow for slow
+queries</h2>
+<ol type="1">
+<li><strong>Find the queries that matter</strong> with
+<code>pg_stat_statements</code>, by total time, not just by mean.</li>
+<li><strong>Run <code>EXPLAIN (ANALYZE, BUFFERS)</code></strong> on a
+realistic parameter set, on production-like data.</li>
+<li><strong>Compare estimated and actual rows.</strong> If they’re far
+apart, fix statistics first (<code>ANALYZE</code>, extended statistics,
+higher statistics targets).</li>
+<li><strong>Look for the access path you’d want:</strong> one seek, a
+short scan, ideally no heap fetches and no sort.</li>
+<li><strong>Design the index for that path:</strong> equality columns,
+then range or sort column, then <code>INCLUDE</code> columns if it’s
+hot; partial if it targets a small subset.</li>
+<li><strong>Build it concurrently</strong> and re-check the plan and the
+timings.</li>
+<li><strong>Measure the write cost</strong>, and remove indexes that no
+longer earn their keep.</li>
+</ol>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>An index trades write cost and space for reading only the rows the
+answer needs.</li>
+<li>B-trees are shallow sorted trees: queries are fast when they need
+one seek and a short ordered scan.</li>
+<li>Composite indexes follow the left-prefix rule. Put equality columns
+first, then the range or sort column. Postgres 18’s skip scan helps when
+the leading column has few values.</li>
+<li>Covering indexes with <code>INCLUDE</code> enable index-only scans,
+which depend on the visibility map in Postgres.</li>
+<li>Partial and expression indexes keep hot paths small and let
+functions use indexes.</li>
+<li>The planner uses statistics and cost settings. Wrong row estimates
+are the most common reason for bad plans.</li>
+<li>GIN, GiST, BRIN and vector indexes handle data B-trees can’t.</li>
+<li>Every index slows writes and can block HOT updates. Drop unused ones
+and build new ones concurrently.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>You have an index on <code>(created_at, tenant_id)</code> and the
+main query is <code>WHERE tenant_id = ? AND created_at &gt; ?</code>.
+What happens, and what would you change?</li>
+<li>A query’s plan shows <code>rows=12</code> estimated and
+<code>actual rows=480000</code>. What are three possible causes, and how
+would you check each?</li>
+<li>When is a sequential scan the right choice even though an index
+exists?</li>
+<li>Your <code>orders</code> table has 14 indexes and write latency is
+climbing. How would you decide which to remove?</li>
+<li>Why does an index-only scan still show heap fetches on a frequently
+updated table, and what would reduce them?</li>
+<li>Would a BRIN index help on a <code>users</code> table indexed by
+<code>signup_date</code>? What about an <code>events</code> table that’s
+only appended to?</li>
+<li>Pick one slow query in a system you work on. Sketch the index you’d
+want, in column order, and explain why.</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Markus Winand, <em>SQL Performance Explained</em> and <em>Use The
+Index, Luke</em>, https://use-the-index-luke.com</li>
+<li>PostgreSQL documentation: “Indexes” (types, multicolumn, index-only
+scans and covering indexes, partial indexes, expression indexes), “Using
+EXPLAIN,” “Statistics Used by the Planner,” “Planner Cost Constants,”
+https://www.postgresql.org/docs/current/indexes.html</li>
+<li>PostgreSQL 18 release notes (September 25, 2025), B-tree skip scan,
+https://www.postgresql.org/docs/release/18/</li>
+<li>PostgreSQL release notes for versions 11 (<code>INCLUDE</code>), 12
+(<code>REINDEX CONCURRENTLY</code>), 13 (B-tree deduplication) and 14
+(bottom-up index deletion).</li>
+<li>Peter Geoghegan’s pgsql-hackers posts on PostgreSQL 18 skip scan,
+https://www.postgresql.org/message-id/CAH2-Wzk1aYZpsXRP1iz7iBweg55dZPicPBUL50SmtzkF-Rm9ig%40mail.gmail.com</li>
+<li>Egor Rogov, <em>PostgreSQL 14 Internals</em> (Postgres Professional,
+2023), chapters on index access methods and the planner.</li>
+<li>Uber Engineering, “Why Uber Engineering Switched from Postgres to
+MySQL” (2016).</li>
+<li>Rudolf Bayer and Edward McCreight, “Organization and Maintenance of
+Large Ordered Indices” (1970), the original B-tree paper.</li>
+<li>pgvector documentation, https://github.com/pgvector/pgvector</li>
+</ul>
+<p>The PostgreSQL 18 release date was confirmed from the release notes
+on Nov 6, 2026. The default cost settings and version numbers for each
+feature come from the PostgreSQL docs as I know them.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/databases.html">Databases</a></div>
+          <div class="daynav"><a href="/reading/http-cdn-caching.html"><div class="kicker">← Older · Nov 5</div><div class="t">HTTP and CDN caching: Cache-Control, keys, purges and poisoning</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
