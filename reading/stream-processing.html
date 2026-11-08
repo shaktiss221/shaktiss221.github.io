@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stream processing: event time, watermarks and state · The Daily Commit</title>
+  <meta name="description" content="How stream processors like Flink compute correct results over unbounded, out-of-order data, covering event time versus processing time, windows, watermarks and late data, keyed state, checkpoints with asynchronous barrier snapshots, end-to-end exactly-once, backpressure, and where streaming SQL fits.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Stream processing: event time, watermarks and state</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>14 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#bounded-and-unbounded-data">Bounded and unbounded data</a><a href="#event-time-versus-processing-time">Event time versus
+processing time</a><a href="#windows">Windows</a><a href="#watermarks-deciding-when-a-window-is-complete">Watermarks:
+deciding when a window is complete</a><a href="#late-data-and-triggers">Late data and triggers</a><a href="#state">State</a><a href="#checkpoints-consistent-snapshots-of-a-running-stream">Checkpoints: consistent snapshots of a running stream</a><a href="#exactly-once-end-to-end">Exactly-once, end to end</a><a href="#backpressure-and-operations">Backpressure and operations</a><a href="#streaming-sql-and-where-things-are-heading">Streaming SQL
+and where things are heading</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 14 min left</div>
+      </nav>
+      <article class="article" data-slug="stream-processing" data-minutes="14">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/analytics.html">Analytics</a> · November 8, 2026 · 14 min</div>
+        <h1>Stream processing: event time, watermarks and state</h1>
+        <p class="dek">How stream processors like Flink compute correct results over unbounded, out-of-order data, covering event time versus processing time, windows, watermarks and late data, keyed state, checkpoints with asynchronous barrier snapshots, end-to-end exactly-once, backpressure, and where streaming SQL fits.</p>
+<p>Batch jobs have a comfortable property: when they start, all the
+input already exists. A daily report runs over yesterday’s data,
+finishes, and is correct. Streaming systems give that up. The input
+never ends, events arrive late and out of order, machines fail
+mid-computation, and answers are needed in seconds, not tomorrow. Yet
+modern stream processors can produce results as correct as a batch
+job’s, continuously. This reading explains how: the distinction between
+event time and processing time, windows and the watermarks that decide
+when a window is complete, how processors keep large amounts of state
+and recover it after failures, and what “exactly-once” really means in a
+streaming pipeline. Apache Flink is the main example, with nods to Kafka
+Streams and Google Dataflow.</p>
+<h2 id="bounded-and-unbounded-data">1. Bounded and unbounded data</h2>
+<p>Tyler Akidau, one of the engineers behind Google’s MillWheel and
+Dataflow, argued in his widely read 2015 O’Reilly essays “Streaming 101”
+and “Streaming 102” that the useful distinction isn’t batch versus
+streaming systems but <strong>bounded versus unbounded data</strong>. A
+bounded dataset has an end. An unbounded one, like clicks, payments,
+sensor readings or log lines, keeps growing forever.</p>
+<p>Batch processing handles unbounded data by chopping it into bounded
+pieces (an hourly or daily job) and processing each piece separately.
+That works, but it has two costs: latency (a result can’t be ready until
+its piece is complete and the job runs), and awkward boundaries (a user
+session that spans midnight gets split between two jobs).</p>
+<p>A <strong>stream processor</strong> runs continuously over unbounded
+data and updates results as data arrives. Akidau’s claim, backed up by
+the systems built since, is that a well-designed streaming system can
+give the same correct answers as batch, plus lower latency, so batch
+becomes a special case of streaming rather than the other way around.
+The Dataflow Model paper (Akidau et al., VLDB 2015) laid out the
+concepts, which became Apache Beam’s programming model and strongly
+influenced Flink.</p>
+<h2 id="event-time-versus-processing-time">2. Event time versus
+processing time</h2>
+<p>Every event has two times:</p>
+<ul>
+<li><strong>Event time</strong>: when it actually happened, recorded in
+the event itself (the moment the user tapped “buy”).</li>
+<li><strong>Processing time</strong>: when the pipeline sees it.</li>
+</ul>
+<p>In an ideal world they’d be equal. In reality, the gap varies
+constantly: a phone is offline in a tunnel and uploads events ten
+minutes later, a Kafka partition falls behind, a server’s batch uploader
+runs every minute, a network hiccup delays one region. Events arrive
+late, and out of order.</p>
+<p>This matters because almost every interesting question is about event
+time. “How many purchases happened between 12:00 and 12:01?” is about
+when purchases happened, not when the pipeline noticed them. If you
+group by processing time, a delay in one data source shifts its events
+into the wrong minute, and replaying old data gives completely different
+answers from the original run. Results that depend on processing time
+aren’t reproducible.</p>
+<p>So correct stream processing usually means computing over
+<strong>event time</strong>, despite events arriving in processing-time
+order. That raises the central question of streaming: if events can
+arrive late, when do you know you have all the events for 12:00 to
+12:01?</p>
+<h2 id="windows">3. Windows</h2>
+<p><strong>Windows</strong> divide an unbounded stream into finite
+chunks for aggregation. The common kinds:</p>
+<ul>
+<li><strong>Tumbling windows</strong>: fixed size, non-overlapping.
+Every minute, every hour.</li>
+<li><strong>Sliding (hopping) windows</strong>: fixed size, overlapping.
+“The last 10 minutes, updated every minute.” Each event belongs to
+several windows.</li>
+<li><strong>Session windows</strong>: dynamic, per key, defined by gaps
+in activity. A user’s session ends after 30 minutes of inactivity.
+Sessions can merge when a late event fills a gap between two of
+them.</li>
+<li><strong>Global windows</strong> with custom triggers, for things
+like “every 100 events.”</li>
+</ul>
+<p>Windows are usually <strong>keyed</strong>: tumbling one-minute
+windows of purchases <em>per merchant</em>, sessions <em>per user</em>.
+Each key and window pair is an independent piece of state.</p>
+<p>Windows are easy to define. Deciding when each window’s result is
+final is the hard part.</p>
+<h2 id="watermarks-deciding-when-a-window-is-complete">4. Watermarks:
+deciding when a window is complete</h2>
+<figure class="diagram"><svg viewBox="0 0 760 360" role="img" aria-label="Events plotted by event time and processing time, with a watermark and a late event" font-size="13"><defs><marker id="sw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Events arrive late and out of order; the watermark decides when a window is done</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Each dot is an event: when it happened (x) vs. when the pipeline saw it (y).</text><line x1="90" y1="290" x2="660" y2="290" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#sw)"></line><line x1="90" y1="290" x2="90" y2="60" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#sw)"></line><text x="650" y="312" text-anchor="end" font-size="11.5" fill="var(--cds-text-secondary)">event time</text><text x="80" y="70" text-anchor="end" font-size="11.5" fill="var(--cds-text-secondary)">processing</text><text x="80" y="84" text-anchor="end" font-size="11.5" fill="var(--cds-text-secondary)">time</text><rect x="90" y="70" width="180" height="220" fill="var(--cds-chart-categorical-1)" fill-opacity="0.06" stroke="none"></rect><line x1="270" y1="70" x2="270" y2="290" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4" stroke-width="0.75"></line><text x="180" y="306" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">12:00–12:01</text><rect x="270" y="70" width="180" height="220" fill="var(--cds-chart-categorical-2)" fill-opacity="0.06" stroke="none"></rect><line x1="450" y1="70" x2="450" y2="290" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4" stroke-width="0.75"></line><text x="360" y="306" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">12:01–12:02</text><rect x="450" y="70" width="180" height="220" fill="var(--cds-chart-categorical-3)" fill-opacity="0.06" stroke="none"></rect><line x1="630" y1="70" x2="630" y2="290" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4" stroke-width="0.75"></line><text x="540" y="306" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">12:02–12:03</text><line x1="90" y1="290" x2="290" y2="90" stroke="var(--cds-chart-axis)" stroke-width="0.75" stroke-dasharray="1 4"></line><path d="M90,260 C210,210 290,140 350,80" fill="none" stroke="var(--cds-chart-categorical-4)" stroke-width="2"></path><text x="358" y="94" font-size="11.5" fill="var(--cds-text-primary)">watermark</text><circle cx="120" cy="250" r="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.7"></circle><circle cx="160" cy="220" r="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.7"></circle><circle cx="200" cy="195" r="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.7"></circle><circle cx="240" cy="170" r="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.7"></circle><circle cx="255" cy="130" r="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.7"></circle><circle cx="290" cy="150" r="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.7"></circle><circle cx="330" cy="120" r="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.7"></circle><circle cx="390" cy="100" r="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.7"></circle><circle cx="420" cy="85" r="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.7"></circle><circle cx="210" cy="90" r="6" fill="none" stroke="var(--cds-chart-categorical-5)" stroke-width="2"></circle><text x="24" y="330" font-size="11.5" fill="var(--cds-text-primary)">Open circle: a late event. It happened at 12:00:40 but arrived after the watermark passed 12:01.</text><text x="24" y="350" font-size="11.5" fill="var(--cds-text-secondary)">When the watermark passes a window's end, it fires. Later events get dropped, set aside, or update it.</text></svg></figure>
+<p>A <strong>watermark</strong> is the stream processor’s estimate of
+progress in event time: a watermark of 12:01 is a claim that “no more
+events with event time before 12:01 are expected.” When the watermark
+passes the end of a window, the processor considers the window complete
+and emits its result.</p>
+<p>Watermarks are generated near the sources, based on what the source
+knows:</p>
+<ul>
+<li>If a source is perfectly ordered (say, a log written by one process
+and read in order), the watermark can simply follow the latest event
+time. That’s a <strong>perfect watermark</strong>.</li>
+<li>Usually, sources are only roughly ordered, so the watermark is a
+<strong>heuristic</strong>. A common strategy in Flink is
+<strong>bounded out-of-orderness</strong>: the watermark trails the
+largest event time seen by a fixed delay, say 5 seconds, betting that
+events are never more than 5 seconds late.</li>
+</ul>
+<p>Watermarks flow through the pipeline with the data. An operator that
+reads from several inputs (several Kafka partitions, or two joined
+streams) takes the <strong>minimum</strong> of its inputs’ watermarks,
+because it can only be as sure as its slowest input. This has a
+well-known consequence: <strong>one idle or slow partition holds back
+the watermark for everything downstream</strong>, and windows stop
+firing. Flink lets you mark sources idle after a timeout so they don’t
+block progress, and newer versions can align watermarks across sources
+so a fast source doesn’t race far ahead of a slow one.</p>
+<p>Watermark choice is a direct trade-off between <strong>latency and
+completeness</strong>:</p>
+<ul>
+<li>An aggressive watermark (small delay) emits results quickly but
+declares windows complete before some late events have arrived.</li>
+<li>A conservative watermark (large delay) waits longer for stragglers,
+so results are more complete but later.</li>
+</ul>
+<p>No setting is perfect, because lateness is unbounded in principle. A
+phone can come back online days later.</p>
+<h2 id="late-data-and-triggers">5. Late data and triggers</h2>
+<p>So what happens to an event that arrives after the watermark has
+passed its window? The Dataflow Model’s answer is to make it an explicit
+choice, with three tools:</p>
+<p><strong>Allowed lateness.</strong> Keep a window’s state for some
+time after it fires (say, an hour), and if late events arrive in that
+period, update the result. After that, discard the state and treat
+further events as too late.</p>
+<p><strong>Triggers</strong> decide when to emit results for a window. A
+typical combination: an <strong>early</strong> result every minute of
+processing time while the window is open (so dashboards update quickly),
+an <strong>on-time</strong> result when the watermark passes the end,
+and <strong>late</strong> results each time late data arrives within
+allowed lateness.</p>
+<p><strong>Accumulation mode</strong> decides what each emitted result
+means: - <strong>Discarding</strong>: each emission contains only the
+new data since the last one. Downstream must add them up. -
+<strong>Accumulating</strong>: each emission is the full current result,
+replacing the previous one. Downstream must overwrite. -
+<strong>Accumulating and retracting</strong>: each emission includes the
+new result and a retraction of the old one, which matters when
+downstream aggregates further (for example, sessions that merged).</p>
+<p>Events that are too late can be dropped, or, better, routed to a
+<strong>side output</strong> so they’re logged, counted and possibly
+fixed by a batch correction job. Silently dropping them means you never
+learn your watermark is too aggressive.</p>
+<p>The key mindset shift: <strong>a streaming result is a sequence of
+refinements</strong>, not a single answer. Downstream systems should be
+designed to accept updates, for example by upserting into a database
+keyed by window, rather than assuming each result is final.</p>
+<h2 id="state">6. State</h2>
+<p>Anything beyond simple filtering needs <strong>state</strong>: counts
+per window, the contents of a session, the last known value for a key,
+the buffered side of a join. A stream processor is mostly a system for
+managing very large, partitioned state correctly.</p>
+<p>Flink partitions state by key, just like the data: events for
+merchant 42 always go to the same parallel task, which owns merchant
+42’s state. That means no locking across tasks and natural scaling,
+since adding parallelism redistributes key ranges.</p>
+<p>Where state lives:</p>
+<ul>
+<li><strong>On the heap</strong> (Flink’s HashMap state backend): fast,
+but limited by memory and subject to garbage collection pauses.</li>
+<li><strong>In an embedded RocksDB</strong> (the LSM engine from the Oct
+29 reading): state lives on local disk with a memory cache, so it can be
+far larger than RAM, at the cost of serialization on every access. This
+is how Flink jobs keep terabytes of state.</li>
+<li><strong>Disaggregated state</strong> in remote storage. Flink 2.0
+(2025) introduced a disaggregated state backend that keeps state
+primarily in object storage, with local disks as a cache. The goal is
+faster rescaling and recovery, since tasks no longer need to download
+all their state to local disk first, and decoupling compute from
+storage, as many cloud databases have done.</li>
+</ul>
+<p>State needs a lifetime. Windows clean up after themselves, but state
+for things like “last seen value per user” grows forever unless you set
+a <strong>time-to-live</strong>. Unbounded state growth is one of the
+most common causes of streaming jobs slowly degrading and eventually
+failing.</p>
+<p><strong>Kafka Streams</strong> takes a different approach to the same
+problem. It’s a library, not a cluster. State lives in local RocksDB
+stores, and every update is also written to a compacted Kafka
+<strong>changelog topic</strong>. If an instance dies, another rebuilds
+its state by replaying the changelog. The Oct 25 Kafka reading covered
+compacted topics.</p>
+<h2 id="checkpoints-consistent-snapshots-of-a-running-stream">7.
+Checkpoints: consistent snapshots of a running stream</h2>
+<p>If a machine fails, the processor must recover its state and resume
+without losing or double-counting events. Flink does this with periodic
+<strong>checkpoints</strong>, consistent snapshots of all operator state
+plus the input positions (such as Kafka offsets) that correspond to
+it.</p>
+<p>The challenge is taking a consistent snapshot of a distributed system
+that never stops. Flink uses <strong>asynchronous barrier
+snapshotting</strong>, described by Paris Carbone and colleagues in 2015
+(“Lightweight Asynchronous Snapshots for Distributed Dataflows”) and
+based on the classic Chandy-Lamport algorithm for distributed
+snapshots:</p>
+<ol type="1">
+<li>The coordinator injects a <strong>barrier</strong> into each
+source’s stream, marked with a checkpoint number. Sources record their
+current positions.</li>
+<li>Barriers flow downstream with the data, never overtaking
+records.</li>
+<li>When an operator has received the barrier on all its inputs, it
+snapshots its state (asynchronously, so processing continues) and
+forwards the barrier.</li>
+<li>When every operator has acknowledged, the checkpoint is
+complete.</li>
+</ol>
+<p>On failure, Flink restarts the job from the last completed
+checkpoint: every operator restores its state, and sources rewind to the
+recorded positions. Every event after the checkpoint is processed again,
+but the state was restored to exactly the point before those events, so
+the <strong>state</strong> reflects each event exactly once.</p>
+<p><strong>Alignment</strong> is the subtle part. An operator with two
+inputs that receives the barrier on input A must wait for the barrier on
+input B before snapshotting, buffering A’s records in the meantime.
+Under backpressure, alignment can take a long time and stall
+checkpoints. <strong>Unaligned checkpoints</strong> (Flink 1.11+) let
+barriers overtake buffered records and include the in-flight buffers in
+the snapshot, which keeps checkpoints fast under load at the cost of
+larger snapshots.</p>
+<p><strong>Savepoints</strong> use the same mechanism, triggered
+manually, for upgrades: stop the job with a savepoint, deploy a new
+version, and start from the savepoint. Like the database migrations in
+the Nov 7 reading, this requires the new code’s state schema to be
+compatible with the old.</p>
+<h2 id="exactly-once-end-to-end">8. Exactly-once, end to end</h2>
+<p>Checkpoints give exactly-once <strong>state</strong>. But results
+leave the pipeline: they’re written to a database, a Kafka topic, or an
+API. If the job writes a result and then fails before the next
+checkpoint, recovery reprocesses those events and writes the result
+again. Exactly-once inside the processor doesn’t guarantee exactly-once
+effects outside it.</p>
+<p>There are two standard ways to close the gap, both covered in more
+depth in the Oct 23 exactly-once reading:</p>
+<p><strong>Idempotent sinks.</strong> Make writes safe to repeat, for
+example upserts keyed by window and key. Writing “merchant 42,
+12:00–12:01, total 1,830” twice has the same effect as writing it once.
+This is the simplest approach and works well with the refinement model
+in section 5.</p>
+<p><strong>Transactional sinks with two-phase commit.</strong> Flink’s
+two-phase commit sink framework opens a transaction in the sink for each
+checkpoint period. Records are written inside the transaction. When the
+checkpoint completes, the transactions are committed; on failure,
+they’re aborted. Kafka’s transactions (KIP-98) make this work for
+Kafka-to-Kafka pipelines: downstream consumers using
+<code>read_committed</code> only see results from completed checkpoints.
+The cost is latency: output becomes visible only at checkpoint
+intervals.</p>
+<p>Sources need to be <strong>replayable</strong> for any of this to
+work: Kafka, Kinesis or files, where you can rewind to an offset. A
+source that can’t replay, like a plain HTTP webhook receiver, has to put
+data in a durable log first.</p>
+<h2 id="backpressure-and-operations">9. Backpressure and operations</h2>
+<p>When a downstream operator can’t keep up, a streaming system must
+slow the upstream rather than buffer without limit. Flink uses
+<strong>credit-based flow control</strong> between tasks: a receiver
+tells a sender how many buffers it can accept, and the sender stops when
+credit runs out. Pressure propagates back to the sources, which simply
+read from Kafka more slowly, and lag grows in the log rather than in
+memory. The Nov 1 job queue reading made the same point: a durable log
+is the right place for a backlog to accumulate.</p>
+<p>Operational signals that matter for streaming jobs:</p>
+<ul>
+<li><strong>Consumer lag</strong> at the sources, in records and in
+time. Growing lag means the job can’t keep up.</li>
+<li><strong>Watermark lag</strong>: how far the watermark trails real
+time. If it stops advancing, look for an idle or stuck partition.</li>
+<li><strong>Backpressure</strong> per operator, to find the bottleneck.
+It’s usually the operator just downstream of the last one showing
+backpressure.</li>
+<li><strong>Checkpoint duration and size.</strong> Checkpoints that take
+longer and longer usually mean state growth or backpressure.</li>
+<li><strong>Late event counts</strong> from side outputs.</li>
+<li><strong>Data skew</strong>: one hot key (a huge merchant, a bot
+user) can overload one task while others idle. The fixes resemble those
+in the Oct 27 partitioning pack: salt the key and aggregate in two
+stages.</li>
+</ul>
+<h2 id="streaming-sql-and-where-things-are-heading">10. Streaming SQL
+and where things are heading</h2>
+<p>Writing jobs as code is powerful but heavy. <strong>Streaming
+SQL</strong> lets you express many pipelines declaratively:</p>
+<pre class="sql"><code>SELECT merchant_id,
+       window_start,
+       SUM(amount) AS total
+FROM TABLE(
+  TUMBLE(TABLE payments, DESCRIPTOR(event_time), INTERVAL &#39;1&#39; MINUTE))
+GROUP BY merchant_id, window_start, window_end;</code></pre>
+<p>Flink SQL, ksqlDB, RisingWave, Materialize and others treat a stream
+as a table that keeps changing and a query as a <strong>continuously
+maintained result</strong>, a view that updates incrementally as input
+arrives. The same ideas of event time, watermarks and retractions sit
+underneath. Materialize and RisingWave in particular present themselves
+as databases with incrementally maintained materialized views, blurring
+the line between stream processor and database. Real-time OLAP systems
+like StarRocks (Oct 23 reading) attack the same need from the database
+side, by making ingestion fast enough to query fresh data directly.</p>
+<p>Choosing between them comes down to the shape of the problem:</p>
+<ul>
+<li><strong>Simple transformations and routing</strong>: Kafka Streams
+or a lightweight consumer may be enough.</li>
+<li><strong>Large state, complex event-time logic, exactly-once across
+systems</strong>: Flink is the usual choice.</li>
+<li><strong>Continuously updated query results that people or services
+read</strong>: a streaming database or real-time OLAP store.</li>
+<li><strong>Results needed hourly or daily</strong>: a batch job is
+still simpler and perfectly fine.</li>
+</ul>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Unbounded data needs processing over event time, not processing
+time, for correct and reproducible results.</li>
+<li>Windows group events into finite chunks; tumbling, sliding and
+session windows suit different questions.</li>
+<li>Watermarks estimate event-time progress and decide when windows
+fire. They trade latency against completeness, and the slowest input
+holds them back.</li>
+<li>Late data needs an explicit policy: allowed lateness, triggers,
+accumulation mode, and side outputs rather than silent drops.</li>
+<li>Streaming results are refinements; design sinks to accept
+updates.</li>
+<li>Flink partitions state by key and stores it on the heap, in RocksDB,
+or (since 2.0) in disaggregated remote storage. Set TTLs on state.</li>
+<li>Asynchronous barrier snapshots give consistent checkpoints, so state
+reflects each event exactly once; idempotent or transactional sinks
+extend that to outputs.</li>
+<li>Backpressure should push backlog into the durable log, and lag,
+watermark lag and checkpoint health are the signals to watch.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>A dashboard shows purchases per minute. A mobile client batches
+events and uploads every five minutes. What goes wrong if you window by
+processing time, and what changes if you use event time?</li>
+<li>Your watermark uses a 10-second out-of-orderness bound, but 2% of
+events arrive more than a minute late. What would you change, and what
+would it cost?</li>
+<li>One Kafka partition stops receiving data. Why do all your windows
+stop firing, and how would you fix it?</li>
+<li>Why is “exactly-once state” not the same as “exactly-once results in
+my database”? Which sink strategy would you use for a payments ledger,
+and which for a metrics dashboard?</li>
+<li>A job’s checkpoints grow from 2 GB to 200 GB over a month. What are
+the likely causes, and how would you find which one?</li>
+<li>When would you choose Kafka Streams over Flink, or a streaming
+database over both?</li>
+<li>Which of your current batch jobs would benefit from becoming
+streaming jobs, and which wouldn’t?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Tyler Akidau et al., “The Dataflow Model: A Practical Approach to
+Balancing Correctness, Latency, and Cost in Massive-Scale, Unbounded,
+Out-of-Order Data Processing,” VLDB 2015.</li>
+<li>Tyler Akidau, “Streaming 101” and “Streaming 102,” O’Reilly Radar,
+2015 and 2016; Tyler Akidau, Slava Chernyak and Reuven Lax,
+<em>Streaming Systems</em> (O’Reilly, 2018).</li>
+<li>Paris Carbone et al., “Lightweight Asynchronous Snapshots for
+Distributed Dataflows,” 2015 (arXiv:1506.08603); K. Mani Chandy and
+Leslie Lamport, “Distributed Snapshots,” ACM TOCS, 1985.</li>
+<li>Apache Flink documentation: “Timely Stream Processing,” “Generating
+Watermarks,” “Windows,” “State Backends,” “Checkpointing,” “Unaligned
+checkpoints,” “Fault Tolerance Guarantees,”
+https://nightlies.apache.org/flink/flink-docs-stable/</li>
+<li>Yuan Mei et al., “Disaggregated State Management in Apache Flink
+2.0,” PVLDB 18, https://www.vldb.org/pvldb/vol18/p4846-mei.pdf</li>
+<li>Apache Flink blog, “An Overview of End-to-End Exactly-Once
+Processing in Apache Flink” (2018).</li>
+<li>Apache Kafka documentation, “Kafka Streams: Architecture” (state
+stores and changelogs); KIP-98, “Exactly Once Delivery and Transactional
+Messaging.”</li>
+<li>Martin Kleppmann, <em>Designing Data-Intensive Applications</em>
+(O’Reilly, 2017), chapter 11 “Stream Processing.”</li>
+<li>Materialize and RisingWave documentation on incrementally maintained
+views.</li>
+</ul>
+<p>The Flink 2.0 disaggregated-state paper was located in a search on
+Nov 8, 2026. The other details come from the cited papers and Flink
+documentation as I know them. Flink option names and defaults change
+between versions, so check the docs for the version you run.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/analytics.html">Analytics</a><a class="chip" href="/topics/messaging.html">Messaging</a></div>
+          <div class="daynav"><a href="/reading/progressive-delivery.html"><div class="kicker">← Older · Nov 7</div><div class="t">Shipping safely: feature flags, canaries and progressive delivery</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
