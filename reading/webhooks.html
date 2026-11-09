@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Webhooks done right: delivery, signatures, retries and receivers · The Daily Commit</title>
+  <meta name="description" content="Webhooks look like a simple HTTP POST but behave like a distributed system with two owners. This covers sending from an outbox, signing with HMAC and timestamps, retries and endpoint health, idempotent receivers, ordering, thin versus fat payloads, SSRF and other security risks, and the Standard Webhooks and CloudEvents specs.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Webhooks done right: delivery, signatures, retries and receivers</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>14 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#why-webhooks-and-why-theyre-hard">Why webhooks, and why
+they’re hard</a><a href="#the-sender-never-lose-an-event">The sender: never lose an
+event</a><a href="#signing-proving-the-request-is-genuine">Signing: proving the
+request is genuine</a><a href="#retries-and-endpoint-health">Retries and endpoint health</a><a href="#the-receiver-verify-dedupe-acknowledge-then-work">The
+receiver: verify, dedupe, acknowledge, then work</a><a href="#ordering-and-the-fetch-the-latest-pattern">Ordering and the
+“fetch the latest” pattern</a><a href="#observability-and-replay">Observability and replay</a><a href="#security-beyond-signatures">Security beyond signatures</a><a href="#standards-standard-webhooks-and-cloudevents">Standards:
+Standard Webhooks and CloudEvents</a><a href="#checklists">Checklists</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 14 min left</div>
+      </nav>
+      <article class="article" data-slug="webhooks" data-minutes="14">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/apis.html">APIs</a> · November 9, 2026 · 14 min</div>
+        <h1>Webhooks done right: delivery, signatures, retries and receivers</h1>
+        <p class="dek">Webhooks look like a simple HTTP POST but behave like a distributed system with two owners. This covers sending from an outbox, signing with HMAC and timestamps, retries and endpoint health, idempotent receivers, ordering, thin versus fat payloads, SSRF and other security risks, and the Standard Webhooks and CloudEvents specs.</p>
+<p>Webhooks are how most of the internet’s APIs talk back. Stripe tells
+you a payment succeeded, GitHub tells you a pull request was opened,
+Twilio tells you an SMS was delivered, Shopify tells you an order was
+placed. The mechanism couldn’t be simpler: when something happens, the
+provider sends an HTTP POST to a URL you registered. But that simplicity
+hides a distributed system with two independent owners, unreliable
+networks in between, and attackers who’d love to send you fake events.
+Most webhook bugs (lost events, double-processed payments, forged
+requests, retry storms) come from treating webhooks as simpler than they
+are. This reading covers both sides: how to build a reliable webhook
+sender, and how to build a receiver that’s safe and correct.</p>
+<h2 id="why-webhooks-and-why-theyre-hard">1. Why webhooks, and why
+they’re hard</h2>
+<p>The alternative to webhooks is <strong>polling</strong>: the client
+asks “anything new?” every few seconds. Polling is simple and robust,
+but wasteful (most responses are empty) and slow (latency equals the
+polling interval). Webhooks invert the flow: the provider pushes events
+as they happen, so clients get near-real-time updates without constant
+requests.</p>
+<p>The cost is that the provider now makes outbound calls to thousands
+of endpoints it doesn’t control:</p>
+<ul>
+<li>Endpoints are slow, down, misconfigured, or behind firewalls.</li>
+<li>Endpoints return errors for reasons that have nothing to do with the
+provider: a bug in the customer’s handler, an expired certificate, a
+deploy in progress.</li>
+<li>Networks drop connections after the receiver processed a request but
+before the sender saw the response, the same ambiguity the Oct 23
+exactly-once reading started with.</li>
+<li>Anyone on the internet can POST to a receiver’s URL and pretend to
+be the provider.</li>
+</ul>
+<p>So webhooks need the same building blocks as any distributed
+messaging system: durable queues, retries with backoff, idempotency,
+authentication and monitoring, split across two organizations that can’t
+see each other’s systems.</p>
+<h2 id="the-sender-never-lose-an-event">2. The sender: never lose an
+event</h2>
+<figure class="diagram"><svg viewBox="0 0 760 300" role="img" aria-label="Webhook delivery pipeline from event to receiver" font-size="13"><defs><marker id="wh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">A webhook is a distributed system with two owners</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Sender (left of the dashed line) and receiver (right) each need durability and retries.</text><rect x="24" y="90" width="110" height="44" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="79.0" y="117.0" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">DB + outbox</text><rect x="164" y="90" width="100" height="44" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="214.0" y="117.0" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">queue</text><rect x="294" y="90" width="120" height="44" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="354.0" y="117.0" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">dispatcher</text><rect x="470" y="90" width="120" height="44" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="530.0" y="117.0" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">endpoint</text><rect x="620" y="90" width="120" height="44" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="680.0" y="117.0" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">local queue</text><line x1="134" y1="112" x2="162" y2="112" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#wh)"></line><line x1="264" y1="112" x2="292" y2="112" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#wh)"></line><line x1="414" y1="112" x2="468" y2="112" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#wh)"></line><line x1="590" y1="112" x2="618" y2="112" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#wh)"></line><text x="79" y="150" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">event in same txn</text><text x="214" y="150" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">one job per</text><text x="214" y="164" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">endpoint</text><text x="354" y="150" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">sign, POST,</text><text x="354" y="164" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">timeout ~10 s</text><text x="530" y="150" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">verify, dedupe,</text><text x="530" y="164" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">return 2xx fast</text><text x="680" y="150" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">do the work</text><text x="680" y="164" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">asynchronously</text><line x1="442" y1="70" x2="442" y2="250" stroke="var(--cds-chart-axis)" stroke-dasharray="5 4"></line><rect x="294" y="200" width="120" height="40" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25"></rect><text x="354.0" y="225.0" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">retry + DLQ</text><line x1="404" y1="134" x2="404" y2="198" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#wh)"></line><text x="354" y="258" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">backoff for hours or days;</text><text x="354" y="272" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">then disable + alert</text><text x="24" y="292" font-size="11.5" fill="var(--cds-text-secondary)">Delivery is at-least-once and unordered, so receivers must be idempotent.</text></svg></figure>
+<p>The first rule for senders: <strong>an event must not be lost because
+a webhook delivery failed, or because the sender crashed at the wrong
+moment.</strong></p>
+<p>The classic mistake is to send the webhook inline, inside the request
+that caused the event:</p>
+<pre class="python"><code>charge = db.create_charge(...)
+requests.post(customer.webhook_url, json=event)   # don&#39;t</code></pre>
+<p>If the POST times out, the request either fails (and the charge
+creation looks failed even though it succeeded) or the event is silently
+lost. If the process crashes between the database write and the POST,
+the event is lost.</p>
+<p>The robust pattern is the <strong>transactional outbox</strong> (Oct
+23 reading): write the event to an <code>events</code> table in the same
+database transaction as the change that caused it. A separate process
+reads new events from the outbox and enqueues one delivery job per
+subscribed endpoint. Dispatcher workers process those jobs: build the
+request, sign it, POST it with a timeout, and record the result. Failed
+deliveries are retried later.</p>
+<p>This structure gives several properties at once:</p>
+<ul>
+<li><strong>No lost events</strong>: if the transaction commits, the
+event exists; if it rolls back, it never did.</li>
+<li><strong>Isolation between customers</strong>: each endpoint’s
+deliveries are separate jobs, so one slow endpoint doesn’t delay
+everyone. Use per-endpoint concurrency limits so a single customer with
+a thousand events in a burst doesn’t occupy every worker.</li>
+<li><strong>Short timeouts</strong>: the dispatcher can use a firm
+timeout (GitHub’s documentation, for example, asks receivers to respond
+within 10 seconds) without blocking user requests.</li>
+<li><strong>An event log</strong>: stored events can back a “list
+events” API and redelivery tools (section 7).</li>
+</ul>
+<p>The job queue reading from Nov 1 covers the queue mechanics: leases,
+retries, dead-letter queues and fairness all apply directly.</p>
+<h2 id="signing-proving-the-request-is-genuine">3. Signing: proving the
+request is genuine</h2>
+<p>A receiver’s URL is effectively public. Without authentication,
+anyone who learns or guesses it can send a fake “payment succeeded”
+event. The standard defense is an <strong>HMAC signature</strong>:</p>
+<ol type="1">
+<li>When the customer registers an endpoint, the provider generates a
+random <strong>signing secret</strong> and shows it to the customer
+once.</li>
+<li>For each delivery, the provider computes
+<code>HMAC-SHA256(secret, signed_content)</code> and sends it in a
+header.</li>
+<li>The receiver computes the same HMAC over the raw request body with
+its copy of the secret and compares.</li>
+</ol>
+<p>Details that matter:</p>
+<p><strong>Sign the raw bytes.</strong> The receiver must verify against
+the exact bytes received, before any JSON parsing and re-serialization,
+which can reorder keys or change whitespace. Many frameworks parse the
+body automatically; you have to grab the raw body first. This is the
+most common reason signature verification “mysteriously” fails.</p>
+<p><strong>Include a timestamp in the signed content.</strong> A
+signature over just the body proves authenticity but not freshness. An
+attacker who captures one valid request can <strong>replay</strong> it
+later. Stripe’s scheme signs <code>timestamp.body</code> and sends
+<code>Stripe-Signature: t=&lt;timestamp&gt;,v1=&lt;signature&gt;</code>.
+Receivers reject requests whose timestamp is too old; Stripe’s libraries
+default to a five-minute tolerance. Combined with deduplication by event
+ID (section 5), this makes replays harmless.</p>
+<p><strong>Compare in constant time.</strong> Use
+<code>hmac.compare_digest</code> or the equivalent, not <code>==</code>,
+so attackers can’t learn the signature byte by byte from timing
+differences.</p>
+<p><strong>Support secret rotation.</strong> Customers need to rotate
+secrets without downtime. Providers support this by signing with both
+the old and new secrets for an overlap period and sending multiple
+signatures, and receivers accept the request if any signature matches.
+The Oct 26 secrets-management pack reading covered rotation patterns in
+general.</p>
+<p>GitHub uses a similar scheme with the
+<code>X-Hub-Signature-256</code> header (HMAC-SHA256 of the body,
+without a timestamp), and many other providers follow the same pattern
+with their own header names. That inconsistency is what the Standard
+Webhooks spec (section 9) tries to fix.</p>
+<p>Some providers go further and sign with <strong>asymmetric
+keys</strong> (the receiver verifies with the provider’s public key, so
+no shared secret needs protecting), or support <strong>mutual
+TLS</strong> for high-security receivers. HMAC remains the most common
+because it’s simple and fast.</p>
+<h2 id="retries-and-endpoint-health">4. Retries and endpoint health</h2>
+<p>Deliveries fail all the time, mostly for transient reasons, so
+retries are essential. The design questions:</p>
+<p><strong>What counts as success?</strong> Typically any
+<code>2xx</code> response within the timeout. Everything else, including
+timeouts, connection errors, <code>3xx</code>, <code>4xx</code> and
+<code>5xx</code>, is a failure. Some providers treat certain
+<code>4xx</code> codes (like <code>410 Gone</code>) as a signal to stop
+retrying.</p>
+<p><strong>How long to keep trying?</strong> Long enough to survive a
+customer’s outage or a bad weekend deploy. Stripe documents retrying
+live-mode deliveries for up to three days with exponential backoff. A
+schedule like “immediately, then 5 minutes, 30 minutes, 2 hours, 5
+hours, 10 hours, then every 12 hours” spreads attempts out while still
+giving quick recovery from short blips. Add jitter so retries from many
+events don’t arrive in synchronized waves (Oct 22 reading).</p>
+<p><strong>What happens to a persistently failing endpoint?</strong> If
+an endpoint has failed every delivery for days, keeping on hammering it
+wastes resources and can look like an attack. Providers typically mark
+the endpoint as failing, email the account owner, and eventually
+<strong>disable</strong> it, while keeping the events so they can be
+replayed once the customer fixes it.</p>
+<p><strong>Protect the receiver from yourself.</strong> When a
+customer’s endpoint comes back after an outage, the sender may have
+thousands of queued deliveries. Sending them all at once can knock the
+endpoint over again. Rate limit per endpoint, and ramp up gradually
+after recovery, like the slow start in the Oct 30 load balancing
+reading.</p>
+<h2 id="the-receiver-verify-dedupe-acknowledge-then-work">5. The
+receiver: verify, dedupe, acknowledge, then work</h2>
+<p>On the receiving side, a robust handler does four things in
+order:</p>
+<ol type="1">
+<li><strong>Verify the signature and timestamp</strong> using the raw
+body. Reject anything that fails with <code>400</code> or
+<code>401</code>.</li>
+<li><strong>Deduplicate by event ID.</strong> Delivery is at-least-once:
+the provider will resend if it didn’t see your <code>2xx</code>, even if
+you processed the event. Store processed event IDs (with a unique
+constraint) and skip duplicates. Doing the insert in the same
+transaction as the event’s effects makes this exact.</li>
+<li><strong>Acknowledge quickly.</strong> Return <code>2xx</code> as
+soon as the event is durably recorded, ideally within a second or two.
+Don’t do slow work, such as calling other APIs, sending emails or
+generating PDFs, inside the webhook request. If that work takes longer
+than the sender’s timeout, the sender retries, and now you’re processing
+duplicates in parallel.</li>
+<li><strong>Do the work asynchronously</strong>, from your own queue or
+database table, with your own retries.</li>
+</ol>
+<p>The pattern is exactly the job queue from Nov 1, with the webhook
+endpoint as the producer. It makes the receiver fast, idempotent and
+resilient to its own downstream failures.</p>
+<p>A frequent mistake is returning an error to the sender when your own
+downstream processing fails (“we couldn’t update the CRM, so return
+500”). That makes the provider retry, but the problem is on your side
+and retries from the provider won’t fix it. Once you’ve durably stored
+the event, return <code>2xx</code> and handle your own retries.</p>
+<h2 id="ordering-and-the-fetch-the-latest-pattern">6. Ordering and the
+“fetch the latest” pattern</h2>
+<p>Webhooks generally <strong>aren’t delivered in order</strong>.
+Retries reorder events: <code>invoice.paid</code> might succeed on the
+first try while an earlier <code>invoice.updated</code> is still being
+retried. Parallel dispatching reorders them too. Stripe’s documentation
+explicitly says it doesn’t guarantee delivery in the order events were
+generated.</p>
+<p>Receivers that apply each event’s payload as the new state can go
+wrong: an old <code>subscription.updated</code> arriving late can
+overwrite a newer one. Three defenses:</p>
+<ul>
+<li><strong>Compare versions or timestamps.</strong> Ignore an event if
+its object version (or <code>created</code> timestamp) is older than
+what you already have.</li>
+<li><strong>Fetch the latest state.</strong> Treat the webhook as a
+notification that “something changed for object X,” and call the
+provider’s API to get X’s current state. Ordering stops mattering,
+because you always apply the newest state. It costs an extra API call
+per event, but it’s the most robust approach, and it’s the same idea as
+the “read current state” advice in the Nov 1 queue reading.</li>
+<li><strong>Design for commutativity</strong> where possible, so
+applying events in any order gives the same result.</li>
+</ul>
+<h3 id="thin-versus-fat-payloads">Thin versus fat payloads</h3>
+<p>The fetch-the-latest pattern connects to a design choice for
+providers: what to put in the payload.</p>
+<ul>
+<li><strong>Fat (snapshot) payloads</strong> include the full object as
+of the event. Receivers can often act without another API call, but the
+payload may be stale by the time it’s processed, it may expose sensitive
+data to anyone who misconfigures an endpoint, and payload shape is tied
+to API versions (Stripe renders webhook payloads in the endpoint’s
+pinned API version, as the Oct 26 API design reading described).</li>
+<li><strong>Thin payloads</strong> include only the event type and the
+object’s ID. Receivers fetch the current object through the API. Stripe
+introduced “thin events” for its newer APIs in 2024 for these reasons:
+smaller payloads, no version coupling, and always-fresh data.</li>
+</ul>
+<p>Thin payloads put more load on the provider’s API and need the
+receiver to have API credentials, but they eliminate whole classes of
+ordering and staleness bugs.</p>
+<h2 id="observability-and-replay">7. Observability and replay</h2>
+<p>Webhooks fail silently from the receiver’s point of view: if an event
+never arrives, nothing tells you. Good providers give customers
+visibility and control:</p>
+<ul>
+<li><strong>A delivery log</strong> per endpoint, showing each attempt,
+response code, latency and response body excerpt.</li>
+<li><strong>Manual redelivery</strong> of individual events and
+<strong>bulk replay</strong> for a time range, after the customer fixes
+a bug.</li>
+<li><strong>An events API</strong>, so receivers can list recent events
+and reconcile anything they missed, which turns webhooks from the only
+path into a fast path backed by polling. Stripe recommends this kind of
+reconciliation for critical flows.</li>
+<li><strong>Test events</strong> and a CLI or tunnel (like Stripe CLI’s
+<code>listen</code> command) for local development.</li>
+</ul>
+<p>Receivers should monitor their side too: signature failure counts (a
+spike might mean a rotated secret or an attack), processing lag in their
+own queue, and duplicate rates. For critical events such as payments,
+run a periodic <strong>reconciliation job</strong> that compares the
+provider’s records with yours via the API, so a missed webhook gets
+caught within hours instead of when a customer complains.</p>
+<h2 id="security-beyond-signatures">8. Security beyond signatures</h2>
+<p><strong>SSRF on the sender.</strong> A webhook provider lets
+customers enter arbitrary URLs, and its servers then make requests to
+them. An attacker can register
+<code>http://169.254.169.254/latest/meta-data/</code> (the cloud
+metadata service), <code>http://localhost:6379</code>, or an internal
+hostname, and use the provider’s dispatchers to probe or attack its
+internal network. This <strong>server-side request forgery</strong> risk
+is the most serious security issue for webhook senders. Defenses:</p>
+<ul>
+<li>Resolve the hostname and <strong>block private, loopback, link-local
+and metadata addresses</strong>, checking the IP actually connected to
+(not just the one validated earlier), so DNS rebinding can’t swap
+addresses between check and use.</li>
+<li>Send webhooks from <strong>isolated egress infrastructure</strong>
+that has no access to internal networks, ideally through a dedicated
+proxy.</li>
+<li>Don’t follow redirects, or re-validate each redirect target.</li>
+<li>Require HTTPS for production endpoints.</li>
+</ul>
+<p><strong>Data exposure.</strong> Fat payloads can carry personal data
+to an endpoint the customer misconfigured or that an employee set up for
+testing. Let customers choose which event types they subscribe to, keep
+payloads minimal, and consider thin events for sensitive objects.</p>
+<p><strong>Receiver endpoint hygiene.</strong> Don’t put secrets in the
+webhook URL as query parameters (they end up in logs). Allowlisting the
+provider’s IP ranges can be an extra layer, but providers change ranges,
+so treat it as defense in depth, not a replacement for signatures.</p>
+<p><strong>Verify endpoint ownership.</strong> Some systems verify that
+the registering party controls the URL by sending a challenge first,
+which prevents customers from pointing webhooks at third parties to use
+the provider as a traffic source.</p>
+<h2 id="standards-standard-webhooks-and-cloudevents">9. Standards:
+Standard Webhooks and CloudEvents</h2>
+<p>Every provider inventing its own headers and signing scheme makes
+receivers write custom verification code for each one. Two efforts
+address this.</p>
+<p><strong>Standard Webhooks</strong> is an open specification started
+in 2023 by Svix with contributors from several companies. It defines
+three headers:</p>
+<ul>
+<li><code>webhook-id</code>: a unique message ID, for
+deduplication.</li>
+<li><code>webhook-timestamp</code>: Unix seconds, for replay
+protection.</li>
+<li><code>webhook-signature</code>: one or more signatures, such as
+<code>v1,&lt;base64 HMAC-SHA256&gt;</code>, over
+<code>id.timestamp.body</code>.</li>
+</ul>
+<p>It also gives guidance on retries, secret formats, payload structure,
+and asymmetric signatures, with reference libraries in many languages. A
+receiver that supports the spec can verify any compliant provider with
+one library.</p>
+<p><strong>CloudEvents</strong> is a CNCF specification (graduated in
+January 2024) for describing event metadata in a common way:
+<code>id</code>, <code>source</code>, <code>type</code>,
+<code>specversion</code>, <code>time</code>, <code>subject</code> and
+<code>data</code>, with bindings for HTTP, Kafka, AMQP and others. It’s
+about event <em>format</em> rather than webhook <em>delivery</em>, and
+it’s used widely in cloud eventing systems such as Azure Event Grid,
+Knative and Google Eventarc. The two can be combined: a
+CloudEvents-formatted payload delivered with Standard Webhooks
+signing.</p>
+<p>There are also managed services (Svix, Hookdeck and others) that run
+the sender side, the receiver side, or both, handling retries, signing,
+logs and replay, for teams that would rather not build this
+themselves.</p>
+<h2 id="checklists">10. Checklists</h2>
+<p><strong>Sending webhooks:</strong></p>
+<ol type="1">
+<li>Write events to an outbox in the same transaction as the
+change.</li>
+<li>One delivery job per endpoint, with per-endpoint concurrency
+limits.</li>
+<li>Sign with HMAC over <code>id.timestamp.body</code> (or follow
+Standard Webhooks), and support secret rotation.</li>
+<li>Short timeouts; retry with exponential backoff and jitter for
+days.</li>
+<li>Mark failing endpoints, notify owners, disable after a long failure
+period, and allow replay.</li>
+<li>Block SSRF: private IPs, metadata endpoints, redirects; send from
+isolated egress.</li>
+<li>Provide delivery logs, redelivery and an events API for
+reconciliation.</li>
+<li>Version payloads, and consider thin events.</li>
+</ol>
+<p><strong>Receiving webhooks:</strong></p>
+<ol type="1">
+<li>Verify signatures on the raw body, with timestamp tolerance and
+constant-time comparison.</li>
+<li>Deduplicate by event ID with a unique constraint.</li>
+<li>Store and acknowledge quickly; process asynchronously.</li>
+<li>Handle out-of-order events by checking versions or fetching current
+state.</li>
+<li>Return <code>2xx</code> once stored, even if your downstream work
+fails; retry on your side.</li>
+<li>Monitor signature failures and processing lag; reconcile critical
+data periodically through the API.</li>
+</ol>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Webhooks are at-least-once, unordered messages across two
+organizations, so treat them like any distributed messaging system.</li>
+<li>Senders should use an outbox and per-endpoint delivery jobs so
+events are never lost and one bad endpoint doesn’t hurt others.</li>
+<li>HMAC signatures over the raw body plus a timestamp prove
+authenticity and freshness; deduplication by event ID makes replays
+harmless.</li>
+<li>Retry for days with backoff and jitter, disable chronically failing
+endpoints, and offer replay.</li>
+<li>Receivers should verify, dedupe, store, acknowledge in under a few
+seconds, and do real work asynchronously.</li>
+<li>Handle ordering by version checks or by fetching the latest state;
+thin payloads make this the default.</li>
+<li>SSRF is the biggest risk for senders; isolate egress and block
+internal addresses.</li>
+<li>Standard Webhooks and CloudEvents reduce per-provider custom
+code.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Your webhook handler calls a CRM API that sometimes takes 15
+seconds. The provider’s timeout is 10 seconds. What happens, and how
+would you redesign it?</li>
+<li>Why does verifying a signature after your framework has parsed and
+re-serialized the JSON fail, and how do you get the raw body in a
+framework you use?</li>
+<li>A <code>subscription.updated</code> event from two hours ago arrives
+after a newer one. How would each of the three ordering defenses handle
+it?</li>
+<li>If you’re building a webhook sender, how would you protect against a
+customer registering <code>http://169.254.169.254/</code> as their
+endpoint, including through DNS rebinding?</li>
+<li>When would you choose fat payloads over thin events, as a
+provider?</li>
+<li>A customer’s endpoint was down for 18 hours and comes back. You have
+400,000 queued deliveries for it. What do you do?</li>
+<li>Which webhooks does your system consume today, and would you notice
+if one provider’s events stopped arriving for a day?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Stripe documentation: “Receive Stripe events in your webhook
+endpoint,” “Manage webhook endpoints,” signature verification, retry
+behavior and event ordering, https://docs.stripe.com/webhooks and
+https://docs.stripe.com/events/manage-webhook-endpoints</li>
+<li>Hookdeck, “Guide to Stripe Webhooks: Features and Best Practices,”
+https://hookdeck.com/webhooks/platforms/guide-to-stripe-webhooks-features-and-best-practices</li>
+<li>GitHub Docs, “Validating webhook deliveries” and “Best practices for
+using webhooks,” https://docs.github.com/en/webhooks</li>
+<li>Standard Webhooks specification, https://www.standardwebhooks.com
+and https://github.com/standard-webhooks/standard-webhooks ; Webhook
+Relay, “What is Standard Webhooks?”,
+https://webhookrelay.com/glossary/standard-webhooks/</li>
+<li>Svix, “Webhook signature” and webhook best-practice resources,
+https://www.svix.com/resources/glossary/webhook-signature/</li>
+<li>CloudEvents specification (CNCF), https://cloudevents.io</li>
+<li>OWASP, “Server-Side Request Forgery Prevention Cheat Sheet,”
+https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html</li>
+<li>Chris Richardson, “Pattern: Transactional outbox,”
+microservices.io.</li>
+</ul>
+<p>The Standard Webhooks header names and Stripe’s retry and tolerance
+behavior were checked against search results on Nov 9, 2026. Other
+provider details come from their documentation as I know it, and they
+change, so check the current docs before relying on a specific timeout
+or schedule.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/apis.html">APIs</a><a class="chip" href="/topics/security.html">Security</a></div>
+          <div class="daynav"><a href="/reading/stream-processing.html"><div class="kicker">← Older · Nov 8</div><div class="t">Stream processing: event time, watermarks and state</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
