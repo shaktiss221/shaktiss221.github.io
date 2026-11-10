@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How Figma scaled Postgres: from one box to horizontal sharding · The Daily Commit</title>
+  <meta name="description" content="A case study in scaling a relational database in place. Covers Figma&#x27;s path from a single Postgres instance through vertical partitioning to horizontal sharding, the choice of shard keys and colos, logical sharding with views before physical moves, the DBProxy query engine, what they gave up, and how it compares with buying a distributed database.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>How Figma scaled Postgres: from one box to horizontal sharding</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>13 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#the-starting-point">The starting point</a><a href="#why-not-just-switch-databases">Why not just switch
+databases?</a><a href="#step-one-vertical-partitioning">Step one: vertical
+partitioning</a><a href="#why-vertical-partitioning-ran-out">Why vertical partitioning
+ran out</a><a href="#choosing-shard-keys-and-colos">Choosing shard keys and
+colos</a><a href="#logical-sharding-before-physical-sharding">Logical sharding
+before physical sharding</a><a href="#dbproxy-a-query-engine-in-front-of-postgres">DBProxy: a query
+engine in front of Postgres</a><a href="#the-result">The result</a><a href="#how-this-compares-with-other-approaches">How this compares
+with other approaches</a><a href="#lessons">Lessons</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 13 min left</div>
+      </nav>
+      <article class="article" data-slug="figma-postgres-sharding" data-minutes="13">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/case-study.html">Case Study</a> · November 10, 2026 · 13 min</div>
+        <h1>How Figma scaled Postgres: from one box to horizontal sharding</h1>
+        <p class="dek">A case study in scaling a relational database in place. Covers Figma&#x27;s path from a single Postgres instance through vertical partitioning to horizontal sharding, the choice of shard keys and colos, logical sharding with views before physical moves, the DBProxy query engine, what they gave up, and how it compares with buying a distributed database.</p>
+<p>In 2020, Figma ran on a single Postgres database on AWS’s largest
+physical instance. By the time its databases team wrote about it
+publicly, the database stack had grown almost 100 times, and the company
+had scaled it without switching databases, without a long migration
+freeze, and with only seconds of partial availability impact at each
+step. Figma’s two engineering posts, “The growing pains of database
+architecture” (vertical partitioning) and “How Figma’s databases team
+lived to tell the scale” (horizontal sharding), are among the clearest
+public accounts of scaling Postgres in place. This reading walks through
+that journey: the quick wins first, then splitting tables across
+databases, then splitting individual tables across many databases, and
+the design decisions that made each step safe and reversible.</p>
+<h2 id="the-starting-point">1. The starting point</h2>
+<p>Figma is a collaborative design tool. Its backend (Ruby, using
+ActiveRecord) stores metadata about files, users, teams, organizations,
+comments and permissions in Postgres on <strong>Amazon RDS</strong>,
+with PgBouncer for connection pooling. (The design documents themselves
+are stored separately; this is the relational metadata around them.)</p>
+<p>The second post describes the situation in 2020: traffic was growing
+roughly <strong>three times a year</strong>, and the single RDS database
+was running at more than <strong>65% CPU</strong> during peak traffic.
+At that level, latency gets worse in unpredictable ways and there’s
+little headroom for a traffic spike or a bad query.</p>
+<p>The team’s first steps were the obvious, tactical ones:</p>
+<ul>
+<li><strong>Scale up</strong>: move from an <code>r5.12xlarge</code> to
+an <code>r5.24xlarge</code>, the largest instance available.</li>
+<li><strong>Add read replicas</strong> and route read-only queries to
+them.</li>
+<li><strong>Add PgBouncer</strong> to manage the flood of connections
+from application servers (Postgres handles many connections poorly,
+since each one is a separate process).</li>
+</ul>
+<p>These bought time, but scaling up has a hard ceiling. You can’t buy a
+bigger machine than the biggest one, and write traffic can’t go to read
+replicas. The team needed to spread data across multiple databases.</p>
+<h2 id="why-not-just-switch-databases">2. Why not just switch
+databases?</h2>
+<p>The obvious alternative was to move to a database built to scale
+horizontally: a distributed SQL (“NewSQL”) system like CockroachDB, TiDB
+or Spanner (Nov 2 reading), or a NoSQL store like DynamoDB (Oct 20
+reading).</p>
+<p>Figma decided against it, and the posts explain why:</p>
+<ul>
+<li><strong>Migration risk and time.</strong> Their application was
+built on Postgres semantics, ActiveRecord, and years of SQL. A database
+switch would be a long, risky migration of the company’s most critical
+data.</li>
+<li><strong>Operational familiarity.</strong> The team knew RDS Postgres
+well, including how it failed. A new system brings new failure modes
+that take years to learn.</li>
+<li><strong>Being a pioneer.</strong> In the post’s words, they “didn’t
+want to bear the burden of being the first customer to hit certain
+scaling issues.” At Figma’s growth rate, they were worried about running
+into problems in a less mature system that nobody else had hit yet.</li>
+</ul>
+<p>They chose to scale Postgres incrementally, building only the pieces
+they needed, and to reconsider managed or NewSQL options later. That
+framing is worth noting: it wasn’t a claim that sharding Postgres
+yourself is better in general, but that for their timeline and risk
+tolerance, an incremental path on known technology was safer than a big
+switch.</p>
+<h2 id="step-one-vertical-partitioning">3. Step one: vertical
+partitioning</h2>
+<p><strong>Vertical partitioning</strong> moves whole tables (or groups
+of related tables) to their own database. Instead of one database
+holding everything, files-related tables go to one database, comments to
+another, and so on. The application routes each query to the database
+that holds the table.</p>
+<p>How they chose what to move:</p>
+<ul>
+<li><strong>Impact</strong>: tables responsible for a large share of
+database load (measured in average active sessions).</li>
+<li><strong>Isolation</strong>: tables only weakly connected to others,
+so moving them wouldn’t break joins and transactions the application
+relied on.</li>
+</ul>
+<p>How they moved tables with minimal disruption:</p>
+<ol type="1">
+<li>Set up <strong>logical replication</strong> from the old database to
+the new one, so the new database receives a continuous copy.</li>
+<li><strong>Drop indexes during the initial copy</strong> and rebuild
+them afterward. This cut the initial data copy from days to a matter of
+hours.</li>
+<li>Once caught up, briefly <strong>pause writes</strong> to the tables
+being moved, wait for replication to drain, then switch the application
+to the new database.</li>
+<li>Set up <strong>reverse replication</strong> from new to old, so they
+could roll back to the old database without losing writes made after the
+switch.</li>
+</ol>
+<p>Each move caused about <strong>30 seconds of partial availability
+impact, with about 2% of requests dropped</strong>. The first operation
+moved two tables; the last, in October 2022, moved 50. By the end of
+2022, Figma had caching, read replicas and around a dozen vertically
+partitioned databases, and the largest partition was running at about
+10% CPU.</p>
+<p>This is the right first step for most growing systems, and worth
+emphasizing: vertical partitioning needs no changes to how queries are
+written, only to where they’re sent. It also matches the natural
+boundaries of the product.</p>
+<h2 id="why-vertical-partitioning-ran-out">4. Why vertical partitioning
+ran out</h2>
+<p>Vertical partitioning has a built-in limit: <strong>the smallest unit
+you can move is one table</strong>. Some of Figma’s tables had grown to
+<strong>several terabytes and billions of rows</strong>, and they kept
+growing. Two problems were coming:</p>
+<ul>
+<li><strong>Vacuum.</strong> Postgres vacuum (the Oct 24 MVCC pack
+reading) must periodically scan huge tables to clean up dead row
+versions and prevent transaction ID wraparound. On multi-terabyte
+tables, vacuum took long enough to affect reliability.</li>
+<li><strong>Write IOPS.</strong> The highest-write tables were on track
+to exceed the maximum IOPS that RDS supports for a single instance.</li>
+</ul>
+<p>No amount of moving tables around fixes a single table that’s too big
+for one machine. The only option left was <strong>horizontal
+sharding</strong>: splitting the rows of one table across many
+databases.</p>
+<h2 id="choosing-shard-keys-and-colos">5. Choosing shard keys and
+colos</h2>
+<p>Horizontal sharding starts with the <strong>shard key</strong>: the
+column used to decide which shard a row lives on. Every query that
+includes the shard key can go to a single shard. Queries without it must
+ask every shard.</p>
+<p>Figma’s data model naturally clusters around a few entities, so they
+picked a small set of shard keys: <strong><code>UserID</code>,
+<code>FileID</code> and <code>OrgID</code></strong>. Almost every table
+could be sharded by one of these.</p>
+<p>Tables that share a shard key are grouped into a
+<strong>colo</strong> (colocation). All rows for a given
+<code>FileID</code>, across all tables in the file colo, live on the
+same shard. Within a colo, the application can still do <strong>joins
+and transactions</strong>, as long as they’re scoped to one shard key
+value, because all the data involved is on one database. This keeps the
+most common access patterns, “everything about this file” or “everything
+about this user,” working like plain Postgres.</p>
+<h3 id="hashing-the-key">Hashing the key</h3>
+<p>Figma’s IDs were generated in a roughly increasing order
+(auto-increment and Snowflake-style timestamp-prefixed IDs). If shards
+were assigned by <strong>ranges</strong> of ID, all new rows, which are
+also the most active, would land on the same shard, creating a hotspot.
+So Figma routes by a <strong>hash of the shard key</strong>, which
+spreads new and old rows evenly. The cost, which the post acknowledges,
+is that range scans over the key become less efficient, since
+consecutive IDs end up on different shards. The consistent hashing pack
+reading (Oct 27) covers this trade-off between range and hash
+partitioning in general.</p>
+<h2 id="logical-sharding-before-physical-sharding">6. Logical sharding
+before physical sharding</h2>
+<figure class="diagram"><svg viewBox="0 0 760 320" role="img" aria-label="Figma logical sharding with views, then physical sharding behind DBProxy" font-size="13"><defs><marker id="fg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Shard logically first, then move data physically</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">The application always talks to DBProxy, which routes by a hash of the shard key.</text><text x="200" y="80" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Step 1: logical sharding</text><rect x="120" y="92" width="160" height="32" rx="7" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="200" y="113" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">DBProxy (Go)</text><text x="570" y="80" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">Step 2: physical sharding</text><rect x="490" y="92" width="160" height="32" rx="7" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="570" y="113" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">DBProxy (Go)</text><rect x="70" y="170" width="260" height="110" rx="7" fill="var(--cds-chart-categorical-2)" fill-opacity="0.08" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="200" y="270" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">one physical Postgres</text><rect x="84" y="184" width="52" height="30" rx="7" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="110" y="204" text-anchor="middle" font-size="11" fill="var(--cds-text-primary)">view 1</text><line x1="200" y1="124" x2="110" y2="182" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#fg)"></line><rect x="146" y="184" width="52" height="30" rx="7" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="172" y="204" text-anchor="middle" font-size="11" fill="var(--cds-text-primary)">view 2</text><line x1="200" y1="124" x2="172" y2="182" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#fg)"></line><rect x="208" y="184" width="52" height="30" rx="7" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="234" y="204" text-anchor="middle" font-size="11" fill="var(--cds-text-primary)">view 3</text><line x1="200" y1="124" x2="234" y2="182" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#fg)"></line><rect x="270" y="184" width="52" height="30" rx="7" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="296" y="204" text-anchor="middle" font-size="11" fill="var(--cds-text-primary)">view 4</text><line x1="200" y1="124" x2="296" y2="182" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#fg)"></line><text x="200" y="240" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">each view = WHERE hash(key) in range</text><rect x="430" y="184" width="60" height="40" rx="7" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="460" y="208" text-anchor="middle" font-size="11" fill="var(--cds-text-primary)">shard 1</text><line x1="570" y1="124" x2="460" y2="182" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#fg)"></line><rect x="502" y="184" width="60" height="40" rx="7" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="532" y="208" text-anchor="middle" font-size="11" fill="var(--cds-text-primary)">shard 2</text><line x1="570" y1="124" x2="532" y2="182" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#fg)"></line><rect x="574" y="184" width="60" height="40" rx="7" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="604" y="208" text-anchor="middle" font-size="11" fill="var(--cds-text-primary)">shard 3</text><line x1="570" y1="124" x2="604" y2="182" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#fg)"></line><rect x="646" y="184" width="60" height="40" rx="7" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="676" y="208" text-anchor="middle" font-size="11" fill="var(--cds-text-primary)">shard 4</text><line x1="570" y1="124" x2="676" y2="182" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#fg)"></line><text x="570" y="250" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">separate Postgres instances</text><line x1="345" y1="220" x2="415" y2="220" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#fg)"></line><text x="24" y="306" font-size="11.5" fill="var(--cds-text-secondary)">Step 1 is a feature-flag rollout that can be undone in seconds; step 2 is a failover once step 1 is proven.</text></svg></figure>
+<p>The most distinctive part of Figma’s design is splitting the rollout
+into two separate steps, so the risky parts could be tested and reversed
+independently.</p>
+<p><strong>Logical sharding.</strong> First, without moving any data,
+they made the application <em>behave</em> as if the table were sharded.
+They created Postgres <strong>views</strong> on the existing, unsharded
+table, one per future shard, each selecting the rows whose hashed shard
+key falls in that shard’s range:</p>
+<pre class="sql"><code>CREATE VIEW table_shard1 AS
+SELECT * FROM table
+WHERE hash(shard_key) &gt;= min_shard_range
+  AND hash(shard_key) &lt; max_shard_range;</code></pre>
+<p>Reads and writes went through these views, routed by the new proxy
+layer (section 7), behind <strong>feature flags</strong> that rolled the
+change out to a percentage of traffic. If something broke, such as a
+query the router couldn’t handle or a performance problem, they could
+turn the flag off in seconds and go back to the unsharded path. All the
+data was still in one database, so there was nothing to migrate back.
+They measured the overhead of querying through views and found it was
+under 10% in the worst case.</p>
+<p><strong>Physical sharding.</strong> Only after logical sharding had
+run successfully did they actually move data to separate databases.
+Because the application was already sending every query through the
+shard-aware path, this step became a database failover: copy data to the
+new shard databases with replication, then switch the mapping so each
+logical shard points at its new physical home. The step that’s hard to
+undo was reduced to a well-understood infrastructure operation.</p>
+<p>This separation is the same idea as the progressive delivery reading
+from Nov 7, applied to a database: separate the risky behavioral change
+(the application now treats data as sharded) from the risky
+infrastructure change (data physically moves), and make the first one
+gradual and reversible with feature flags.</p>
+<h2 id="dbproxy-a-query-engine-in-front-of-postgres">7. DBProxy: a query
+engine in front of Postgres</h2>
+<p>Sharding needs something that knows where data lives and routes
+queries accordingly. Figma built <strong>DBProxy</strong>, a Go service
+that sits between the application and PgBouncer.</p>
+<p>DBProxy includes a small <strong>query engine</strong>:</p>
+<ul>
+<li>A <strong>parser</strong> that turns SQL into an abstract syntax
+tree.</li>
+<li>A <strong>logical planner</strong> that works out which tables,
+shard keys and conditions the query involves.</li>
+<li>A <strong>physical planner</strong> that decides which shard or
+shards to send it to and how to combine the results.</li>
+</ul>
+<p>Queries that include the shard key go straight to one shard. Queries
+that don’t are <strong>scatter-gathered</strong>: sent to every shard,
+with the results merged. Scatter-gather works, but it costs load on
+every shard, so the team tried to keep it rare for hot paths.</p>
+<p>The <strong>shard topology</strong>, meaning which logical shards map
+to which physical databases, is stored in S3 and etcd, and changes
+propagate to DBProxy in under a second. That’s what makes the
+physical-sharding failover quick.</p>
+<h3 id="supporting-only-whats-needed">Supporting only what’s needed</h3>
+<p>Writing a SQL engine that supports all of Postgres would be a huge
+project. Instead, the team decided to support a deliberately limited
+subset. To choose it, they ran <strong>shadow planning</strong>: DBProxy
+logic processed real production queries without acting on them, and the
+results were logged to Snowflake for analysis. That showed which query
+shapes the application actually used. The supported language covers
+<strong>the most common 90% of queries</strong>, and the remaining
+queries were rewritten in the application.</p>
+<p>Key restrictions:</p>
+<ul>
+<li><strong>Joins are allowed only within a colo, on the shard
+key.</strong> A query joining a file’s tables by <code>FileID</code>
+works; joining across colos or on other columns doesn’t.</li>
+<li><strong>No cross-shard transactions.</strong> A transaction must
+touch a single shard. Product code that writes to several shards must
+tolerate partial failures, where one write commits and another
+doesn’t.</li>
+<li><strong>Unique constraints must include the shard key</strong>,
+because each shard can only enforce uniqueness on its own rows.</li>
+</ul>
+<p>These are the same restrictions most sharded systems end up with,
+from Vitess to Citus. What’s notable is how they chose them: from
+measured production traffic rather than up-front design.</p>
+<h2 id="the-result">8. The result</h2>
+<p>The first horizontally sharded table went live in <strong>September
+2023</strong>, about <strong>nine months</strong> after the project
+started. The physical failover caused <strong>ten seconds of partial
+availability on database primaries, and no availability impact on
+replicas</strong>, and the team reported no regressions in latency or
+availability after sharding.</p>
+<p>The post is honest about what remained unsolved at the time:</p>
+<ul>
+<li><strong>Sharded schema changes</strong>, which must be coordinated
+across all shards.</li>
+<li><strong>Globally unique ID generation</strong> across shards.</li>
+<li><strong>Atomic cross-shard transactions.</strong></li>
+<li><strong>Distributed globally unique indexes.</strong></li>
+<li><strong>An ORM</strong> layer that understands sharding, to make
+developer experience smoother.</li>
+<li><strong>One-click resharding</strong>, to split shards further as
+they grow.</li>
+</ul>
+<p>They also said they’d reassess their in-house approach against NewSQL
+and managed options over time, now that they’d bought themselves
+room.</p>
+<h2 id="how-this-compares-with-other-approaches">9. How this compares
+with other approaches</h2>
+<p>Figma’s path is one of several common ways to scale a relational
+database. It helps to see the options side by side.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Approach</th>
+<th>Examples</th>
+<th>Trade-off</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Scale up + read replicas</td>
+<td>RDS, Aurora</td>
+<td>Simple; hard ceiling on writes</td>
+</tr>
+<tr class="even">
+<td>Vertical partitioning</td>
+<td>Figma 2020 to 2022</td>
+<td>No query changes; limited by largest table</td>
+</tr>
+<tr class="odd">
+<td>Application-level sharding</td>
+<td>Many early startups</td>
+<td>Full control; logic spread through the app</td>
+</tr>
+<tr class="even">
+<td>Proxy-based sharding</td>
+<td>Figma’s DBProxy, Vitess for MySQL, PgDog/PgCat for Postgres</td>
+<td>Central routing; must support a SQL subset</td>
+</tr>
+<tr class="odd">
+<td>Extension-based sharding</td>
+<td>Citus for Postgres</td>
+<td>Distributed queries inside Postgres; a different operational
+model</td>
+</tr>
+<tr class="even">
+<td>Distributed SQL</td>
+<td>CockroachDB, TiDB, YugabyteDB, Spanner, Aurora DSQL</td>
+<td>Sharding built in; migration and new failure modes</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Vitess</strong> is the closest analogy. Built at YouTube to
+shard MySQL, it uses a proxy layer (VTGate) with a query planner,
+keyspaces and shard keys (called vindexes) to route queries, and it
+supports resharding online. Slack, GitHub and others have written about
+running it. Figma’s DBProxy is a smaller, purpose-built version of the
+same idea for Postgres.</p>
+<p><strong>Notion</strong> described a similar journey in its 2021 post
+on sharding Postgres, splitting its block table across 480 logical
+shards on 32 physical databases. It used application-level routing and a
+long double-write migration rather than a proxy, a useful contrast with
+Figma’s views-first rollout.</p>
+<h2 id="lessons">10. Lessons</h2>
+<p>Several lessons from Figma’s experience apply beyond Postgres:</p>
+<ul>
+<li><strong>Exhaust the simple options first, but plan the next step
+before you need it.</strong> Scaling up, read replicas and vertical
+partitioning bought Figma two years. They started horizontal sharding
+work well before the hard limits arrived.</li>
+<li><strong>Pick shard keys from your data model’s natural
+ownership.</strong> Users, files and organizations made good keys
+because nearly all access patterns are scoped to one of them.</li>
+<li><strong>Hash monotonically increasing keys</strong> to avoid hot
+shards, and accept slower range scans.</li>
+<li><strong>Make the risky change reversible.</strong> Logical sharding
+behind feature flags meant the behavioral change could be rolled back in
+seconds, and the physical move became a routine failover.</li>
+<li><strong>Measure real queries before deciding what to
+support.</strong> Shadow planning let them build exactly the SQL subset
+they needed instead of a general distributed database.</li>
+<li><strong>Be explicit about what you give up.</strong> No cross-shard
+transactions, no global unique constraints, and scatter-gather costs are
+real constraints that product engineers must design around.</li>
+<li><strong>Build versus buy is a moving decision.</strong> Figma built
+in-house because of its timeline and risk tolerance, while explicitly
+planning to revisit the choice.</li>
+</ul>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Figma scaled RDS Postgres about 100x from 2020 without switching
+databases, in stages: bigger instances, read replicas and PgBouncer,
+then vertical partitioning, then horizontal sharding.</li>
+<li>Vertical partitioning moved groups of tables using logical
+replication with reverse replication for rollback, at about 30 seconds
+of partial impact per move. It stopped working when single tables
+reached terabytes, with vacuum and IOPS limits.</li>
+<li>Horizontal sharding used shard keys <code>UserID</code>,
+<code>FileID</code> and <code>OrgID</code>, grouped tables into colos
+that allow joins and transactions on one key, and hashed keys to avoid
+hotspots.</li>
+<li>Logical sharding with Postgres views behind feature flags came
+first; physical sharding became a failover with about ten seconds of
+partial impact on primaries.</li>
+<li>DBProxy, a Go service with its own parser and planners, routes
+single-shard queries and scatter-gathers the rest, supporting the 90% of
+query shapes found through shadow planning.</li>
+<li>Cross-shard transactions, global unique IDs and indexes, and
+resharding were left as future work.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Figma rejected NewSQL databases partly to avoid being “the first
+customer to hit certain scaling issues.” When would you make the
+opposite choice?</li>
+<li>What makes <code>UserID</code>, <code>FileID</code> and
+<code>OrgID</code> good shard keys for Figma? Think of an app where
+choosing a shard key would be much harder.</li>
+<li>Logical sharding through views let Figma test sharding without
+moving data. What kinds of problems would it catch, and what problems
+would only appear after physical sharding?</li>
+<li>A product feature needs to update a file and its owner’s usage
+counter atomically, but they’re in different colos. How would you design
+around the lack of cross-shard transactions?</li>
+<li>Hashing the shard key prevents hotspots but makes range scans
+expensive. Which of Figma’s likely queries suffer from that, and how
+would you mitigate it?</li>
+<li>Shadow planning measured real query shapes before building DBProxy.
+How could you apply the same technique to another migration you’ve
+seen?</li>
+<li>If your main database hit its limits next year, which step in
+Figma’s sequence would you be at now, and what would you start on
+today?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Figma Engineering, “The growing pains of database architecture”
+(2023),
+https://www.figma.com/blog/how-figma-scaled-to-multiple-databases/</li>
+<li>Figma Engineering, “How Figma’s databases team lived to tell the
+scale” (2024),
+https://www.figma.com/blog/how-figmas-databases-team-lived-to-tell-the-scale/</li>
+<li>Vitess documentation, “Architecture,” “VTGate,” “Vindexes” and
+“Resharding,” https://vitess.io/docs/</li>
+<li>Notion Engineering, “Herding elephants: Lessons learned from
+sharding Postgres at Notion” (2021).</li>
+<li>Citus documentation, “Distributed tables and colocation,”
+https://docs.citusdata.com</li>
+<li>PostgreSQL documentation, “Logical Replication,”
+https://www.postgresql.org/docs/current/logical-replication.html</li>
+<li>Martin Kleppmann, <em>Designing Data-Intensive Applications</em>
+(O’Reilly, 2017), chapter 6 “Partitioning.”</li>
+</ul>
+<p>The Figma figures and quotes come from the two Figma posts, read on
+Nov 10, 2026. The fetched pages didn’t show publication dates, so the
+years above are as I recall them. The Notion and Vitess comparisons
+summarize those projects’ public write-ups as I know them.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/case-study.html">Case Study</a><a class="chip" href="/topics/databases.html">Databases</a></div>
+          <div class="daynav"><a href="/reading/webhooks.html"><div class="kicker">← Older · Nov 9</div><div class="t">Webhooks done right: delivery, signatures, retries and receivers</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
