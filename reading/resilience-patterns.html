@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Timeouts, retries, circuit breakers and the failures they cause · The Daily Commit</title>
+  <meta name="description" content="The resilience patterns every service-to-service call needs, and how each one goes wrong. Covers timeouts and deadline propagation, retries with backoff, jitter and budgets, retry amplification, hedged requests, circuit breakers, bulkheads, load shedding, and metastable failures where the fixes become the outage.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Timeouts, retries, circuit breakers and the failures they cause</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>15 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#timeouts-the-pattern-everything-else-depends-on">Timeouts:
+the pattern everything else depends on</a><a href="#retries-useful-and-dangerous">Retries: useful and
+dangerous</a><a href="#hedged-requests-retries-for-latency">Hedged requests: retries
+for latency</a><a href="#circuit-breakers">Circuit breakers</a><a href="#bulkheads">Bulkheads</a><a href="#load-shedding-and-adaptive-concurrency">Load shedding and
+adaptive concurrency</a><a href="#metastable-failures-when-the-fix-becomes-the-outage">Metastable failures: when the fix becomes the outage</a><a href="#putting-it-together-a-call-policy">Putting it together: a
+call policy</a><a href="#testing-resilience">Testing resilience</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 15 min left</div>
+      </nav>
+      <article class="article" data-slug="resilience-patterns" data-minutes="15">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/distributed-systems.html">Distributed Systems</a> · November 11, 2026 · 15 min</div>
+        <h1>Timeouts, retries, circuit breakers and the failures they cause</h1>
+        <p class="dek">The resilience patterns every service-to-service call needs, and how each one goes wrong. Covers timeouts and deadline propagation, retries with backoff, jitter and budgets, retry amplification, hedged requests, circuit breakers, bulkheads, load shedding, and metastable failures where the fixes become the outage.</p>
+<p>Every network call can fail, be slow, or succeed without you finding
+out. In a system of dozens of services, that’s not an edge case;
+something is always degraded somewhere. The standard toolkit for living
+with it is well known: timeouts, retries, circuit breakers, bulkheads.
+What’s less well known is how often these mechanisms cause the outages
+they’re meant to prevent. Retries multiply load on a struggling service,
+timeouts set without thought leave threads waiting long after the caller
+gave up, and a system can get stuck in a degraded state long after the
+original trigger has gone. This reading covers each pattern, how to
+configure it, and the failure mode it can create, drawing on Amazon’s
+Builders’ Library, Google’s SRE work, Michael Nygard’s <em>Release
+It!</em>, and recent research on metastable failures.</p>
+<h2 id="timeouts-the-pattern-everything-else-depends-on">1. Timeouts:
+the pattern everything else depends on</h2>
+<p>A call without a timeout can wait forever. If the downstream service
+hangs, the caller’s thread, connection or goroutine is stuck, and when
+enough of them are stuck, the caller stops serving everyone. That’s how
+one slow dependency takes down a service that calls it, and then the
+services that call that one. Nygard’s <em>Release It!</em> (2007, second
+edition 2018) calls this a <strong>cascading failure</strong> and argues
+that unbounded waits are one of the most common causes.</p>
+<p>So every remote call needs a timeout. Many libraries’ defaults are
+infinite or very long, so you must set them explicitly, and there’s
+usually more than one: connection timeout, TLS handshake timeout, time
+to first byte, total request time.</p>
+<p>How long should a timeout be? Marc Brooker’s Builders’ Library
+article “Timeouts, retries, and backoff with jitter” describes Amazon’s
+usual approach: pick an acceptable rate of false timeouts (say 0.1%) and
+set the timeout at the corresponding percentile of the downstream’s
+latency (here, p99.9), with some padding. Too short, and you time out
+requests that would have succeeded, and if you retry them, you add load.
+Too long, and stuck calls tie up resources.</p>
+<p>Two subtleties:</p>
+<ul>
+<li><strong>Latency distributions shift.</strong> A timeout set from
+last month’s p99.9 may be too tight after a dependency adds a feature.
+Revisit timeouts when latency changes, and alert on timeout rates.</li>
+<li><strong>The callee doesn’t know you gave up.</strong> When the
+caller times out, the downstream usually keeps working on the request,
+consuming resources for an answer nobody will read. That’s wasted work,
+and under load it’s a big part of why systems fall over.</li>
+</ul>
+<h3 id="deadlines-not-just-timeouts">Deadlines, not just timeouts</h3>
+<p>The second subtlety is solved by <strong>deadline
+propagation</strong>. Instead of each layer having its own independent
+timeout, the original caller sets an absolute deadline (“this request
+must finish by 12:00:00.800”), and every downstream call carries the
+remaining time. gRPC does this natively: a client deadline is sent with
+the request, servers can check it, and outgoing calls inherit what’s
+left. The Oct 25 gRPC pack reading covered the mechanics.</p>
+<p>Deadlines give two benefits:</p>
+<ol type="1">
+<li><strong>No wasted work.</strong> A server receiving a request with 5
+ms left, for an operation that takes 50 ms, can reject it immediately. A
+queue worker can drop requests whose deadline has passed instead of
+processing them.</li>
+<li><strong>Consistent budgets.</strong> Without propagation, a service
+with a 1-second timeout might call one with a 2-second timeout, which is
+nonsense: the inner call can keep running after the outer one has given
+up.</li>
+</ol>
+<h2 id="retries-useful-and-dangerous">2. Retries: useful and
+dangerous</h2>
+<p>Many failures are transient: a dropped connection, a server
+restarting, a brief overload. Retrying turns many of those into
+successes, and for a single client, retries almost always look like a
+good idea. At system scale, they’re one of the most dangerous tools in
+the box.</p>
+<h3 id="when-to-retry">When to retry</h3>
+<p>Only retry when it’s safe and likely to help:</p>
+<ul>
+<li><strong>The operation must be idempotent</strong>, or made
+idempotent with an idempotency key (Oct 26 API design and Nov 9 webhooks
+readings). Retrying a non-idempotent “charge card” request after a
+timeout can charge twice.</li>
+<li><strong>The error must be retryable.</strong> Connection failures,
+<code>503 Service Unavailable</code>, <code>429 Too Many Requests</code>
+(after <code>Retry-After</code>) and gRPC <code>UNAVAILABLE</code>
+usually are. <code>400 Bad Request</code>, <code>401</code>,
+<code>403</code>, <code>404</code> and validation errors aren’t:
+retrying won’t change the answer.</li>
+<li><strong>There must be time left</strong> before the deadline.</li>
+</ul>
+<h3 id="backoff-and-jitter">Backoff and jitter</h3>
+<p>Retrying immediately hits the struggling server again at the worst
+moment. <strong>Exponential backoff</strong> waits longer each time: 100
+ms, 200 ms, 400 ms, and so on, up to a cap. But if many clients failed
+at the same moment (say, because the server restarted), they’ll all
+retry at the same moments too, in synchronized waves.
+<strong>Jitter</strong> randomizes the waits. Brooker’s 2015 AWS
+Architecture Blog post “Exponential Backoff And Jitter” compared
+strategies by simulation and found that “full jitter,” sleeping a random
+time between zero and the exponential backoff value, greatly reduced
+both total work and completion time compared with no jitter. The Oct 22
+rate-limiting reading covered this in more detail.</p>
+<h3 id="retry-amplification">Retry amplification</h3>
+<figure class="diagram"><svg viewBox="0 0 760 300" role="img" aria-label="Retry amplification: retries at every layer multiply load on the deepest service" font-size="13"><defs><marker id="ra" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Retries at every layer multiply: one user request, up to 256 database calls</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Each layer makes 1 attempt + 3 retries when the layer below fails. Worst case when the database is struggling:</text><rect x="40" y="216" width="96" height="14" rx="5" fill="var(--cds-chart-categorical-1)" fill-opacity="0.2" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="88" y="208" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">1×</text><text x="88" y="248" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">client</text><line x1="140" y1="224" x2="178" y2="224" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#ra)"></line><rect x="182" y="190" width="96" height="40" rx="5" fill="var(--cds-chart-categorical-2)" fill-opacity="0.2" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="230" y="182" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">4×</text><text x="230" y="248" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">gateway</text><line x1="282" y1="224" x2="320" y2="224" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#ra)"></line><rect x="324" y="160" width="96" height="70" rx="5" fill="var(--cds-chart-categorical-2)" fill-opacity="0.2" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="372" y="152" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">16×</text><text x="372" y="248" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">service A</text><line x1="424" y1="224" x2="462" y2="224" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#ra)"></line><rect x="466" y="125" width="96" height="105" rx="5" fill="var(--cds-chart-categorical-3)" fill-opacity="0.2" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="514" y="117" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">64×</text><text x="514" y="248" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">service B</text><line x1="566" y1="224" x2="604" y2="224" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#ra)"></line><rect x="608" y="90" width="96" height="140" rx="5" fill="var(--cds-chart-categorical-4)" fill-opacity="0.2" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25"></rect><text x="656" y="82" text-anchor="middle" font-weight="600" fill="var(--cds-text-primary)">256×</text><text x="656" y="248" text-anchor="middle" font-size="12" fill="var(--cds-text-primary)">database</text><text x="24" y="268" font-size="11.5" fill="var(--cds-text-secondary)">Bar heights are log-scaled. Retry at one layer only, use retry budgets, and pass deadlines down,</text><text x="24" y="286" font-size="11.5" fill="var(--cds-text-secondary)">so a struggling dependency sees less traffic, not 256 times more.</text></svg></figure>
+<p>The deeper problem is that retries <strong>multiply across
+layers</strong>. Suppose a request passes through four layers before
+reaching a database, and each layer makes up to 3 retries (4 attempts in
+total) when the call below fails. If the database starts failing, the
+gateway makes 4 attempts to service A, each of which makes 4 attempts to
+service B, each of which makes 4 attempts to the database. One user
+request becomes up to 4⁴ = 256 database calls, at exactly the moment the
+database is struggling. A small overload becomes a total one.</p>
+<p>Defenses:</p>
+<ul>
+<li><strong>Retry at one layer only</strong>, usually the one closest to
+the user or the one with the most context. Inner layers fail fast and
+let the outer layer decide. Google’s SRE book recommends this in its
+chapter on cascading failures.</li>
+<li><strong>Retry budgets.</strong> Limit retries to a fraction of
+normal traffic, for example 10% extra across a client. When failures are
+rare, every failed request can be retried. When many requests fail, the
+budget runs out and retries stop, so retries can’t multiply load during
+an outage. gRPC’s retry policy includes retry throttling based on a
+token bucket for exactly this, and Envoy and Finagle support retry
+budgets.</li>
+<li><strong>Per-request retry caps</strong> as well (for example, at
+most 2 retries), so one request can’t monopolize the budget.</li>
+<li><strong>Respect the server’s signals.</strong> Honor
+<code>Retry-After</code>, and have overloaded servers say explicitly
+that a request shouldn’t be retried (some systems use a response header
+or a specific error code for this).</li>
+</ul>
+<h2 id="hedged-requests-retries-for-latency">3. Hedged requests: retries
+for latency</h2>
+<p>Retries handle failures. <strong>Hedged requests</strong> handle
+slowness. Jeff Dean and Luiz André Barroso’s 2013 paper “The Tail at
+Scale” (which also appeared in the Oct 31 observability reading)
+describes the idea: send a request to one replica, and if it hasn’t
+answered within, say, the 95th-percentile expected latency, send the
+same request to a second replica and use whichever answers first.</p>
+<p>Because the second request is only sent for the slowest few percent,
+the extra load is small, but it cuts tail latency dramatically, since
+the chance of both replicas being slow is much lower. The paper gives a
+Google benchmark: reading 1,000 keys spread across 100 BigTable servers,
+sending a hedge after a 10 ms delay cut the 99.9th-percentile latency
+from 1,800 ms to 74 ms while sending only about 2% more requests.</p>
+<p>Refinements and cautions:</p>
+<ul>
+<li><strong>Tied requests.</strong> Send to two servers at once, each
+told about the other. When one starts processing, it tells the other to
+cancel. This avoids even the small delay before hedging, at the cost of
+more coordination.</li>
+<li><strong>Only hedge idempotent reads.</strong> Hedging writes is how
+you get duplicates.</li>
+<li><strong>Hedge only when the system has spare capacity.</strong>
+Under overload, hedging adds load just like retries do. Tie hedges to
+the same retry budget.</li>
+</ul>
+<p>gRPC supports hedging as a configurable policy, alongside its retry
+policy.</p>
+<h2 id="circuit-breakers">4. Circuit breakers</h2>
+<p>Even with backoff and budgets, a caller that keeps calling a
+dependency that’s clearly down wastes time on every request: each call
+waits for its timeout before failing. A <strong>circuit
+breaker</strong>, popularized by Nygard’s <em>Release It!</em>, wraps
+calls to a dependency and tracks failures:</p>
+<ul>
+<li><strong>Closed</strong>: calls go through normally. If failures
+exceed a threshold (for example, 50% of calls in the last 10 seconds,
+with a minimum number of calls), the breaker
+<strong>opens</strong>.</li>
+<li><strong>Open</strong>: calls fail immediately, without touching the
+dependency. After a cool-down period, the breaker becomes
+<strong>half-open</strong>.</li>
+<li><strong>Half-open</strong>: a few trial calls are allowed through.
+If they succeed, the breaker closes; if they fail, it opens again.</li>
+</ul>
+<p>Circuit breakers help in two ways. Callers fail fast instead of
+waiting for timeouts, which keeps their own threads and connections
+free. And the struggling dependency gets breathing room to recover
+instead of being hammered.</p>
+<p>Netflix’s <strong>Hystrix</strong> library made circuit breakers
+mainstream in the 2010s. Netflix moved it to maintenance mode in 2018,
+recommending adaptive approaches and libraries like
+<strong>resilience4j</strong> for the JVM. Service meshes and proxies
+(Envoy’s circuit breaking and outlier detection, Oct 30 reading) now
+provide similar protection outside application code.</p>
+<p>Pitfalls:</p>
+<ul>
+<li><strong>What does the caller do when the breaker is open?</strong>
+Failing fast is only useful if there’s a sensible
+<strong>fallback</strong>: cached data, a default, a degraded feature
+(“recommendations unavailable”), or a clear error. A breaker that just
+turns slow errors into fast errors helps the caller’s resources, but not
+the user.</li>
+<li><strong>Granularity matters.</strong> One breaker for a whole
+dependency can open because one endpoint or one shard is failing,
+cutting off healthy parts too. Per-endpoint or per-host breakers are
+more precise.</li>
+<li><strong>Thresholds need tuning</strong> for low traffic, where a
+couple of failures can look like 100%. Use a minimum request count.</li>
+</ul>
+<h2 id="bulkheads">5. Bulkheads</h2>
+<p>Ships are divided into watertight compartments, called bulkheads, so
+a hull breach floods one compartment instead of sinking the ship. In
+software, a <strong>bulkhead</strong> isolates resources so one failing
+part can’t consume everything.</p>
+<p>The classic example: a service with one shared pool of 200 threads
+calls three dependencies. Dependency C becomes slow, every thread ends
+up waiting on C, and calls to the perfectly healthy A and B can’t get a
+thread. With bulkheads, each dependency gets its own limited pool (or a
+concurrency limit, such as a semaphore), so C can tie up at most its own
+share.</p>
+<p>Bulkheads appear at many levels:</p>
+<ul>
+<li><strong>Per-dependency connection pools and concurrency
+limits</strong> inside a service.</li>
+<li><strong>Separate worker pools or queues per job type</strong>, as in
+the Nov 1 job queue reading.</li>
+<li><strong>Separate deployments for critical and non-critical
+traffic</strong>: a dedicated cluster for checkout, isolated from the
+cluster serving recommendations.</li>
+<li><strong>Cell-based architecture</strong>, where a service is split
+into independent copies (“cells”), each serving a subset of customers,
+so a bad deploy or a poison request takes down one cell, not all. AWS
+has written extensively about using cells to limit blast radius, and
+it’s the same principle as the progressive rollouts in the Nov 7
+reading.</li>
+</ul>
+<h2 id="load-shedding-and-adaptive-concurrency">6. Load shedding and
+adaptive concurrency</h2>
+<p>All the patterns above protect callers. Servers need to protect
+themselves too, because the most reliable way to handle more load than
+you can serve is to reject the excess quickly, rather than accept
+everything and serve nobody well.</p>
+<p>The Builders’ Library article “Using load shedding to avoid overload”
+describes the core problem: as a server becomes overloaded, latency
+rises, clients time out, and the server ends up spending its capacity on
+requests whose callers have already given up. Throughput of
+<em>useful</em> work drops toward zero even though the server is at 100%
+CPU. Rejecting excess requests early, with a cheap <code>503</code>,
+keeps the accepted requests fast.</p>
+<p>Good load shedding:</p>
+<ul>
+<li><strong>Rejects early and cheaply</strong>, before doing expensive
+work like parsing a large body or querying a database.</li>
+<li><strong>Drops requests whose deadline has already passed</strong>,
+and serves queues in an order that favors fresh requests (some systems
+switch to LIFO under overload, since the newest request is most likely
+to still be wanted).</li>
+<li><strong>Prioritizes</strong>: shed batch and background traffic
+before user-facing traffic, as the Google SRE book’s criticality levels
+describe.</li>
+</ul>
+<p>Fixed concurrency limits are hard to tune, because the right limit
+changes with request mix and dependency health. <strong>Adaptive
+concurrency</strong> algorithms adjust the limit automatically using
+latency, similar to TCP congestion control. Netflix’s
+<strong>concurrency-limits</strong> library (using algorithms like Vegas
+and gradient-based limits) and Envoy’s adaptive concurrency filter both
+work this way: if latency rises above a measured baseline, they lower
+the limit; if it’s healthy, they raise it.</p>
+<h2 id="metastable-failures-when-the-fix-becomes-the-outage">7.
+Metastable failures: when the fix becomes the outage</h2>
+<p>Some outages don’t end when their trigger ends. A brief spike, a
+short network blip or a cache flush pushes the system into a bad state,
+and then the system stays there, even after the trigger is gone, because
+the system’s own behavior keeps it overloaded. Nathan Bronson, Aleksey
+Charapko, Abutalib Aghayev and Timothy Zhu named this <strong>metastable
+failure</strong> in a 2021 HotOS paper, and a 2022 OSDI paper by Lexiang
+Huang and colleagues, “Metastable Failures in the Wild,” studied real
+incidents at many companies and found them to be a recurring cause of
+major outages.</p>
+<p>A metastable failure has three parts:</p>
+<ol type="1">
+<li>A system running in a <strong>vulnerable state</strong>: efficient
+and stable, but with little slack.</li>
+<li>A <strong>trigger</strong>: a load spike, a deploy, a cache flush, a
+dependency hiccup.</li>
+<li>A <strong>sustaining effect</strong>: some feedback loop that keeps
+the system overloaded after the trigger ends.</li>
+</ol>
+<p>Retries are the most common sustaining effect. A brief slowdown
+causes timeouts; timeouts cause retries; retries add load; more load
+causes more timeouts. Even after the original trigger is gone, the retry
+traffic alone keeps the system above capacity. Other sustaining effects
+include <strong>cache misses</strong> (a cold cache sends more traffic
+to the database, which slows down, so cache fills are slower),
+<strong>connection storms</strong> after restarts, and garbage
+collection pressure from queued work.</p>
+<p>Marc Brooker’s blog post on the paper sums up the practical
+implication: systems often run most efficiently close to the edge of a
+cliff, and the techniques that help most are those that weaken the
+feedback loops: retry budgets rather than unlimited retries, load
+shedding, deadline-aware queues, and the ability to drop traffic sharply
+to let the system recover.</p>
+<p>Recovering from a metastable state usually requires <strong>reducing
+load well below the original level</strong>, not just removing the
+trigger: temporarily shedding a large fraction of traffic, disabling
+retries, or warming caches before letting traffic back in. Teams that
+know this can recover in minutes; teams that wait for the trigger to
+pass can stay down for hours.</p>
+<h2 id="putting-it-together-a-call-policy">8. Putting it together: a
+call policy</h2>
+<p>For each service-to-service call, decide and write down:</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Question</th>
+<th>Typical answer</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Timeout?</td>
+<td>Around the callee’s p99.9 plus padding, and never more than the
+remaining deadline</td>
+</tr>
+<tr class="even">
+<td>Deadline propagation?</td>
+<td>Yes, pass remaining time downstream</td>
+</tr>
+<tr class="odd">
+<td>Retries?</td>
+<td>Only at one layer, only for idempotent operations and retryable
+errors, with exponential backoff, full jitter and a retry budget</td>
+</tr>
+<tr class="even">
+<td>Hedging?</td>
+<td>For latency-critical idempotent reads, after p95, within the retry
+budget</td>
+</tr>
+<tr class="odd">
+<td>Circuit breaker?</td>
+<td>Per dependency or endpoint, with a fallback defined</td>
+</tr>
+<tr class="even">
+<td>Bulkhead?</td>
+<td>A concurrency limit per dependency</td>
+</tr>
+<tr class="odd">
+<td>Fallback?</td>
+<td>Cached, default, degraded, or a clear error</td>
+</tr>
+</tbody>
+</table>
+<p>And for each service as a server:</p>
+<ul>
+<li>Reject excess load early, ideally with adaptive concurrency
+limits.</li>
+<li>Drop requests whose deadlines have passed.</li>
+<li>Prioritize by criticality.</li>
+<li>Expose metrics for timeouts, retries, breaker state and shed
+requests.</li>
+</ul>
+<h2 id="testing-resilience">9. Testing resilience</h2>
+<p>These mechanisms only run during failures, so they’re rarely
+exercised and often broken. Ways to find out before an incident:</p>
+<ul>
+<li><strong>Fault injection in tests</strong>: add latency, errors and
+dropped connections to dependencies in integration tests, and check that
+timeouts, retries and fallbacks behave as designed.</li>
+<li><strong>Chaos engineering in production</strong>, carefully:
+Netflix’s Chaos Monkey (randomly terminating instances) started the
+practice, and later tools inject latency and failures at the network or
+service-mesh level. Start small, with clear abort conditions.</li>
+<li><strong>Load tests past capacity</strong>, to see whether the system
+degrades gracefully (sheds load, keeps serving accepted requests) or
+collapses. Run the overload, then reduce load back to normal and check
+that the system actually recovers, which is the test for
+metastability.</li>
+<li><strong>Game days</strong>, where teams rehearse a dependency outage
+and practice the recovery steps, including shedding load and disabling
+retries.</li>
+</ul>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Every remote call needs a timeout. Set it from measured latency and
+propagate absolute deadlines so downstream work stops when the caller
+gives up.</li>
+<li>Retry only idempotent operations on retryable errors, with
+exponential backoff and full jitter.</li>
+<li>Retries multiply across layers; retry at one layer, cap per-request
+retries, and use retry budgets.</li>
+<li>Hedged requests cut tail latency for a small amount of extra load:
+in Google’s example, p99.9 fell from 1,800 ms to 74 ms with about 2%
+more requests.</li>
+<li>Circuit breakers fail fast and give dependencies room to recover,
+but need a real fallback.</li>
+<li>Bulkheads and cells keep one failing dependency or customer from
+consuming everything.</li>
+<li>Servers must shed load early; adaptive concurrency limits do this
+automatically.</li>
+<li>Metastable failures persist after the trigger because of feedback
+loops like retries and cold caches; recovery often requires cutting load
+far below normal.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Your service has a 2-second timeout and calls a dependency with a
+5-second timeout. What goes wrong, and how does deadline propagation fix
+it?</li>
+<li>Count the layers in one of your request paths and the retries at
+each. What’s the worst-case amplification at the bottom?</li>
+<li>A retry budget of 10% means that during an outage, 90% of failed
+requests aren’t retried. Is that acceptable for your users? What would
+you do instead for a payment flow?</li>
+<li>When does a circuit breaker make things worse? Think about a breaker
+that opens because one shard is failing.</li>
+<li>Describe a metastable failure you’ve seen or can imagine in your
+systems. What was the sustaining effect, and how would you break the
+loop?</li>
+<li>How would you test that your system recovers after an overload, not
+just that it survives one?</li>
+<li>Where would hedged requests help in your systems, and where would
+they be dangerous?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Marc Brooker, “Timeouts, retries, and backoff with jitter,” Amazon
+Builders’ Library,
+https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/</li>
+<li>Marc Brooker, “Exponential Backoff And Jitter,” AWS Architecture
+Blog, 2015.</li>
+<li>David Yanacek, “Using load shedding to avoid overload,” Amazon
+Builders’ Library; Amazon Builders’ Library articles on avoiding
+insurmountable queue backlogs and on cell-based architecture.</li>
+<li>Jeffrey Dean and Luiz André Barroso, “The Tail at Scale,”
+Communications of the ACM, February 2013; summary at
+https://warrenqi.github.io/2020/03/28/tail-at-scale.html</li>
+<li>Michael T. Nygard, <em>Release It! Design and Deploy
+Production-Ready Software</em>, 2nd edition (Pragmatic Bookshelf,
+2018).</li>
+<li>Betsy Beyer et al. (eds.), <em>Site Reliability Engineering</em>
+(O’Reilly, 2016), chapter 21 “Handling Overload” and chapter 22
+“Addressing Cascading Failures,”
+https://sre.google/sre-book/addressing-cascading-failures/</li>
+<li>Nathan Bronson, Aleksey Charapko, Abutalib Aghayev and Timothy Zhu,
+“Metastable Failures in Distributed Systems,” HotOS 2021.</li>
+<li>Lexiang Huang et al., “Metastable Failures in the Wild,” OSDI 2022,
+https://www.usenix.org/system/files/osdi22-huang-lexiang.pdf</li>
+<li>Marc Brooker, “Metastability and Distributed Systems,” 2021,
+https://brooker.co.za/blog/2021/05/24/metastable/</li>
+<li>gRPC documentation, “Deadlines,” “Retry” and “Request Hedging,”
+https://grpc.io/docs/guides/</li>
+<li>Netflix Hystrix README (maintenance-mode notice, 2018); resilience4j
+documentation; Netflix concurrency-limits,
+https://github.com/Netflix/concurrency-limits</li>
+<li>Envoy documentation, “Circuit breaking,” “Retry budgets,” “Adaptive
+concurrency.”</li>
+</ul>
+<p>The metastable-failure papers and Brooker’s post were located in
+searches on Nov 11, 2026. The Tail at Scale hedging numbers are from the
+paper as I know it and match commonly cited summaries.</p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a><a class="chip" href="/topics/apis.html">APIs</a></div>
+          <div class="daynav"><a href="/reading/figma-postgres-sharding.html"><div class="kicker">← Older · Nov 10</div><div class="t">How Figma scaled Postgres: from one box to horizontal sharding</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
