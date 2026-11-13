@@ -1,0 +1,680 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DNS for backend engineers: resolution, caching, and why it&#x27;s always DNS · The Daily Commit</title>
+  <meta name="description" content="How a name becomes an address and why DNS shows up in so many outages. Covers the hierarchy and delegation, stub vs recursive vs authoritative servers, TTLs and the many caches in between, negative caching and serve-stale, UDP/TCP/EDNS, record types that matter for services, DNS-based load balancing, Kubernetes DNS, cache poisoning and DNSSEC, encrypted DNS, and three big DNS outages (Facebook 2021, Slack 2021, AWS 2025).">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>DNS for backend engineers: resolution, caching, and why it&#x27;s always DNS</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>23 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#what-dns-is-a-hierarchical-delegated-cached-database">What
+DNS is: a hierarchical, delegated, cached database</a><a href="#the-cast-stub-recursive-resolver-authoritative-server">The
+cast: stub, recursive resolver, authoritative server</a><a href="#ttls-and-the-many-caches">TTLs and the many caches</a><a href="#on-the-wire-udp-tcp-edns-and-size-limits">On the wire: UDP,
+TCP, EDNS and size limits</a><a href="#record-types-a-backend-engineer-actually-uses">Record types a
+backend engineer actually uses</a><a href="#dns-as-a-load-balancer-and-failover-mechanism">DNS as a load
+balancer and failover mechanism</a><a href="#dns-inside-your-infrastructure">DNS inside your
+infrastructure</a><a href="#security-spoofing-cache-poisoning-and-dnssec">Security:
+spoofing, cache poisoning and DNSSEC</a><a href="#debugging-dns">Debugging DNS</a><a href="#three-outages-worth-knowing">Three outages worth
+knowing</a><a href="#a-checklist-for-production-dns">A checklist for production
+DNS</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 23 min left</div>
+      </nav>
+      <article class="article" data-slug="dns-deep-dive" data-minutes="23">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/networking.html">Networking</a> · November 13, 2026 · 23 min</div>
+        <h1>DNS for backend engineers: resolution, caching, and why it&#x27;s always DNS</h1>
+        <p class="dek">How a name becomes an address and why DNS shows up in so many outages. Covers the hierarchy and delegation, stub vs recursive vs authoritative servers, TTLs and the many caches in between, negative caching and serve-stale, UDP/TCP/EDNS, record types that matter for services, DNS-based load balancing, Kubernetes DNS, cache poisoning and DNSSEC, encrypted DNS, and three big DNS outages (Facebook 2021, Slack 2021, AWS 2025).</p>
+<p>Almost every request your services make starts with a DNS lookup, and
+most engineers never think about it until something breaks. When it
+does, the failure is often strange: some users can connect and others
+can’t, a fix takes an hour to “take effect”, or a service that was
+healthy the whole time becomes unreachable because the name pointing at
+it disappeared. The joke “it’s always DNS” exists because DNS is a
+globally distributed, heavily cached, eventually consistent database
+that sits in front of everything else. This reading covers how
+resolution actually works, where caching happens and how TTLs really
+behave, which record types matter for backend systems, how DNS is used
+for load balancing and service discovery, its security story (cache
+poisoning, DNSSEC, encrypted transports), and three large outages that
+were caused or amplified by DNS. It draws on the core RFCs, Cloudflare’s
+and APNIC’s writing on DNS, and published post-mortems from Meta, Slack
+and AWS.</p>
+<h2 id="what-dns-is-a-hierarchical-delegated-cached-database">1. What
+DNS is: a hierarchical, delegated, cached database</h2>
+<p>DNS (the Domain Name System, specified in RFC 1034 and RFC 1035 in
+1987, building on Paul Mockapetris’s 1983 design) maps names to data.
+The data is organised as <strong>resource records</strong>: a name, a
+type (A, AAAA, CNAME, MX, TXT…), a class (almost always IN), a TTL, and
+the value.</p>
+<p>Three ideas make it scale to the whole internet:</p>
+<ul>
+<li><strong>Hierarchy.</strong> Names form a tree read right to left:
+the root (an empty label, written as a trailing dot), then top-level
+domains like <code>com</code>, then <code>example.com</code>, then
+<code>api.example.com</code>.</li>
+<li><strong>Delegation.</strong> No server holds the whole tree. The
+root servers know who is authoritative for <code>com</code>; the
+<code>com</code> servers know who is authoritative for
+<code>example.com</code>; and <code>example.com</code>’s own servers
+hold its records. Each delegation is expressed as NS records in the
+parent plus, where needed, “glue” A/AAAA records so the child’s name
+servers can be found. A <strong>zone</strong> is the part of the tree
+one set of authoritative servers is responsible for.</li>
+<li><strong>Caching.</strong> Every answer carries a TTL that says how
+long it may be reused. Caching is what makes DNS fast and cheap, and
+it’s also where most of its operational surprises come from.</li>
+</ul>
+<p>The result is a database with no central server for data, very high
+read availability, and only eventual consistency for writes. Changing a
+record is instant on the authoritative server, but the world sees it
+only as caches expire.</p>
+<h2 id="the-cast-stub-recursive-resolver-authoritative-server">2. The
+cast: stub, recursive resolver, authoritative server</h2>
+<p>A DNS lookup involves several different kinds of software, and
+confusing them causes a lot of misdiagnosis.</p>
+<ul>
+<li><strong>Stub resolver.</strong> The library in your process or OS
+that turns <code>getaddrinfo("api.example.com")</code> into a DNS query.
+It doesn’t walk the tree; it sends one query to a configured recursive
+resolver (from <code>/etc/resolv.conf</code> on Linux) and waits. Some
+stubs cache (systemd-resolved, macOS’s mDNSResponder, nscd, the JVM’s
+own cache); glibc’s resolver by itself does not.</li>
+<li><strong>Recursive resolver</strong> (also called a full or caching
+resolver). Your ISP’s resolver, a public one like 1.1.1.1 or 8.8.8.8,
+your corporate resolver, or the resolver inside a cloud VPC (such as the
+Route 53 Resolver at the VPC’s <code>.2</code> address). It does the
+real work: walking the hierarchy, caching everything, and returning a
+final answer.</li>
+<li><strong>Authoritative server.</strong> Holds the actual zone data
+for a domain and answers with the “authoritative answer” (AA) flag set.
+Root servers, TLD servers and your DNS provider’s servers (Route 53,
+Cloudflare DNS, NS1…) are authoritative for their zones. They don’t
+recurse on behalf of clients.</li>
+<li><strong>Forwarders</strong> sit in between in many networks: a local
+resolver that forwards everything to an upstream recursive resolver,
+often with its own cache.</li>
+</ul>
+<figure class="diagram"><svg viewBox="0 0 760 340" role="img" aria-label="Recursive DNS resolution from stub resolver through root, TLD and authoritative servers" font-size="13"><defs><marker id="dn1113" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">One lookup, four kinds of server</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">A cold lookup for api.example.com. Every answer and referral is cached for its TTL.</text><rect x="24" y="160" width="130" height="50" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="89" y="183" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">app + stub</text><text x="89" y="198" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">OS resolver library</text><rect x="230" y="150" width="160" height="70" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="310" y="183" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">recursive resolver</text><text x="310" y="198" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">ISP, 1.1.1.1, VPC</text><rect x="540" y="76" width="196" height="46" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="638" y="97" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">root servers</text><text x="638" y="112" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">13 names, anycast</text><rect x="540" y="162" width="196" height="46" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25"></rect><text x="638" y="183" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">.com TLD servers</text><text x="638" y="198" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">delegation for example.com</text><rect x="540" y="248" width="196" height="46" rx="8" fill="var(--cds-chart-categorical-5)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-5)" stroke-width="1.25"></rect><text x="638" y="269" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">example.com auth</text><text x="638" y="284" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">holds the A record</text><line x1="154" y1="178" x2="228" y2="178" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#dn1113)"></line><line x1="228" y1="194" x2="156" y2="194" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#dn1113)"></line><text x="192" y="236" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">1 query, 5 answer</text><line x1="390" y1="160" x2="538" y2="102" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#dn1113)"></line><text x="410" y="112" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start">2 root: .com NS</text><line x1="390" y1="185" x2="538" y2="185" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#dn1113)"></line><text x="410" y="178" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start">3 TLD: example NS</text><line x1="390" y1="210" x2="538" y2="268" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#dn1113)"></line><text x="410" y="262" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start">4 auth: A record</text><text x="24" y="326" font-size="11.5" fill="var(--cds-text-secondary)">Warm caches skip steps 2 to 4; most lookups are one hop from the resolver cache.</text></svg></figure>
+<h3 id="a-cold-lookup">A cold lookup</h3>
+<p>Suppose nothing is cached and a client asks for
+<code>api.example.com</code>:</p>
+<ol type="1">
+<li>The stub sends a query (A or AAAA, often both in parallel) to the
+recursive resolver.</li>
+<li>The resolver asks a <strong>root server</strong>. The root doesn’t
+know the answer but returns a <strong>referral</strong>: the NS records
+for <code>com</code> and their addresses.</li>
+<li>The resolver asks a <code>com</code> <strong>TLD server</strong>,
+which returns a referral to <code>example.com</code>’s name
+servers.</li>
+<li>The resolver asks <code>example.com</code>’s <strong>authoritative
+server</strong>, which returns the A record (or a CNAME, which starts
+another lookup for the target name).</li>
+<li>The resolver caches every piece, the referrals included, and answers
+the stub.</li>
+</ol>
+<p>In practice, the root and TLD referrals are almost always cached
+already (the <code>com</code> NS records have a two-day TTL), so a
+typical “uncached” lookup is a single round trip from the resolver to
+your authoritative servers, and most lookups are answered straight from
+the resolver’s cache in well under a millisecond plus the network
+hop.</p>
+<h3 id="the-root-servers">The root servers</h3>
+<p>There are 13 root server <em>identities</em>,
+<code>a.root-servers.net</code> through <code>m.root-servers.net</code>,
+run by 12 organisations. The number 13 is a historical consequence of
+fitting all their addresses into a 512-byte UDP response. Each identity
+is served by many machines in many places using <strong>anycast</strong>
+(the same IP address announced via BGP from many sites, with routing
+sending you to a nearby one), so in total there are well over a thousand
+root server instances worldwide. Anycast is also how large DNS providers
+and public resolvers achieve low latency and absorb attacks.</p>
+<h2 id="ttls-and-the-many-caches">3. TTLs and the many caches</h2>
+<p>Every record has a TTL in seconds. A resolver that caches an answer
+counts the TTL down and returns the remaining time to its own clients,
+so a downstream cache never holds the answer longer than the original
+TTL in total. That’s the theory. In practice, a lookup passes through
+several caches, and each may behave differently:</p>
+<ul>
+<li><strong>The application.</strong> Long-lived processes may resolve a
+name once and keep the address forever. The JVM caches successful
+lookups (<code>networkaddress.cache.ttl</code>, 30 seconds by default in
+recent JDKs when no security manager is installed, but “forever” in some
+older configurations). HTTP client connection pools keep connections to
+an old IP alive no matter what DNS says.</li>
+<li><strong>The OS stub cache</strong> (systemd-resolved, mDNSResponder,
+Windows DNS Client).</li>
+<li><strong>Node-local caches</strong> (NodeLocal DNSCache in
+Kubernetes, dnsmasq).</li>
+<li><strong>The recursive resolver</strong>, often a fleet of resolvers
+behind one anycast address, each with its own cache, so two queries a
+second apart can get different answers during a change.</li>
+<li><strong>Browsers</strong>, which keep their own short-lived host
+caches.</li>
+</ul>
+<p>Things to know about TTLs:</p>
+<ul>
+<li><strong>Lowering a TTL only helps after the old TTL has
+expired.</strong> If a record has a TTL of 86,400 seconds and you change
+it to 60 just before a migration, resolvers that cached it an hour ago
+will hold it for 23 more hours. The standard playbook is to lower the
+TTL at least one old-TTL period <em>before</em> the change, make the
+change, then raise it again afterwards.</li>
+<li><strong>Some resolvers clamp TTLs.</strong> Some enforce a minimum
+(ignoring very low TTLs), some a maximum. Don’t assume a 5-second TTL
+produces 5-second failover everywhere.</li>
+<li><strong>Low TTLs cost something.</strong> More queries to your
+authoritative servers (and more billable queries with managed DNS), more
+latency on cache misses, and more exposure if your DNS provider is down,
+because caches empty quickly. High TTLs make changes slow but make you
+resilient to authoritative outages. Many teams settle on 60 to 300
+seconds for records that front failover-capable endpoints and hours for
+stable ones.</li>
+</ul>
+<h3 id="negative-caching">Negative caching</h3>
+<p>Answers that say “this doesn’t exist” are cached too. RFC 2308
+defines <strong>negative caching</strong>: an NXDOMAIN (name doesn’t
+exist) or NODATA (name exists, but not with that type) response includes
+the zone’s SOA record, and the negative answer is cached for the smaller
+of the SOA record’s TTL and its MINIMUM field. This matters
+operationally:</p>
+<ul>
+<li>If a client looks up a name <em>before</em> you create it (for
+example, a health checker probing a new service before the record is
+published), resolvers cache the NXDOMAIN, and the name stays “missing”
+for them until the negative TTL runs out, even after you create it.</li>
+<li>A misconfiguration that briefly deletes a record gets cached as
+NXDOMAIN and keeps causing failures after you fix it.</li>
+</ul>
+<h3 id="serve-stale">Serve-stale</h3>
+<p>RFC 8767 (2020) standardises <strong>serve-stale</strong>: if a
+resolver can’t reach any authoritative server to refresh an expired
+record, it may keep serving the stale answer (with a short TTL, such as
+30 seconds) for a limited period, often up to a day or a few days, while
+it retries in the background. Several major public resolvers do this. It
+turns “authoritative DNS is down” from an immediate outage into a slow
+degradation for names that were recently queried, which is a big
+resilience win, but it also means a record you deliberately removed can
+linger in some places when your servers are unreachable.</p>
+<h2 id="on-the-wire-udp-tcp-edns-and-size-limits">4. On the wire: UDP,
+TCP, EDNS and size limits</h2>
+<p>Classic DNS is a single UDP request and response on port 53, which is
+why it’s so fast. Some details that cause real problems:</p>
+<ul>
+<li><strong>The 512-byte limit.</strong> The original spec limited UDP
+responses to 512 bytes. A response that doesn’t fit sets the
+<strong>TC</strong> (truncated) flag, and the client retries over TCP.
+<strong>EDNS(0)</strong> (RFC 6891) lets a client advertise a larger UDP
+buffer, which DNSSEC signatures and large TXT records need.</li>
+<li><strong>Fragmentation.</strong> Large UDP responses get split into
+IP fragments, which are often dropped by firewalls and are a vector for
+spoofing attacks. DNS Flag Day 2020 coordinated major resolver and
+server operators on a default EDNS buffer size of 1232 bytes, chosen to
+avoid fragmentation on typical paths, with TCP fallback for anything
+larger.</li>
+<li><strong>TCP must work.</strong> RFC 7766 makes TCP support a
+requirement for DNS, not an optional fallback. A firewall that blocks
+TCP port 53 “because DNS is UDP” causes intermittent failures for
+exactly the names that have large responses: DNSSEC-signed zones, names
+with many A records, big TXT records for SPF and domain
+verification.</li>
+<li><strong>Query IDs and timeouts.</strong> Each query has a 16-bit ID,
+and a stub typically retries after a timeout (glibc’s default is 5
+seconds per attempt, with 2 attempts per server). A lost UDP packet can
+therefore add seconds of latency to a request. That’s why a mysterious,
+very regular 5-second latency spike in a service is a classic DNS
+symptom.</li>
+</ul>
+<h2 id="record-types-a-backend-engineer-actually-uses">5. Record types a
+backend engineer actually uses</h2>
+<ul>
+<li><strong>A / AAAA:</strong> IPv4 / IPv6 addresses. Clients that
+support both will query both (and use “Happy Eyeballs”, RFC 8305, to
+race connections). A broken AAAA record can slow down or break
+IPv6-capable clients while IPv4-only clients are fine, a common “only
+some users” failure.</li>
+<li><strong>CNAME:</strong> an alias to another name. A CNAME must be
+the only record at its name, which is why you can’t put a CNAME at the
+zone apex (<code>example.com</code> itself), since the apex must also
+have SOA and NS records. Managed DNS providers work around this with
+proprietary flattening (Route 53 “alias” records, Cloudflare “CNAME
+flattening”, “ANAME” or “ALIAS” elsewhere): the provider resolves the
+target itself and returns A/AAAA records.</li>
+<li><strong>NS / SOA:</strong> delegation and zone metadata. The SOA’s
+fields control negative caching and secondary-server refresh.</li>
+<li><strong>MX, TXT:</strong> mail routing; free text used heavily for
+SPF, DKIM, DMARC and domain-ownership verification.</li>
+<li><strong>SRV:</strong> service location with port, priority and
+weight (<code>_service._proto.name</code>). Used by many
+service-discovery systems, SIP, XMPP, and Kubernetes headless
+services.</li>
+<li><strong>CAA:</strong> which certificate authorities may issue
+certificates for the domain. CAs are required to check it, so it’s a
+cheap defence against mis-issuance.</li>
+<li><strong>SVCB / HTTPS</strong> (RFC 9460, 2023): lets a domain
+advertise how to connect, such as supported ALPN protocols (h2, h3),
+alternative endpoints, IP hints and Encrypted Client Hello keys, in the
+initial lookup. It also solves the apex problem for HTTPS services.
+Browsers already query HTTPS records, which is one way HTTP/3 gets
+discovered without a first connection over TCP.</li>
+<li><strong>PTR:</strong> reverse DNS (IP to name). Mostly matters for
+mail servers and logs.</li>
+</ul>
+<h2 id="dns-as-a-load-balancer-and-failover-mechanism">6. DNS as a load
+balancer and failover mechanism</h2>
+<p>Because DNS is the first step of every connection, it’s an attractive
+place to steer traffic. The earlier reading on load balancing covered
+where DNS sits among the layers; here are the mechanics and their
+limits.</p>
+<ul>
+<li><strong>Round-robin and multi-value answers.</strong> Return several
+A records; clients usually try them in the returned order or randomise.
+There’s no health awareness unless the authoritative server provides it,
+and clients that cache one address stick to it.</li>
+<li><strong>Health-checked records.</strong> Managed DNS services can
+health-check endpoints and drop unhealthy ones from answers (Route 53
+health checks, failover routing). Failover speed is roughly health-check
+detection time plus TTL plus however long clients hold onto addresses or
+connections.</li>
+<li><strong>Weighted, latency-based and geo routing.</strong> The
+authoritative server picks an answer based on configured weights,
+measured latency, or the client’s location. The location is usually the
+<em>resolver’s</em> location, not the user’s, which is wrong for users
+on distant public resolvers. <strong>EDNS Client Subnet</strong> (ECS,
+RFC 7871) lets a resolver pass a truncated client subnet to the
+authoritative server to fix this, at a cost to privacy and to cache
+efficiency (answers are cached per subnet). Some public resolvers,
+including Cloudflare’s 1.1.1.1, deliberately don’t send ECS for privacy
+reasons.</li>
+<li><strong>Anycast</strong> often replaces DNS steering for large
+providers: one IP address everywhere, and BGP routes users to the
+nearest site. DNS then only has to return a stable address.</li>
+</ul>
+<p>The common limitation is that <strong>DNS can’t drain
+connections</strong>. It only affects new lookups. Long-lived
+connections (HTTP/2, gRPC, database pools, WebSockets) stay on the old
+target until something closes them. Reliable failover needs DNS changes
+<em>plus</em> connection lifetimes or server-side draining.</p>
+<h2 id="dns-inside-your-infrastructure">7. DNS inside your
+infrastructure</h2>
+<p>Internal DNS is where many backend engineers actually meet DNS
+problems.</p>
+<h3 id="kubernetes">Kubernetes</h3>
+<p>Kubernetes clusters run CoreDNS (or kube-dns), and every pod’s
+<code>/etc/resolv.conf</code> points at it with a list of search domains
+and, by default, <code>options ndots:5</code>. That setting means any
+name with fewer than five dots is first tried with each search domain
+appended. A lookup for <code>api.example.com</code> from a pod in
+namespace <code>prod</code> can turn into queries for
+<code>api.example.com.prod.svc.cluster.local</code>,
+<code>api.example.com.svc.cluster.local</code>,
+<code>api.example.com.cluster.local</code>, maybe a cloud-provider
+domain, and only then <code>api.example.com</code>, each for both A and
+AAAA. Most come back NXDOMAIN. This multiplies DNS load and latency for
+external names. Fixes include using fully qualified names with a
+trailing dot (<code>api.example.com.</code>), lowering
+<code>ndots</code> in the pod’s <code>dnsConfig</code>, and running
+NodeLocal DNSCache so queries don’t cross the network to CoreDNS.</p>
+<p>A well-known source of intermittent 5-second DNS delays in Kubernetes
+was a Linux conntrack race when A and AAAA queries were sent in parallel
+from the same socket over UDP, causing one of them to be dropped and
+retried after the timeout. Workarounds included the
+<code>single-request-reopen</code> resolver option and node-local
+caching.</p>
+<h3 id="cloud-vpcs-and-split-horizon">Cloud VPCs and split horizon</h3>
+<p>Cloud VPCs provide a resolver that answers both public names and
+private zones (for example, Route 53 private hosted zones), so the same
+name can resolve to a private address inside the VPC and a public one
+outside. This <strong>split-horizon</strong> DNS is convenient but
+confusing when debugging: “it resolves fine on my laptop” proves nothing
+about what a pod sees. Always test from where the failing client runs,
+and check which resolver it’s using.</p>
+<h3 id="service-discovery">Service discovery</h3>
+<p>Consul, Kubernetes services and cloud service registries all expose
+service discovery through DNS because every language and tool already
+speaks it. The trade-off is the caching story above: DNS-based discovery
+is only as fresh as its TTLs and its clients’ caches. Systems that need
+fast membership changes (gRPC’s xDS, client-side load balancers that
+watch an API) skip DNS for that reason.</p>
+<h2 id="security-spoofing-cache-poisoning-and-dnssec">8. Security:
+spoofing, cache poisoning and DNSSEC</h2>
+<p>Classic DNS has no authentication. A resolver accepts a UDP response
+if it arrives from the right address and port with the right 16-bit
+query ID and question. That makes <strong>cache poisoning</strong>
+possible: an attacker who can get a forged response in before the real
+one gets it cached for the TTL, redirecting every user of that
+resolver.</p>
+<p>In 2008 Dan Kaminsky showed that this was much more practical than
+people thought. By querying many random non-existent subdomains
+(<code>a1.example.com</code>, <code>a2.example.com</code>…), an attacker
+gets unlimited attempts, and a forged response can include a malicious
+<em>referral</em> that hijacks the whole domain. The coordinated fix was
+<strong>source port randomisation</strong>: making resolvers send each
+query from a random UDP port, multiplying the guessing space from 16
+bits of query ID to roughly 32 bits. Further hardening includes “0x20”
+randomisation of letter case in the query name (which the response must
+echo), and since 2020 the “SAD DNS” research showed side channels that
+could still recover the source port, leading to more fixes in operating
+systems and resolvers.</p>
+<h3 id="dnssec">DNSSEC</h3>
+<p><strong>DNSSEC</strong> adds cryptographic signatures to DNS data so
+that a validating resolver can verify an answer really came from the
+zone owner, unmodified.</p>
+<ul>
+<li>Each zone has signing keys published as <strong>DNSKEY</strong>
+records, and every record set is signed with an <strong>RRSIG</strong>
+record.</li>
+<li>The parent zone publishes a <strong>DS</strong> record, a hash of
+the child’s key-signing key, which builds a <strong>chain of
+trust</strong> from the root (whose key resolvers ship with as a trust
+anchor) down through <code>com</code> to <code>example.com</code>.</li>
+<li><strong>NSEC</strong> or <strong>NSEC3</strong> records prove that a
+name doesn’t exist, so “NXDOMAIN” can be authenticated too.</li>
+</ul>
+<p>The root zone was signed in 2010, and the root key-signing key was
+rolled for the first time in October 2018 after years of preparation, a
+measure of how carefully this has to be done.</p>
+<p>DNSSEC’s protection is real but narrow: it authenticates data between
+the zone and a validating resolver. It does nothing for privacy and
+nothing for the hop between your stub and the resolver unless the stub
+validates too. Its operational risk is also real: a signing mistake, an
+expired signature, or a key mismatch makes the domain fail for every
+validating resolver, which is a large share of internet users today.
+Adoption among large commercial domains remains low partly for this
+reason, and the Slack incident in section 10 shows why.</p>
+<h3 id="encrypted-dns">Encrypted DNS</h3>
+<p>Classic DNS queries are plaintext, so anyone on the path can see and
+alter which names you look up. Several protocols encrypt the
+stub-to-resolver hop:</p>
+<ul>
+<li><strong>DNS over TLS (DoT)</strong>, RFC 7858 (2016), on port
+853.</li>
+<li><strong>DNS over HTTPS (DoH)</strong>, RFC 8484 (2018), which looks
+like ordinary HTTPS traffic and is what browsers adopted.</li>
+<li><strong>DNS over QUIC (DoQ)</strong>, RFC 9250 (2022).</li>
+</ul>
+<p>These protect privacy and integrity on that hop but move trust to the
+resolver operator. Enterprises sometimes find that browsers using DoH
+bypass internal resolvers and split-horizon names, so corporate policies
+often disable or redirect it. Separately, <strong>QNAME
+minimisation</strong> (RFC 7816, updated by RFC 9156) has resolvers send
+only the needed label to each server (ask the root about
+<code>com</code>, not <code>api.example.com</code>), reducing what root
+and TLD operators learn.</p>
+<h2 id="debugging-dns">9. Debugging DNS</h2>
+<p>A short toolkit:</p>
+<ul>
+<li><strong><code>dig</code></strong> shows the full response: flags
+(AA, TC, RD, RA, AD for “authenticated data”), TTLs, sections.
+<code>dig +trace name</code> walks the hierarchy from the root yourself
+and shows where delegation breaks. <code>dig @server name</code> queries
+a specific resolver or authoritative server, which is how you tell “my
+resolver’s cache is stale” from “the authoritative data is wrong”.</li>
+<li><strong>Compare authoritative vs recursive.</strong> Query each of
+the zone’s NS servers directly. If they disagree, a zone update hasn’t
+propagated to all of them. If they agree but your resolver doesn’t, it’s
+caching.</li>
+<li><strong>Check the TTL counting down</strong> in repeated
+<code>dig</code> output from a resolver to see when a cached record will
+expire.</li>
+<li><strong>Watch for NXDOMAIN vs SERVFAIL.</strong> NXDOMAIN means the
+name doesn’t exist (and gets negatively cached). SERVFAIL means the
+resolver couldn’t get a good answer, which often points at unreachable
+authoritative servers, a lame delegation, or a DNSSEC validation
+failure. <code>dig +cd</code> (checking disabled) that succeeds where a
+normal query fails is a strong DNSSEC hint.</li>
+<li><strong>Measure from the client’s environment.</strong> Inside the
+container, with its <code>/etc/resolv.conf</code>, its search domains
+and its resolver. Many “DNS is fine” conclusions come from testing on a
+different machine.</li>
+<li><strong>Instrument resolution in applications.</strong> Track lookup
+latency and failures as their own metrics. A slow DNS lookup otherwise
+shows up as a vague increase in “connect time”.</li>
+</ul>
+<h2 id="three-outages-worth-knowing">10. Three outages worth
+knowing</h2>
+<h3 id="facebook-october-4-2021">Facebook, October 4, 2021</h3>
+<p>According to Meta’s engineering write-up, a command issued during
+routine maintenance to assess backbone capacity unintentionally took
+down all the connections in Meta’s backbone network, disconnecting its
+data centres from each other and the internet. A bug in the audit tool
+meant to catch such commands didn’t stop it. Meta’s authoritative DNS
+servers were designed to withdraw their BGP route announcements when
+they couldn’t reach the data centres, treating that as a sign of an
+unhealthy network location. With the backbone gone, <em>every</em> DNS
+site withdrew its routes. Meta’s DNS servers were still running but
+unreachable, so <code>facebook.com</code>, <code>instagram.com</code>
+and <code>whatsapp.com</code> stopped resolving worldwide. The outage
+lasted about six hours. Recovery was slow partly because the same
+failure took down internal tools, and engineers had to get physical
+access to data centres. A side effect: resolvers around the world were
+hammered with retries for names that wouldn’t resolve.</p>
+<p>The lesson for system design: a health mechanism that removes an
+endpoint when it looks unhealthy can remove <em>every</em> endpoint
+during a correlated failure. DNS health checks and anycast withdrawals
+need a floor (“never withdraw the last N sites”) or a fail-open
+mode.</p>
+<h3 id="slack-september-30-2021">Slack, September 30, 2021</h3>
+<p>Slack was rolling out DNSSEC for <code>slack.com</code>. According to
+Slack’s engineering post-mortem (“What happened during Slack’s DNSSEC
+rollout”), after the DS record was published at the <code>.com</code>
+parent, some users behind validating resolvers couldn’t reach Slack. The
+root cause turned out to be how their DNS provider answered certain
+queries under DNSSEC (involving a wildcard record and the “no data”
+proof returned for AAAA queries), which validating resolvers rejected or
+cached as negative answers. Rolling back took a long time, because the
+DS record in the parent zone and the negative answers were cached by
+resolvers for their TTLs, so removing the DS record didn’t fix users
+immediately. The outage affected a subset of users for many hours.</p>
+<p>Lesson: DNSSEC changes involve records in a parent zone you don’t
+control and caches you can’t flush, so the rollback can be much slower
+than the rollout. Test with many validating resolvers, use short TTLs
+during the rollout, and plan the rollback timeline before you start.</p>
+<h3 id="aws-us-east-1-october-19-20-2025">AWS us-east-1, October 19-20,
+2025</h3>
+<p>AWS’s post-event summary describes a latent race condition in the
+automation that manages DNS for DynamoDB. A <strong>DNS Planner</strong>
+component monitors the health and capacity of load balancers and
+periodically produces a new DNS plan for each endpoint; three
+independent <strong>DNS Enactor</strong> instances, in different
+Availability Zones, apply plans to Route 53. One Enactor was delayed
+while applying an older plan; meanwhile another applied a newer plan and
+then ran clean-up that deletes plans significantly older than the one
+just applied. The delayed Enactor’s check that its plan was newer than
+what was active had gone stale, so it overwrote the newer plan with the
+old one, and the clean-up then deleted that old plan. The result was
+that all IP addresses for <code>dynamodb.us-east-1.amazonaws.com</code>
+were removed, leaving an empty record, and the automation was left in a
+state it couldn’t repair, requiring manual operator intervention.</p>
+<p>The failure began at 11:48 PM PDT on October 19. AWS restored the DNS
+records by 2:25 AM PDT on October 20, and customers recovered between
+2:25 and 2:40 AM as cached DNS entries expired. Because many AWS
+services depend on DynamoDB internally, the impact spread well beyond
+DynamoDB and lasted much longer for some services.</p>
+<p>Lessons: DNS automation is a distributed system with its own
+consistency bugs (here, a stale check and concurrent writers), and an
+empty answer is the worst possible output. Guardrails that refuse to
+publish a plan with zero healthy targets, and comparisons based on
+versions checked at commit time rather than at the start of a long
+operation, are the kind of fixes that generalise.</p>
+<h3 id="the-2016-dyn-attack">The 2016 Dyn attack</h3>
+<p>Worth a sentence for context: on October 21, 2016, the Mirai botnet
+of compromised IoT devices hit the managed DNS provider Dyn with a large
+DDoS, and many big sites that depended on Dyn alone became unreachable
+for parts of the US for hours. Many companies then started using
+<strong>two independent authoritative DNS providers</strong>, which is
+now a common practice for critical domains, at the cost of keeping zones
+in sync.</p>
+<h2 id="a-checklist-for-production-dns">11. A checklist for production
+DNS</h2>
+<ul>
+<li>Use at least two authoritative providers, or one provider with a
+strong anycast footprint and a tested plan for the other.</li>
+<li>Choose TTLs per record by how fast you need to change it versus how
+long you want to survive an authoritative outage. Lower TTLs one full
+old-TTL period before planned changes.</li>
+<li>Never let automation publish an empty or all-unhealthy answer. Fail
+open to the last known good set.</li>
+<li>Remember that DNS failover doesn’t move existing connections; cap
+connection lifetimes or drain at the server.</li>
+<li>Keep TCP port 53 open and EDNS sizes sane; test DNSSEC-signed and
+large responses.</li>
+<li>In Kubernetes, watch <code>ndots</code> and search-domain
+amplification, and run node-local caching.</li>
+<li>Monitor resolution latency and error rates from the client side,
+separately from connect time.</li>
+<li>Treat DNSSEC and registrar changes like database migrations: staged,
+reversible, with the rollback time written down.</li>
+<li>Lock down your registrar account (MFA, registry lock) and use CAA
+records; hijacking the domain at the registrar bypasses everything
+else.</li>
+</ul>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>DNS is a hierarchical, delegated, <strong>heavily cached</strong>
+database. Writes are instant at the source and <strong>eventually
+consistent</strong> everywhere else.</li>
+<li><strong>Stub, recursive and authoritative</strong> servers do
+different jobs. Most lookups are answered from a resolver cache; a cold
+lookup walks root → TLD → authoritative.</li>
+<li><strong>TTLs</strong> bound cache lifetimes, but applications,
+connection pools and resolver clamping all stretch them.
+<strong>Negative answers are cached too</strong>, and
+<strong>serve-stale</strong> keeps old answers alive when authoritative
+servers are unreachable.</li>
+<li>DNS works over <strong>UDP and TCP</strong>; block TCP or mishandle
+EDNS and large responses fail intermittently. Regular 5-second delays
+usually mean a lost UDP query and a stub retry.</li>
+<li>DNS-based load balancing steers <strong>new lookups</strong>, not
+existing connections, and geo-steering sees the resolver, not the user,
+unless ECS is used.</li>
+<li><strong>Cache poisoning</strong> is mitigated by randomisation and
+fully addressed for data integrity by <strong>DNSSEC</strong>, which
+brings its own operational risk. <strong>DoT/DoH/DoQ</strong> encrypt
+the client hop.</li>
+<li>The big DNS outages share a pattern: automation or health logic that
+can remove <strong>every</strong> answer, plus caches that make rollback
+slow.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>You’re moving an API to a new load balancer. The record currently
+has a one-hour TTL. Write out the timeline, including what happens to
+clients with open HTTP/2 connections.</li>
+<li>Your health-checked DNS removes unhealthy endpoints. What should it
+do when all endpoints fail their health checks at once, and why did that
+question matter in the Facebook outage?</li>
+<li>A pod in Kubernetes takes 20 ms longer to call an external API than
+a VM in the same region does. How would you find out whether DNS is
+responsible, and what would you change?</li>
+<li>Would you enable DNSSEC on your company’s main domain? Weigh the
+threat it addresses against the Slack experience, and describe how you’d
+roll it out safely.</li>
+<li>In the AWS incident, what single guardrail would have turned the bug
+into a non-event? Where else in your systems does an automated planner
+write configuration that every client depends on?</li>
+<li>Your service caches DNS results forever in-process because lookups
+were once slow. What breaks, and what’s a safer design?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>P. Mockapetris, RFC 1034 “Domain Names: Concepts and Facilities” and
+RFC 1035 “Domain Names: Implementation and Specification” (1987)</li>
+<li>RFC 2308 (negative caching), RFC 6891 (EDNS(0)), RFC 7766 (DNS over
+TCP), RFC 7858 (DoT), RFC 8484 (DoH), RFC 9250 (DoQ), RFC 7816/9156
+(QNAME minimisation), RFC 7871 (EDNS Client Subnet), RFC 8767
+(serve-stale), RFC 8305 (Happy Eyeballs v2), RFC 9460 (SVCB/HTTPS
+records)</li>
+<li>DNS Flag Day 2020 (dnsflagday.net) on EDNS buffer sizes;
+root-servers.org on root server operators and instances</li>
+<li>Meta Engineering, <a
+href="https://engineering.fb.com/2021/10/05/networking-traffic/outage/">“More
+details about the October 4 outage”</a> (2021); ThousandEyes, <a
+href="https://www.thousandeyes.com/blog/facebook-outage-analysis">“Facebook
+outage analysis”</a>; APNIC Labs, <a
+href="https://labs.apnic.net/?p=1496">“Learning from Facebook’s
+mistakes”</a></li>
+<li>Slack Engineering, <a
+href="https://slack.engineering/what-happened-during-slacks-dnssec-rollout/">“What
+happened during Slack’s DNSSEC rollout”</a> (2021); <a
+href="https://ianix.com/pub/dnssec-outages/20210930-slack.com">ianix
+DNSSEC outage log entry</a></li>
+<li>AWS, <a href="https://aws.amazon.com/message/101925">“Summary of the
+Amazon DynamoDB Service Disruption in the Northern Virginia (US-EAST-1)
+Region”</a> (October 2025); InfoQ, <a
+href="https://www.infoq.com/news/2025/11/aws-dynamodb-outage-postmortem">“AWS
+DynamoDB outage postmortem”</a></li>
+<li>Dan Kaminsky’s 2008 cache poisoning disclosure and coordinated
+patch; K. Man et al., “DNS Cache Poisoning Attack Reloaded” (SAD DNS),
+ACM CCS 2020</li>
+<li>Kubernetes documentation, “DNS for Services and Pods” and “Using
+NodeLocal DNSCache”; Weaveworks/XING engineering posts on the conntrack
+race causing 5-second DNS delays</li>
+<li>Cloudflare Learning Center and blog posts on DNS, 1.1.1.1 and
+DNSSEC; Amazon Route 53 developer guide (alias records, health checks,
+routing policies)</li>
+<li>Cricket Liu and Paul Albitz, <em>DNS and BIND</em>, 5th
+ed. (O’Reilly)</li>
+</ul>
+<p><em>Note on verification: the AWS timeline and DNS Planner/Enactor
+description were read from the AWS summary today, and the Facebook and
+Slack incidents were checked against the linked write-ups via search.
+RFC numbers, the root server facts, TTL and timeout defaults (glibc 5 s,
+JVM 30 s, <code>ndots:5</code>, DNS Flag Day 1232 bytes) and the
+Kaminsky/SAD DNS details come from the specifications and documentation
+as I know them and weren’t re-fetched today; check your own resolver and
+runtime versions before relying on a specific default.</em></p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/networking.html">Networking</a><a class="chip" href="/topics/infrastructure.html">Infrastructure</a></div>
+          <div class="daynav"><a href="/reading/wal-crash-recovery.html"><div class="kicker">← Older · Nov 12</div><div class="t">Write-ahead logging and crash recovery: how databases survive pulling the plug</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
