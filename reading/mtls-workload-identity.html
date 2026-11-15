@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mutual TLS and workload identity: how services prove who they are · The Daily Commit</title>
+  <meta name="description" content="How service-to-service authentication works when the network can&#x27;t be trusted. Covers why network location isn&#x27;t identity, how mutual TLS differs from ordinary TLS, certificate issuance and rotation, SPIFFE IDs and SVIDs, SPIRE&#x27;s node and workload attestation, service meshes (sidecar and ambient), authorisation on identities, cloud workload identity, migrating to mTLS without an outage, and the failure modes, from expired certificates to confused deputies.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Mutual TLS and workload identity: how services prove who they are</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>18 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#why-network-location-isnt-identity">Why network location
+isn’t identity</a><a href="#tls-versus-mutual-tls">TLS versus mutual TLS</a><a href="#whats-in-a-workload-certificate">What’s in a workload
+certificate</a><a href="#spiffe-a-standard-for-workload-identity">SPIFFE: a standard
+for workload identity</a><a href="#spire-solving-the-secret-zero-problem">SPIRE: solving the
+“secret zero” problem</a><a href="#service-meshes-mtls-without-changing-the-code">Service
+meshes: mTLS without changing the code</a><a href="#authorisation-identity-is-only-half-the-job">Authorisation:
+identity is only half the job</a><a href="#workload-identity-in-the-cloud">Workload identity in the
+cloud</a><a href="#rolling-out-mtls-without-breaking-production">Rolling out
+mTLS without breaking production</a><a href="#failure-modes-in-operation">Failure modes in operation</a><a href="#is-it-worth-it">Is it worth it?</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 18 min left</div>
+      </nav>
+      <article class="article" data-slug="mtls-workload-identity" data-minutes="18">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/security.html">Security</a> · November 15, 2026 · 18 min</div>
+        <h1>Mutual TLS and workload identity: how services prove who they are</h1>
+        <p class="dek">How service-to-service authentication works when the network can&#x27;t be trusted. Covers why network location isn&#x27;t identity, how mutual TLS differs from ordinary TLS, certificate issuance and rotation, SPIFFE IDs and SVIDs, SPIRE&#x27;s node and workload attestation, service meshes (sidecar and ambient), authorisation on identities, cloud workload identity, migrating to mTLS without an outage, and the failure modes, from expired certificates to confused deputies.</p>
+<p>Inside most companies, services call each other millions of times a
+second, and for years the main security control on those calls was the
+network: if a request came from inside the VPC or from an allowed IP
+range, it was trusted. That model fails the moment an attacker gets a
+foothold anywhere inside, and it gets harder to maintain as workloads
+move between pods, nodes, regions and clouds with changing addresses.
+The modern answer is to give every workload a cryptographic identity and
+make every connection prove it, which in practice means <strong>mutual
+TLS (mTLS)</strong> with short-lived certificates issued automatically.
+This reading explains how mTLS works, how workloads get identities
+without a human-managed secret (SPIFFE and SPIRE), how service meshes
+make it transparent, how authorisation builds on it, and how to roll it
+out and operate it without causing outages. It draws on Google’s
+BeyondCorp and ALTS papers, NIST’s zero trust architecture guidance, the
+SPIFFE specifications, and the Istio and Linkerd documentation.</p>
+<h2 id="why-network-location-isnt-identity">1. Why network location
+isn’t identity</h2>
+<p>The traditional model has a hard perimeter (firewalls, VPNs, security
+groups) and a soft interior. Inside, a request from
+<code>10.2.3.4</code> is assumed to be from the billing service because
+that’s where billing runs.</p>
+<p>That assumption breaks in several ways:</p>
+<ul>
+<li><strong>Lateral movement.</strong> One compromised host, container
+or laptop on the network can reach everything that trusts the network.
+Most serious breaches involve an attacker moving sideways from an
+initial foothold.</li>
+<li><strong>Addresses aren’t stable.</strong> In Kubernetes, pod IPs are
+recycled constantly; with autoscaling and multiple clusters, an IP-based
+allow list is out of date almost as soon as it’s written.</li>
+<li><strong>Shared infrastructure.</strong> Load balancers, NAT gateways
+and proxies hide the original caller, so the IP you see often belongs to
+infrastructure, not the service.</li>
+<li><strong>No encryption by default.</strong> Traffic inside the data
+centre was often plaintext. Leaked documents published in 2013 described
+intelligence agencies tapping the private links between large companies’
+data centres, which pushed Google and others to encrypt internal
+traffic.</li>
+</ul>
+<p>Google’s response was <strong>BeyondCorp</strong> (described in a
+series of ;login: articles starting in 2014), which removed the
+privileged corporate network for employees: every access decision is
+based on the user’s and device’s identity and state, not on where the
+request comes from. For service-to-service traffic, Google built
+<strong>ALTS</strong> (Application Layer Transport Security), which
+authenticates and encrypts RPCs between workloads using identities tied
+to the service, not the machine. NIST later generalised these ideas in
+<strong>SP 800-207, Zero Trust Architecture</strong> (August 2020): no
+implicit trust based on network location, authenticate and authorise
+every request, and use the most specific identity available.</p>
+<p>For services, “authenticate every request” needs two things: a strong
+identity for every workload, and a protocol that proves it on every
+connection. mTLS provides the second; systems like SPIFFE provide the
+first.</p>
+<h2 id="tls-versus-mutual-tls">2. TLS versus mutual TLS</h2>
+<p>In ordinary TLS (the earlier reading on TLS 1.3 covers the handshake
+in depth), only the <strong>server</strong> proves its identity. It
+presents a certificate chain; the client checks the chain against
+trusted root CAs and checks that the certificate’s name matches the host
+it wanted. The client stays anonymous at the TLS layer and usually
+authenticates later with something in the request, such as a password,
+cookie or bearer token.</p>
+<p>In <strong>mutual TLS</strong>, the server also asks the client for a
+certificate (a <code>CertificateRequest</code> message in the
+handshake). The client sends its chain and proves it holds the private
+key by signing the handshake transcript
+(<code>CertificateVerify</code>). Both sides now know,
+cryptographically, who is on the other end, and the channel is
+encrypted.</p>
+<p>Compared with bearer tokens or API keys sent in each request, mTLS
+has some useful properties:</p>
+<ul>
+<li><strong>The secret never crosses the wire.</strong> The private key
+signs the handshake; it isn’t sent. A captured connection or a logged
+header doesn’t leak a reusable credential.</li>
+<li><strong>Identity is bound to the connection.</strong> Every request
+on that connection is from the authenticated peer.</li>
+<li><strong>It works for any protocol over TCP:</strong> HTTP, gRPC,
+database protocols, Kafka.</li>
+</ul>
+<p>It also has costs:</p>
+<ul>
+<li><strong>Certificate management.</strong> Every workload needs a key
+pair and a certificate, and they must be rotated. Done by hand, this is
+the main reason mTLS projects fail.</li>
+<li><strong>Termination points break the chain.</strong> If an L7 load
+balancer terminates TLS, the backend sees the load balancer’s identity,
+not the original client’s, unless the proxy forwards the client identity
+in a header (which the backend must then trust) or re-establishes mTLS
+with its own identity.</li>
+<li><strong>It identifies workloads, not users.</strong> mTLS tells you
+the caller is the orders service; it says nothing about which customer
+the request is for. You still need end-user context, usually a token,
+for that.</li>
+</ul>
+<h2 id="whats-in-a-workload-certificate">3. What’s in a workload
+certificate</h2>
+<p>A workload certificate is an ordinary X.509 certificate, but what
+matters is what goes in it and how long it lives.</p>
+<ul>
+<li><strong>Identity.</strong> Classic web certificates identify DNS
+names in the Subject Alternative Name (SAN). For workloads, DNS names
+are a poor fit (many replicas, internal names, services without DNS).
+The SPIFFE convention puts a <strong>URI SAN</strong> like
+<code>spiffe://acme.com/ns/prod/sa/orders</code> in the certificate,
+which names the workload itself.</li>
+<li><strong>Issuer.</strong> An internal CA, not a public one. Public
+CAs can’t issue for internal identities and shouldn’t be trusted for
+them. The internal CA’s root or intermediate is distributed to every
+workload as its <strong>trust bundle</strong>.</li>
+<li><strong>Lifetime.</strong> Short. Linkerd’s proxy certificates
+expire after 24 hours and are rotated automatically; Istio’s workload
+certificates are also short-lived (a day by default, rotated before
+expiry); SPIRE commonly issues certificates that live an hour. Short
+lifetimes mean revocation matters much less. Certificate revocation
+lists and OCSP are notoriously unreliable, so instead of revoking a
+compromised certificate you stop renewing it and wait at most its
+lifetime.</li>
+<li><strong>Key storage.</strong> The private key should be generated
+where it’s used and never leave that process or node. Ideally it lives
+only in memory.</li>
+</ul>
+<p>Short lifetimes only work if rotation is fully automatic and
+continuously exercised. The upside is that a rotation system that runs
+every hour gets tested every hour, unlike a yearly manual renewal that
+everyone has forgotten how to do.</p>
+<h2 id="spiffe-a-standard-for-workload-identity">4. SPIFFE: a standard
+for workload identity</h2>
+<p><strong>SPIFFE</strong> (Secure Production Identity Framework For
+Everyone) is a set of open specifications for workload identity. It was
+accepted into the CNCF in 2018 and graduated in August 2022. It defines
+three things.</p>
+<p><strong>SPIFFE ID.</strong> A URI of the form
+<code>spiffe://&lt;trust-domain&gt;/&lt;path&gt;</code>. The trust
+domain is a security boundary, usually an organisation or environment
+(<code>acme.com</code>, <code>prod.acme.com</code>). The path is
+whatever naming scheme you choose, such as Kubernetes namespace and
+service account, or a service name and region.</p>
+<p><strong>SVID</strong> (SPIFFE Verifiable Identity Document). The
+proof of a SPIFFE ID. There are two kinds:</p>
+<ul>
+<li><strong>X.509-SVID</strong>: a certificate with the SPIFFE ID as the
+URI SAN, used for mTLS.</li>
+<li><strong>JWT-SVID</strong>: a signed JWT with the SPIFFE ID as the
+subject and a specific audience, used where TLS can’t carry identity
+end-to-end (for example through an L7 proxy). It’s a bearer token, so it
+can be replayed if leaked, which is why the X.509 form is
+preferred.</li>
+</ul>
+<p><strong>Workload API.</strong> A local API (a Unix domain socket on
+the node) that a workload calls to get its SVIDs and trust bundles, and
+to receive updates when they rotate. The key design choice is that the
+workload <strong>doesn’t present any secret</strong> to call it. The API
+identifies the caller from the outside.</p>
+<p>SPIFFE also defines <strong>federation</strong>: trust domains can
+exchange trust bundles so that workloads in <code>acme.com</code> can
+verify SVIDs from <code>partner.com</code> or from another cluster with
+its own CA, without merging the two into one PKI.</p>
+<h2 id="spire-solving-the-secret-zero-problem">5. SPIRE: solving the
+“secret zero” problem</h2>
+<p>Every credential system has a bootstrapping problem: to get a
+certificate, a workload has to authenticate to the CA, but with what? If
+the answer is “a token we baked into the image” or “an API key in an
+environment variable”, you’re back to managing static secrets, which is
+exactly what you were trying to avoid. This is often called the
+<strong>secret zero</strong> problem.</p>
+<p><strong>SPIRE</strong>, the reference implementation of SPIFFE,
+solves it with <strong>attestation</strong>: proving what something is
+by checking facts that an attacker can’t easily forge.</p>
+<figure class="diagram"><svg viewBox="0 0 760 380" role="img" aria-label="SPIFFE identity issuance and mutual TLS between two workloads" font-size="13"><defs><marker id="mt1115" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker><marker id="mt1115b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-categorical-4)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Identity first, then mutual TLS</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Workloads get short-lived certificates from proof of what they are, not from a stored secret.</text><rect x="290" y="72" width="180" height="50" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="380" y="95" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">SPIRE server</text><text x="380" y="110" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">CA for trust domain</text><rect x="24" y="150" width="240" height="160" rx="10" fill="none" stroke="var(--cds-chart-axis)" stroke-dasharray="5 4"></rect><text x="34" y="168" font-size="11" fill="var(--cds-text-secondary)">node A</text><rect x="496" y="150" width="240" height="160" rx="10" fill="none" stroke="var(--cds-chart-axis)" stroke-dasharray="5 4"></rect><text x="506" y="168" font-size="11" fill="var(--cds-text-secondary)">node B</text><rect x="64" y="178" width="160" height="44" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="144" y="198" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">SPIRE agent</text><text x="144" y="213" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">attested node</text><rect x="64" y="250" width="160" height="46" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="144" y="271" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">orders service</text><text x="144" y="286" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">spiffe://acme/orders</text><rect x="536" y="178" width="160" height="44" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="616" y="198" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">SPIRE agent</text><text x="616" y="213" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">attested node</text><rect x="536" y="250" width="160" height="46" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="616" y="271" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">payments service</text><text x="616" y="286" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">spiffe://acme/payments</text><line x1="200" y1="176" x2="300" y2="124" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#mt1115)"></line><line x1="560" y1="176" x2="460" y2="124" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#mt1115)"></line><text x="212" y="140" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">1 node attestation</text><text x="548" y="140" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">1 node attestation</text><line x1="144" y1="248" x2="144" y2="224" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#mt1115)"></line><text x="150" y="240" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start">2 workload API</text><line x1="616" y1="248" x2="616" y2="224" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#mt1115)"></line><text x="510" y="240" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start">2 workload API</text><line x1="226" y1="273" x2="534" y2="273" stroke="var(--cds-chart-categorical-4)" stroke-width="2.5" marker-start="url(#mt1115b)" marker-end="url(#mt1115b)"></line><text x="380" y="264" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">3 mTLS: both present SVIDs</text><text x="380" y="292" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">4 authorise by SPIFFE ID</text><text x="24" y="340" font-size="11.5" fill="var(--cds-text-secondary)">Agents verify workloads by kernel facts (pod, service account, binary) and rotate certificates hourly to daily.</text><text x="24" y="360" font-size="11.5" fill="var(--cds-text-secondary)">A service mesh does the same job with a sidecar or node proxy, so application code doesn't change.</text></svg></figure>
+<p><strong>Node attestation.</strong> When a SPIRE agent starts on a
+node, it proves the node’s identity to the SPIRE server using evidence
+from the platform: an AWS instance identity document signed by AWS, a
+GCP instance identity token, an Azure managed identity, a Kubernetes
+projected service account token, or a TPM. The server verifies the
+evidence with the platform and gives the agent an identity for the
+node.</p>
+<p><strong>Workload attestation.</strong> When a process calls the
+Workload API on the node’s socket, the agent asks the kernel who is
+calling (the process ID via the socket’s peer credentials) and then
+collects facts about that process: its Unix user and group, its binary
+path or hash, or, on Kubernetes, the pod, namespace, service account,
+labels and container image, by asking the kubelet. These facts are
+called <strong>selectors</strong>.</p>
+<p><strong>Registration entries</strong> on the server map selectors to
+SPIFFE IDs: “a workload on a node in cluster prod, in namespace
+<code>payments</code>, with service account <code>payments-api</code>,
+gets <code>spiffe://acme.com/ns/payments/sa/payments-api</code>.” If the
+attested selectors match an entry, the agent issues the SVID (signing it
+via the server or with an intermediate it holds) and streams renewals to
+the workload before expiry.</p>
+<p>The result is a credential system with no stored secret anywhere in
+the workload. An attacker who copies the container image or reads its
+environment gets nothing usable. They would have to run code inside that
+pod on an attested node to get its identity, and even then the
+certificate expires within an hour or so.</p>
+<h2 id="service-meshes-mtls-without-changing-the-code">6. Service
+meshes: mTLS without changing the code</h2>
+<p>Asking every team to add mTLS, rotation and policy to every service,
+in every language, rarely works. <strong>Service meshes</strong> move it
+into infrastructure.</p>
+<h3 id="sidecar-meshes">Sidecar meshes</h3>
+<p>In the classic model (Istio with Envoy, Linkerd with its Rust
+micro-proxy), every pod gets a <strong>sidecar proxy</strong>. The pod’s
+traffic is transparently redirected through it (usually with iptables
+rules). When service A calls service B:</p>
+<ol type="1">
+<li>A’s application sends plaintext to what it thinks is B.</li>
+<li>A’s sidecar intercepts it, opens an mTLS connection to B’s sidecar
+using A’s workload certificate, and verifies B’s certificate.</li>
+<li>B’s sidecar terminates mTLS, checks authorisation policy against A’s
+identity, and forwards plaintext to B’s application over localhost.</li>
+</ol>
+<p>The mesh control plane (istiod, or Linkerd’s identity controller)
+acts as the CA, issues certificates based on Kubernetes service account
+tokens, and pushes configuration. Linkerd turns on mTLS for all TCP
+traffic between meshed pods by default. Istio offers a
+<strong>PERMISSIVE</strong> mode that accepts both plaintext and mTLS
+(for migration) and a <strong>STRICT</strong> mode that requires
+mTLS.</p>
+<p>The benefits are big: uniform encryption and identity, plus retries,
+timeouts, traffic splitting and telemetry, in every language without
+code changes. The costs are real too: a proxy per pod uses memory and
+CPU, adds a little latency per hop (two proxies on every call),
+complicates pod start-up and shutdown ordering, and adds a whole
+distributed system to operate and upgrade.</p>
+<h3 id="sidecar-less-meshes">Sidecar-less meshes</h3>
+<p>To cut those costs, Istio introduced <strong>ambient mode</strong>,
+which reached general availability in late 2024. A per-node proxy
+(<strong>ztunnel</strong>) handles mTLS and L4 policy for all pods on
+the node; optional <strong>waypoint proxies</strong>, deployed per
+namespace or service, handle L7 features only where needed. Cilium
+offers a similar split using eBPF in the kernel for L3/L4 and a per-node
+Envoy for L7. The trade-off is that a shared node proxy is a bigger
+blast radius than a per-pod sidecar, and it has to keep the identities
+of many workloads apart correctly.</p>
+<h3 id="library-based-alternatives">Library-based alternatives</h3>
+<p>Some organisations skip proxies entirely and build mTLS into RPC
+libraries, as Google did with ALTS in Stubby/gRPC. gRPC’s xDS support
+lets proxyless gRPC clients receive certificates and policy from a mesh
+control plane. This avoids the extra hop but requires a supported
+library in every language you use.</p>
+<h2 id="authorisation-identity-is-only-half-the-job">7. Authorisation:
+identity is only half the job</h2>
+<p>Authentication answers “who is calling?”. The point of having it is
+to answer “is this caller allowed to do this?”. Encrypting everything
+and then allowing every authenticated workload to call every other one
+is a common half-finished state.</p>
+<p>Authorisation on workload identity usually looks like:</p>
+<ul>
+<li><strong>Service-level allow lists.</strong> “Only
+<code>spiffe://acme.com/ns/checkout/sa/checkout</code> may call the
+payments service.” Istio’s <code>AuthorizationPolicy</code>, Linkerd’s
+<code>AuthorizationPolicy</code> and <code>MeshTLSAuthentication</code>,
+and Cilium network policies all express this. Start with default-deny in
+sensitive namespaces and allow specific callers.</li>
+<li><strong>Method-level rules.</strong> “The reporting service may call
+<code>GET /payments/*</code> but not <code>POST /refunds</code>.” This
+needs an L7-aware enforcement point.</li>
+<li><strong>Policy engines.</strong> For complex rules, an external
+engine such as Open Policy Agent can be consulted by the proxy or the
+application, combining workload identity, the end user’s token, and
+request attributes.</li>
+</ul>
+<p>Two subtleties matter:</p>
+<ul>
+<li><strong>Workload identity plus user identity.</strong> When the API
+gateway calls the orders service on behalf of customer 42, the orders
+service should check both that the caller is the gateway (mTLS) and that
+the request is for customer 42 (a signed token from the gateway or
+identity provider, passed along). Relying only on workload identity
+creates a <strong>confused deputy</strong>: any service allowed to call
+orders can read any customer’s orders, so compromising the least
+important caller exposes everything. Relying only on the user token lets
+anything that steals a token call internal services directly. Using both
+is the robust design.</li>
+<li><strong>Where the check happens.</strong> If the mesh enforces
+policy at the sidecar, the application must not be reachable by any path
+that skips the sidecar (for example, a pod port exposed on the host
+network). Defence in depth means having the application verify identity
+for critical operations too.</li>
+</ul>
+<h2 id="workload-identity-in-the-cloud">8. Workload identity in the
+cloud</h2>
+<p>Cloud providers solve the same problem for calls to their own APIs,
+and the ideas match SPIFFE closely:</p>
+<ul>
+<li><strong>AWS IAM roles</strong> for EC2 instances and IAM Roles for
+Service Accounts (IRSA) or EKS Pod Identity on Kubernetes give workloads
+short-lived credentials obtained by proving where they run, not by
+storing access keys.</li>
+<li><strong>GCP service accounts with Workload Identity</strong> on GKE
+map Kubernetes service accounts to Google service accounts.</li>
+<li><strong>Azure managed identities</strong> and workload identity
+federation do the same on Azure.</li>
+<li><strong>Workload identity federation</strong> across clouds and CI
+systems usually works by exchanging a signed OIDC token from one
+platform (a Kubernetes service account token, a GitHub Actions OIDC
+token) for short-lived credentials on another, so no long-lived cloud
+keys live in CI.</li>
+</ul>
+<p>The common principle: <strong>credentials come from attestation, are
+short-lived, and are never stored</strong>. Static access keys in
+environment variables or config files are the thing to eliminate. The
+earlier reading on secrets management covered the storage side; workload
+identity is how you make many of those secrets unnecessary.</p>
+<h2 id="rolling-out-mtls-without-breaking-production">9. Rolling out
+mTLS without breaking production</h2>
+<p>Turning on strict mTLS in a running system is a migration with real
+outage risk. A sequence that tends to work:</p>
+<ol type="1">
+<li><strong>Inventory traffic first.</strong> Use mesh telemetry or flow
+logs to find every caller of every service, including the surprising
+ones: batch jobs, cron jobs, health checkers, monitoring scrapers,
+services outside the cluster, legacy VMs.</li>
+<li><strong>Issue identities everywhere</strong> before requiring them.
+Get every workload onto the mesh or SPIRE so it has an SVID.</li>
+<li><strong>Permissive mode.</strong> Servers accept both mTLS and
+plaintext; clients that can use mTLS do. Watch the metrics for plaintext
+connections per service until they reach zero for each one.</li>
+<li><strong>Strict mode per namespace or service</strong>, starting with
+the most sensitive and best understood. Keep a fast way to revert.</li>
+<li><strong>Then authorisation</strong>, in audit mode first (log what
+would be denied), then enforce default-deny with explicit allow
+rules.</li>
+<li><strong>Handle the edges:</strong> ingress gateways (external
+clients use ordinary TLS to the gateway, which then uses mTLS inside),
+egress to third parties, and non-meshed systems such as managed
+databases, where you might use the platform’s own IAM-based
+authentication.</li>
+</ol>
+<p>The most common failure during rollout is a caller nobody knew about,
+typically a health checker or a metrics scraper that can’t do mTLS,
+which starts failing the moment strict mode is enabled. Audit and
+permissive phases exist to find them first.</p>
+<h2 id="failure-modes-in-operation">10. Failure modes in operation</h2>
+<p>mTLS replaces one class of risk (network-based trust) with
+operational risks that need their own care.</p>
+<ul>
+<li><strong>Expired certificates.</strong> The classic certificate
+outage. Short-lived certificates make this <em>more</em> likely if
+rotation breaks, because a rotation failure becomes an outage within
+hours instead of months. Monitor time-to-expiry of the certificates
+actually being served (not just issued), and alert well before expiry,
+for example when less than half the lifetime remains.</li>
+<li><strong>CA and trust bundle rotation.</strong> Rotating a workload
+certificate is routine; rotating the root or intermediate CA is not. It
+has to be done in overlapping phases: distribute the new root alongside
+the old one, start issuing from the new CA, wait until every old
+certificate has expired, then remove the old root. Skipping a phase
+splits the fleet into two groups that can’t talk to each other. Several
+widely reported outages have been caused by CA certificate expiry (for
+example, the September 2021 expiry of Let’s Encrypt’s old “DST Root CA
+X3” cross-signed root broke many older clients, which shows how hard
+root transitions are even on the public web).</li>
+<li><strong>Control plane dependency.</strong> If the CA (istiod, SPIRE
+server) is down, existing certificates keep working until they expire,
+so the CA’s availability requirement is tied to certificate lifetime.
+One-hour certificates with a single CA in one zone is a recipe for a
+self-inflicted outage. Run the CA highly available, and make certificate
+lifetime long enough to survive a realistic CA outage.</li>
+<li><strong>Clock skew.</strong> Certificate validity is time-based. A
+node whose clock is minutes off can reject fresh certificates as “not
+yet valid”. Keep NTP healthy and issue certificates with a small
+backdated <code>notBefore</code>.</li>
+<li><strong>Latency and CPU.</strong> TLS handshakes are relatively
+expensive; connection reuse (HTTP/2, connection pools) makes the
+per-request cost negligible. Watch for clients that open a new
+connection per request, since mTLS makes that pattern much more
+costly.</li>
+<li><strong>Debuggability.</strong> Encrypted traffic can’t be read with
+tcpdump. Use the mesh’s telemetry, proxy access logs, and tools like
+<code>istioctl proxy-config secret</code> or <code>linkerd viz</code> to
+see which identities are in use. Errors such as “certificate signed by
+unknown authority” almost always mean a trust bundle mismatch between
+trust domains or after a CA rotation.</li>
+</ul>
+<h2 id="is-it-worth-it">11. Is it worth it?</h2>
+<p>mTLS with automated workload identity is now standard practice in
+large organisations and is increasingly expected by compliance
+frameworks that require encryption in transit and strong service
+authentication. Whether to adopt a full service mesh is a separate
+question:</p>
+<ul>
+<li><strong>If you’re on Kubernetes with many services in several
+languages</strong>, a mesh is usually the cheapest path to universal
+mTLS, and sidecar-less modes have reduced the overhead.</li>
+<li><strong>If you have a few services in one language</strong>,
+library-level mTLS with SPIFFE (the <code>go-spiffe</code> library, or
+gRPC’s built-in support) may be simpler than a mesh.</li>
+<li><strong>If most of your calls go to cloud-managed services</strong>,
+cloud workload identity and IAM do most of the work, and mTLS matters
+mainly between your own services.</li>
+</ul>
+<p>Whatever the mechanism, the goals are the same: every workload has an
+identity it didn’t have to be given as a secret, every connection proves
+it, credentials are short-lived and rotated automatically, and
+authorisation uses those identities together with the end user’s.</p>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li><strong>Network location is not identity.</strong> Zero trust
+(BeyondCorp, NIST SP 800-207) means authenticating and authorising every
+request, based on the workload’s identity, not its address.</li>
+<li><strong>Mutual TLS</strong> authenticates both ends of a connection
+and encrypts it, without sending a reusable secret over the wire. It
+identifies workloads, not end users.</li>
+<li><strong>SPIFFE</strong> standardises workload identity: SPIFFE IDs
+(<code>spiffe://trust-domain/path</code>), X.509 and JWT SVIDs, and a
+local Workload API. <strong>SPIRE</strong> issues them by
+<strong>attesting</strong> nodes and workloads, solving the secret zero
+problem.</li>
+<li><strong>Short-lived certificates</strong> (an hour to a day) remove
+the need for revocation but make rotation and CA availability
+critical.</li>
+<li><strong>Service meshes</strong> (sidecar or ambient) deliver mTLS
+and policy without code changes, at a cost in resources and operational
+complexity.</li>
+<li><strong>Authorisation</strong> should combine workload identity with
+end-user context to avoid confused deputies, and should be default-deny
+for sensitive services.</li>
+<li>Roll out in phases: inventory, issue identities, permissive, strict,
+then authorisation. Monitor certificate expiry and plan CA rotations as
+overlapping phases.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Your platform uses security groups to restrict which services can
+reach the payments database. What attacks does that stop, and what does
+it miss that workload identity would catch?</li>
+<li>An L7 load balancer terminates TLS in front of a service. How can
+the backend still learn and trust the caller’s identity? What are the
+risks of forwarding identity in a header?</li>
+<li>You’re choosing a workload certificate lifetime. What argues for one
+hour, and what for seven days? How does your CA’s availability affect
+the answer?</li>
+<li>The API gateway calls the orders service over mTLS for every
+customer. Design an authorisation scheme that prevents a compromised
+internal analytics service from reading arbitrary customers’
+orders.</li>
+<li>During a move to strict mTLS, a batch job that runs once a month
+breaks two weeks after the cut-over. How could your rollout plan have
+found it earlier?</li>
+<li>Would you adopt a service mesh for 15 services, all written in Go?
+What would you do instead, if anything?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>R. Ward, B. Beyer, “BeyondCorp: A New Approach to Enterprise
+Security,” ;login: (USENIX), 2014, and later BeyondCorp papers</li>
+<li>Google, “Application Layer Transport Security” (ALTS) whitepaper;
+Google Cloud, “BeyondProd: A new approach to cloud-native security”</li>
+<li>NIST, <a
+href="https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-207.pdf">SP
+800-207, Zero Trust Architecture</a>, August 2020</li>
+<li>RFC 8446 (TLS 1.3) on client authentication; RFC 5280 (X.509
+certificates and SANs)</li>
+<li>SPIFFE specifications (SPIFFE ID, X.509-SVID, JWT-SVID, Workload
+API, Trust Domain and Bundle federation) at spiffe.io; <a
+href="https://www.cncf.io/projects/spiffe/">CNCF SPIFFE project page</a>
+(graduated August 2022)</li>
+<li>SPIRE documentation: architecture, node attestors, workload
+attestors and registration entries</li>
+<li>Linkerd, <a
+href="https://linkerd.io/2-edge/features/automatic-mtls/">“Automatic
+mTLS”</a> (on by default, 24-hour certificates)</li>
+<li>Istio documentation: security concepts, PeerAuthentication
+(PERMISSIVE/STRICT), AuthorizationPolicy, ambient mode (ztunnel and
+waypoint proxies)</li>
+<li>Cilium documentation on mutual authentication and service mesh; Open
+Policy Agent documentation</li>
+<li>AWS IAM Roles for Service Accounts and EKS Pod Identity docs; GKE
+Workload Identity docs; Azure workload identity federation docs</li>
+<li>Let’s Encrypt, “DST Root CA X3 Expiration (September 2021)”</li>
+</ul>
+<p><em>Note on verification: the SPIFFE CNCF timeline, Linkerd’s
+defaults and the NIST publication date were read from the linked pages
+today. Istio’s default certificate lifetime and the timing of ambient
+mode’s general availability, SPIRE’s typical certificate lifetimes, and
+the cloud identity mechanisms come from documentation as I know it and
+weren’t re-fetched; check the current docs for your versions.</em></p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/security.html">Security</a><a class="chip" href="/topics/networking.html">Networking</a></div>
+          <div class="daynav"><a href="/reading/vector-search-ann.html"><div class="kicker">← Older · Nov 14</div><div class="t">Vector search under the hood: HNSW, IVF, quantization and the recall trade-off</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
