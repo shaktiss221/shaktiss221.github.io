@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Distributed locks, leases and leader election: why &#x27;only one at a time&#x27; is so hard · The Daily Commit</title>
+  <meta name="description" content="Why mutual exclusion across machines is fundamentally different from a mutex, and how to get it right. Covers efficiency vs correctness locks, leases and why they need bounded clocks, process pauses, fencing tokens, the Redlock debate, Chubby and ZooKeeper recipes, etcd leases and revisions, Kubernetes leader election, database locks and advisory locks, and how to design so that a lock failure can&#x27;t corrupt data.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Distributed locks, leases and leader election: why &#x27;only one at a time&#x27; is so hard</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>18 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#why-youd-want-a-distributed-lock">Why you’d want a
+distributed lock</a><a href="#from-locks-to-leases">From locks to leases</a><a href="#process-pauses-the-problem-nobody-can-code-around">Process
+pauses: the problem nobody can code around</a><a href="#fencing-tokens-making-the-resource-enforce-it">Fencing
+tokens: making the resource enforce it</a><a href="#the-redlock-debate">The Redlock debate</a><a href="#locks-on-consensus-systems-chubby-zookeeper-etcd">Locks on
+consensus systems: Chubby, ZooKeeper, etcd</a><a href="#leader-election-in-practice">Leader election in practice</a><a href="#using-the-database-you-already-have">Using the database you
+already have</a><a href="#a-design-checklist">A design checklist</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 18 min left</div>
+      </nav>
+      <article class="article" data-slug="distributed-locks-leases" data-minutes="18">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/distributed-systems.html">Distributed Systems</a> · November 16, 2026 · 18 min</div>
+        <h1>Distributed locks, leases and leader election: why &#x27;only one at a time&#x27; is so hard</h1>
+        <p class="dek">Why mutual exclusion across machines is fundamentally different from a mutex, and how to get it right. Covers efficiency vs correctness locks, leases and why they need bounded clocks, process pauses, fencing tokens, the Redlock debate, Chubby and ZooKeeper recipes, etcd leases and revisions, Kubernetes leader election, database locks and advisory locks, and how to design so that a lock failure can&#x27;t corrupt data.</p>
+<p>Inside one process, “only one thread at a time” is a solved problem:
+take a mutex, and the operating system guarantees that nobody else holds
+it until you release it. Across machines, nothing provides that
+guarantee. A process that holds a lock can be paused for seconds by
+garbage collection, cut off by a network partition, or simply crash
+without releasing anything, and the rest of the system can’t tell which
+of these happened. Every distributed lock is therefore really a
+<strong>lease</strong>: a lock that expires. And a lock that expires can
+be held by two processes at once, from their own points of view. This
+reading explains why, what that means for leader election and job
+scheduling, how systems like Chubby, ZooKeeper and etcd approach the
+problem, what the famous argument about Redis’s Redlock was about, and
+the one technique (fencing) that makes locks safe when the storage
+cooperates. It draws on Martin Kleppmann’s writing and <em>Designing
+Data-Intensive Applications</em>, the Chubby and ZooKeeper papers, Gray
+and Cheriton’s original paper on leases, and the etcd and Kubernetes
+documentation.</p>
+<h2 id="why-youd-want-a-distributed-lock">1. Why you’d want a
+distributed lock</h2>
+<p>The need comes up all over backend systems:</p>
+<ul>
+<li><strong>Exactly one worker should run a scheduled job</strong> (send
+the nightly invoices, rotate a key, compact a table).</li>
+<li><strong>One leader</strong> should coordinate a cluster: assign
+partitions, run a controller loop, or accept writes for a shard.</li>
+<li><strong>Serialise access to an external resource</strong> that can’t
+handle concurrent changes, such as a file in object storage, a
+third-party API account, or a legacy system.</li>
+<li><strong>Avoid duplicate work</strong>, such as two servers
+regenerating the same expensive cache entry at the same time.</li>
+</ul>
+<p>Kleppmann’s 2016 post “How to do distributed locking” makes the most
+useful distinction for all of these. Ask what happens if the lock fails
+and two processes both think they hold it:</p>
+<ul>
+<li><strong>Efficiency locks.</strong> The lock just saves work. If it
+fails, two workers do the same computation, or a user gets two identical
+emails. Annoying but not harmful. A simple, fast, occasionally wrong
+lock is fine.</li>
+<li><strong>Correctness locks.</strong> The lock protects an invariant.
+If it fails, data gets corrupted, money moves twice, or a file is
+overwritten with stale content. Here, “occasionally wrong” isn’t
+acceptable, and as the rest of this reading shows, the lock alone can’t
+give you the guarantee; the protected resource has to help.</li>
+</ul>
+<p>Knowing which kind you need decides almost everything else.</p>
+<h2 id="from-locks-to-leases">2. From locks to leases</h2>
+<p>Suppose a lock service hands out locks that last until released. If
+the holder crashes, the lock is never released, and the system deadlocks
+forever. So every practical distributed lock has a timeout: the holder
+gets the lock for a period, must renew it before it runs out, and loses
+it if it doesn’t.</p>
+<p>This is a <strong>lease</strong>, a term from Cary Gray and David
+Cheriton’s 1989 paper “Leases: An Efficient Fault-Tolerant Mechanism for
+Distributed File Cache Consistency.” Their insight was that a
+time-limited grant lets the server recover from a client’s failure
+without having to know whether the client failed: just wait out the
+lease. The price is that correctness now depends on
+<strong>time</strong>: on clocks running at roughly the same rate on
+both sides, and on the holder noticing that its lease has expired before
+it acts.</p>
+<p>That price is where the trouble starts. A lease holder reasons like
+this:</p>
+<ol type="1">
+<li>I acquired the lease at time T with a duration of 10 seconds.</li>
+<li>It’s now T+3, so I still hold it.</li>
+<li>Therefore I can safely write to the resource.</li>
+</ol>
+<p>Every step can go wrong. The holder’s clock can jump, the check in
+step 2 and the action in step 3 aren’t atomic, and between them the
+process can stop for an arbitrary amount of time.</p>
+<h2 id="process-pauses-the-problem-nobody-can-code-around">3. Process
+pauses: the problem nobody can code around</h2>
+<p>The most important fact about distributed locks is that <strong>a
+process can pause for any length of time at any point in its execution,
+without knowing it</strong>. Causes include:</p>
+<ul>
+<li><strong>Garbage collection.</strong> Stop-the-world GC pauses can
+last seconds and, in pathological cases, minutes. Kleppmann’s post cites
+HBase, which used to have exactly this problem: a region server paused
+in GC long enough for its ZooKeeper session to expire, another server
+took over its regions, and the first one woke up and kept writing.</li>
+<li><strong>Virtual machine suspension or live migration</strong>, which
+can freeze a guest for a noticeable period.</li>
+<li><strong>Operating system scheduling and swapping</strong>, page
+faults on a memory-mapped file, or a slow disk on a synchronous log
+write.</li>
+<li><strong><code>SIGSTOP</code></strong>, a debugger, or a laptop lid
+closing (for clients on laptops).</li>
+<li><strong>Network delays</strong>: a request that the client sent
+while it held the lease can arrive at the storage service long after the
+lease expired.</li>
+</ul>
+<p>Now the scenario that breaks every lease-only design:</p>
+<figure class="diagram"><svg viewBox="0 0 760 370" role="img" aria-label="Fencing tokens stop a paused client from overwriting newer data" font-size="13"><defs><marker id="fe1116" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">A lease alone can't stop a paused client</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">The storage service must check a fencing token that only ever increases.</text><text x="24" y="104" font-size="12" font-weight="600" fill="var(--cds-text-primary)">client 1</text><line x1="120" y1="100" x2="736" y2="100" stroke="var(--cds-chart-axis)" stroke-width="1" stroke-dasharray="3 4"></line><text x="24" y="169" font-size="12" font-weight="600" fill="var(--cds-text-primary)">lock service</text><line x1="120" y1="165" x2="736" y2="165" stroke="var(--cds-chart-axis)" stroke-width="1" stroke-dasharray="3 4"></line><text x="24" y="234" font-size="12" font-weight="600" fill="var(--cds-text-primary)">client 2</text><line x1="120" y1="230" x2="736" y2="230" stroke="var(--cds-chart-axis)" stroke-width="1" stroke-dasharray="3 4"></line><text x="24" y="299" font-size="12" font-weight="600" fill="var(--cds-text-primary)">storage</text><line x1="120" y1="295" x2="736" y2="295" stroke="var(--cds-chart-axis)" stroke-width="1" stroke-dasharray="3 4"></line><line x1="150" y1="160" x2="170" y2="106" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#fe1116)"></line><text x="178" y="88" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start">lease, token 33</text><rect x="200" y="93" width="330" height="14" rx="4" fill="var(--cds-chart-categorical-4)" fill-opacity="0.35"></rect><text x="365" y="124" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">stop-the-world pause (GC, swap, VM migration)</text><line x1="330" y1="150" x2="330" y2="180" stroke="var(--cds-chart-categorical-4)" stroke-width="2.5"></line><text x="330" y="196" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">lease expires</text><line x1="380" y1="170" x2="400" y2="224" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#fe1116)"></line><text x="408" y="216" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start">lease, token 34</text><line x1="440" y1="236" x2="470" y2="289" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#fe1116)"></line><text x="478" y="281" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start">write (34) ok</text><line x1="560" y1="106" x2="620" y2="289" stroke="var(--cds-chart-categorical-4)" stroke-width="2" marker-end="url(#fe1116)"></line><text x="630" y="281" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start">write (33)</text><text x="630" y="316" font-size="11" fill="var(--cds-text-primary)" text-anchor="start">rejected: 33 &lt; 34</text><text x="24" y="356" font-size="11.5" fill="var(--cds-text-secondary)">Without the check, client 1 overwrites client 2's data while believing it still holds the lock.</text></svg></figure>
+<ol type="1">
+<li>Client 1 acquires the lease.</li>
+<li>Client 1 checks that its lease is still valid, then pauses (GC)
+before writing.</li>
+<li>The lease expires. Client 2 acquires it and writes to storage.</li>
+<li>Client 1 resumes. From its perspective, it checked the lease a
+moment ago. It writes, overwriting client 2’s newer data.</li>
+</ol>
+<p>No amount of checking inside client 1 can fix this, because the pause
+can happen <em>after</em> the last check and <em>before</em> the effect
+lands. Checking the lease right before the write only shrinks the
+window. It doesn’t close it. This is the core reason a lock service,
+however well built, can’t guarantee mutual exclusion on its own.</p>
+<h2 id="fencing-tokens-making-the-resource-enforce-it">4. Fencing
+tokens: making the resource enforce it</h2>
+<p>The fix is to have the <strong>resource</strong> reject operations
+from stale lock holders. Every time the lock service grants the lock, it
+also returns a <strong>fencing token</strong>: a number that increases
+with every grant. The holder includes the token with every write. The
+storage service remembers the highest token it has seen and rejects any
+write with a lower one.</p>
+<p>In the scenario above, client 1 got token 33 and client 2 got token
+34. Client 2’s write with 34 succeeds and raises the storage’s
+high-water mark to 34. Client 1’s delayed write arrives with 33 and is
+rejected. Client 1’s pause no longer matters.</p>
+<p>Some properties of fencing:</p>
+<ul>
+<li><strong>It moves the guarantee to where the data is.</strong> The
+resource is the only component that sees operations in their real order,
+so it’s the only place mutual exclusion can be enforced.</li>
+<li><strong>The token has to be monotonic and come from a reliable
+source.</strong> A consensus-based lock service can provide one easily:
+ZooKeeper’s <code>zxid</code> or a znode’s version, etcd’s revision
+numbers, or a database sequence.</li>
+<li><strong>The resource has to support it.</strong> That’s the catch. A
+database can enforce it with a conditional write
+(<code>UPDATE ... WHERE fence_token &lt; $new</code>) or a
+compare-and-set on a version column. Object stores with conditional
+writes (<code>If-Match</code> on an ETag, or preconditions on a
+generation number) can do it too. A third-party email API or a payment
+provider usually can’t, so for those you need <strong>idempotency
+keys</strong> instead (covered in the earlier reading on exactly-once
+delivery), which serve a similar purpose: making the second attempt
+harmless.</li>
+<li><strong>Once you have fencing, the lock becomes an
+optimisation.</strong> The resource rejects stale writers anyway; the
+lock just keeps them from wasting effort. That’s a much more comfortable
+place to be.</li>
+</ul>
+<p>Chubby, Google’s lock service, had this idea built in: its locks
+could produce a <strong>sequencer</strong> (lock name, mode and
+generation number) that clients passed to servers, which checked it was
+still current. For servers that didn’t support sequencers, Chubby used a
+<strong>lock-delay</strong>: after a holder failed without releasing the
+lock, nobody else could acquire it for a configurable period (up to a
+minute), to give in-flight requests from the old holder time to drain.
+Lock-delay reduces the risk but doesn’t eliminate it.</p>
+<h2 id="the-redlock-debate">5. The Redlock debate</h2>
+<p>Redis is often used for locks, and the debate about it is the
+clearest illustration of these ideas.</p>
+<p><strong>Single-instance Redis lock.</strong> The common pattern is
+<code>SET resource_key random_value NX PX 30000</code>: set the key only
+if it doesn’t exist, with a 30-second expiry. To release, a Lua script
+deletes the key only if it still holds your random value, so you don’t
+delete someone else’s lock. This is fast and simple. Its weakness is
+that it’s one Redis server: if it fails over to a replica that hadn’t
+received the key yet (Redis replication is asynchronous), two clients
+can hold the lock.</p>
+<p><strong>Redlock.</strong> To avoid the single point of failure,
+Redis’s creator Salvatore Sanfilippo (antirez) proposed Redlock: use N
+independent Redis masters (five in the description), try to acquire the
+key on all of them with the same random value and a short timeout, and
+consider the lock held only if a majority (at least three) granted it
+within less than the lock’s validity time. The remaining validity is the
+TTL minus the time spent acquiring, minus an allowance for clock
+drift.</p>
+<p><strong>Kleppmann’s critique</strong> (February 2016) made two main
+points:</p>
+<ol type="1">
+<li><strong>Redlock doesn’t produce fencing tokens.</strong> The random
+value is unique but not monotonic, so a storage service can’t use it to
+reject stale writers. Without fencing, the process-pause problem from
+section 3 applies regardless of how many Redis nodes agree.</li>
+<li><strong>Redlock depends on timing assumptions.</strong> Its safety
+relies on bounded network delay, bounded process pauses and clocks that
+don’t jump. If a Redis node’s clock jumps forward (for example, after an
+NTP correction), keys there can expire early, and a second client can
+get a majority while the first still believes it holds the lock.
+Algorithms used for correctness, such as Raft or Paxos-based systems,
+are designed to stay <em>safe</em> under arbitrary delays and pauses and
+only lose <em>liveness</em> (progress), whereas Redlock loses
+safety.</li>
+</ol>
+<p>His conclusions: if the lock is for <strong>efficiency</strong>,
+Redlock’s cost and complexity aren’t needed and a single Redis instance
+is fine. If it’s for <strong>correctness</strong>, don’t use Redlock;
+use a consensus-based system like ZooKeeper (or etcd), and enforce
+fencing tokens at the resource.</p>
+<p><strong>Antirez’s reply</strong> (“Is Redlock safe?”) argued that the
+timing assumptions are reasonable in practice if clocks are configured
+to slew rather than jump, that Redlock’s check of elapsed time after
+acquiring reduces the impact of pauses during acquisition, and that if
+you have a resource that can enforce fencing tokens (essentially a
+linearisable compare-and-set), you might not need a distributed lock at
+all. That last point is partly a concession: it agrees that the
+protected resource is where the guarantee really lives.</p>
+<p>The practical takeaway most engineers draw: Redis locks are fine for
+efficiency, with the expiry and safe-release pattern done correctly. For
+correctness, use fencing or idempotency at the resource, and a lock
+service built on consensus if you need the lock at all.</p>
+<h2 id="locks-on-consensus-systems-chubby-zookeeper-etcd">6. Locks on
+consensus systems: Chubby, ZooKeeper, etcd</h2>
+<p>Systems built on consensus (Paxos, ZAB, Raft) give you a linearisable
+store, which provides the two things a correct lock needs: a single
+agreed order of lock grants, and a monotonic number to use as a fencing
+token. They’re still lease-based, because they still need to detect dead
+clients, but their state doesn’t get lost or forked on failover.</p>
+<h3 id="chubby">Chubby</h3>
+<p>Mike Burrows’s “The Chubby lock service for loosely-coupled
+distributed systems” (OSDI 2006) describes Google’s lock service: a
+small cell of five replicas running Paxos, exposing a file-system-like
+namespace where files can be locked. Notable lessons from the paper:</p>
+<ul>
+<li>It’s intended for <strong>coarse-grained</strong> locks held for
+hours or days (such as leader election), not fine-grained locks taken
+per request.</li>
+<li>Most of its load turned out to be <strong>name service and
+configuration storage</strong>, not locking. Teams used it as a highly
+available place to store small amounts of metadata, such as who the
+current leader is.</li>
+<li>Clients hold <strong>sessions</strong> kept alive with KeepAlive
+RPCs; if the session lease expires, the client’s locks are released. The
+client library has a <strong>grace period</strong> to ride out a master
+failover without losing the session.</li>
+<li>It introduced the sequencer and lock-delay mechanisms described in
+section 4.</li>
+</ul>
+<h3 id="zookeeper">ZooKeeper</h3>
+<p>ZooKeeper (Hunt, Konar, Junqueira and Reed, USENIX ATC 2010) took a
+different approach: instead of providing locks, it provides primitives
+from which clients build locks, leader election, barriers and queues.
+The key primitives:</p>
+<ul>
+<li><strong>Ephemeral znodes</strong>, which are deleted automatically
+when the client’s session ends (by expiring or closing).</li>
+<li><strong>Sequential znodes</strong>, which get a monotonically
+increasing suffix assigned by ZooKeeper.</li>
+<li><strong>Watches</strong>, one-time notifications when a znode
+changes.</li>
+</ul>
+<p>The standard lock recipe: each client creates an ephemeral sequential
+znode under <code>/locks/my-resource/</code>. The client whose znode has
+the lowest sequence number holds the lock. Every other client watches
+the znode <strong>just before its own</strong> (not the lock holder), so
+when a holder leaves only one client is woken. This avoids the
+<strong>herd effect</strong> where every waiter rushes to check at once.
+Leader election uses the same recipe: the lowest sequence number is the
+leader.</p>
+<p>The sequence number or the znode’s <code>zxid</code> (ZooKeeper’s
+transaction ID) can serve as a fencing token. The ZooKeeper session
+timeout plays the role of the lease, and the same pause problem applies:
+if a leader’s session expires during a GC pause, a new leader is elected
+while the old one may still be acting.</p>
+<p>Apache Curator packages these recipes for Java clients and is the
+safer way to use them, because the recipes have many edge cases
+(connection loss during znode creation is a notable one).</p>
+<h3 id="etcd">etcd</h3>
+<p>etcd (the Raft-based store behind Kubernetes) uses an explicit
+<strong>lease</strong> object: a client creates a lease with a TTL,
+attaches keys to it, and sends keep-alives. If the lease expires, all
+attached keys are deleted. Every change to the store gets a cluster-wide
+<strong>revision</strong> number, which increases monotonically.</p>
+<p>etcd’s concurrency package implements locks and elections on top of
+this: a client creates a key under a prefix attached to its lease, and
+the key with the lowest <strong>create revision</strong> holds the lock.
+That revision is a natural fencing token. etcd also supports
+transactions with comparisons on revisions, so a client can make a write
+conditional on still holding the lock key (“only if my lock key exists
+with this create revision”), which closes the gap for writes <em>to etcd
+itself</em>. For writes to other systems, fencing at those systems is
+still needed.</p>
+<h2 id="leader-election-in-practice">7. Leader election in practice</h2>
+<p>Leader election is a lock that’s held for a long time and whose
+holder does continuous work. Kubernetes is a useful concrete example.
+Controllers such as the kube-controller-manager and kube-scheduler run
+several replicas, and only the leader acts. They coordinate through a
+<strong>Lease</strong> object in the API server (backed by etcd):</p>
+<ul>
+<li>The leader records its identity and a renew time in the Lease, and
+renews it periodically.</li>
+<li>Followers watch the Lease and try to take over if it hasn’t been
+renewed within the lease duration.</li>
+<li>The leader steps down if it can’t renew within a renew deadline,
+which is shorter than the lease duration, so it should stop acting
+before anyone else can start. The defaults for the
+kube-controller-manager are a 15-second lease duration, a 10-second
+renew deadline and a 2-second retry period.</li>
+</ul>
+<p>Look at the timing: the gap between the leader’s renew deadline and
+the lease duration is the safety margin. It works when the leader’s
+process is running and checking. It fails in exactly the scenario from
+section 3: a leader that pauses for 20 seconds can’t notice that it’s
+past its deadline until it resumes, by which time a new leader is
+active. Kubernetes controllers tolerate this mostly because their
+actions go through the API server with <strong>optimistic
+concurrency</strong> (each object has a <code>resourceVersion</code>,
+and updates that are based on a stale version are rejected). That’s
+fencing again, in a different form.</p>
+<p>General lessons for leader election:</p>
+<ul>
+<li><strong>Make the leader’s actions conditional</strong> on state that
+a new leader would change: a term or epoch number, a version, a token.
+Raft does this internally with terms; your application should do it
+externally.</li>
+<li><strong>Step down early and stop all work</strong>, including
+in-flight background tasks, when the lease can’t be renewed. A leader
+that keeps a background thread running after losing leadership is a
+common bug.</li>
+<li><strong>Prefer designs where two leaders can’t do damage</strong>,
+for example by partitioning work so each partition has a single writer
+enforced by the storage layer, or by making operations idempotent.</li>
+</ul>
+<h2 id="using-the-database-you-already-have">8. Using the database you
+already have</h2>
+<p>Often the simplest correct lock is in the database that holds the
+data you’re protecting, because then the lock and the data share one
+consistency model.</p>
+<ul>
+<li><strong>Row locks with <code>SELECT ... FOR UPDATE</code></strong>
+within a transaction serialise updates to specific rows. The lock is
+released when the transaction ends, including when the connection dies,
+so there’s no stale holder.</li>
+<li><strong><code>FOR UPDATE SKIP LOCKED</code></strong> lets many
+workers claim different rows from a jobs table without blocking each
+other (the job queues reading covered this pattern).</li>
+<li><strong>Postgres advisory locks</strong>
+(<code>pg_advisory_lock</code>, <code>pg_try_advisory_xact_lock</code>)
+are application-defined locks keyed by a number. Session-level advisory
+locks are held until released or the session ends; transaction-level
+ones are released at commit or rollback. They’re a good fit for “only
+one instance runs this migration or cron job”, with the caveat that
+connection poolers in transaction mode (such as PgBouncer) can break
+session-level locks because consecutive statements may run on different
+server connections.</li>
+<li><strong>Conditional writes</strong> (compare-and-set on a version
+column, DynamoDB condition expressions, <code>If-Match</code> headers on
+object stores) give you fencing directly. Often you can skip the lock
+entirely and just do optimistic concurrency: read the version, compute,
+write if the version is unchanged, retry otherwise.</li>
+<li><strong>DynamoDB-based lock libraries</strong> (such as AWS’s
+DynamoDB Lock Client) implement leases on a table with conditional
+writes and heartbeats. Since they live in the same store as the
+protected items, you can combine the lock check and the data write in
+one conditional transaction.</li>
+</ul>
+<p>The pattern to aim for: <strong>put the guard and the protected data
+in the same atomic operation.</strong> A lock in one system protecting
+data in another always has the gap from section 3.</p>
+<h2 id="a-design-checklist">9. A design checklist</h2>
+<p>When someone proposes a distributed lock:</p>
+<ol type="1">
+<li><strong>Efficiency or correctness?</strong> If two holders only
+cause duplicate work, a simple lease (single Redis key with expiry, or a
+database advisory lock) is enough. Stop there.</li>
+<li><strong>Can the resource enforce ordering?</strong> If yes, use
+fencing tokens or conditional writes, and treat the lock as an
+optimisation. If no, can you make the operation idempotent with a key
+the resource honours?</li>
+<li><strong>Can you avoid the lock?</strong> Partition the work so each
+item has one natural owner (consistent hashing, Kafka partitions
+assigned by the consumer group protocol), use optimistic concurrency, or
+use a single-writer queue.</li>
+<li><strong>If you need a lock service, use one built on
+consensus</strong> (etcd, ZooKeeper, Consul, or your cloud’s equivalent)
+and get a monotonic token from it.</li>
+<li><strong>Choose lease durations deliberately.</strong> Long leases
+mean slow failover when a holder dies; short leases mean more false
+expiries during GC pauses or network blips. Make the renew deadline well
+short of the lease duration, and monitor GC pause times against it.</li>
+<li><strong>Stop work on lease loss</strong> and test it: inject a pause
+(<code>kill -STOP</code>), a partition, and a clock jump, and confirm
+that no stale writes land.</li>
+<li><strong>Don’t trust wall clocks</strong> for lease decisions on the
+holder side. Use a monotonic clock to measure elapsed time since
+acquisition, and remember that the lock service’s clock and yours may
+differ.</li>
+</ol>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Every distributed lock is a <strong>lease</strong>, because holders
+can crash. Leases bring in <strong>time</strong>, and with it the
+possibility that two processes both believe they hold the lock.</li>
+<li><strong>Process pauses</strong> (GC, VM migration, swapping) and
+network delays can happen between checking the lease and acting on it.
+No client-side check closes that gap.</li>
+<li><strong>Fencing tokens</strong>, monotonic numbers checked by the
+protected resource, are what actually provide mutual exclusion.
+Conditional writes, versions and idempotency keys are the same idea in
+other forms.</li>
+<li>Decide whether a lock is for <strong>efficiency</strong> (simple and
+occasionally wrong is fine) or <strong>correctness</strong> (the
+resource must enforce it).</li>
+<li>The <strong>Redlock</strong> debate comes down to fencing and timing
+assumptions. For correctness, use a consensus-based service and fencing;
+for efficiency, a single Redis key is enough.</li>
+<li><strong>Chubby, ZooKeeper and etcd</strong> provide sessions or
+leases plus monotonic identifiers (sequencers, zxids, revisions) that
+serve as fencing tokens.</li>
+<li>The best lock is often <strong>no separate lock</strong>: put the
+guard in the same atomic operation as the data, or partition work so
+there’s a single writer.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Your nightly billing job uses a Redis lock so only one instance
+runs. Is that an efficiency lock or a correctness lock? What would you
+change if a double run charged customers twice?</li>
+<li>A leader holds a 15-second lease with a 10-second renew deadline and
+then pauses for 30 seconds. Walk through what happens. Which writes can
+it make after it resumes, and what would stop them?</li>
+<li>You need to protect writes to a file in object storage. What
+conditional-write features would let you use fencing there, and what
+would you do if the store didn’t have any?</li>
+<li>Antirez argued that if a resource can check fencing tokens, you may
+not need a distributed lock at all. When is that true, and when does the
+lock still earn its place?</li>
+<li>Where in your systems do two components both believe they’re “the
+leader” or “the owner” during a failover? How would you detect it if it
+happened?</li>
+<li>When would you choose a Postgres advisory lock over etcd, and what
+breaks if PgBouncer runs in transaction pooling mode?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Martin Kleppmann, <a
+href="https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html">“How
+to do distributed locking”</a>, February 2016; <em>Designing
+Data-Intensive Applications</em> (O’Reilly, 2017), ch. 8 “The Trouble
+with Distributed Systems” and ch. 9</li>
+<li>Salvatore Sanfilippo (antirez), “Is Redlock safe?” (2016); Redis
+documentation, <a
+href="https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/">“Distributed
+Locks with Redis”</a></li>
+<li>C. Gray, D. Cheriton, “Leases: An Efficient Fault-Tolerant Mechanism
+for Distributed File Cache Consistency,” SOSP 1989</li>
+<li>M. Burrows, “The Chubby lock service for loosely-coupled distributed
+systems,” OSDI 2006</li>
+<li>P. Hunt, M. Konar, F. Junqueira, B. Reed, “ZooKeeper: Wait-free
+coordination for Internet-scale systems,” USENIX ATC 2010; ZooKeeper
+Recipes and Solutions documentation; Apache Curator recipes</li>
+<li>etcd documentation: leases, revisions, transactions, and the
+<code>concurrency</code> package (mutex and election)</li>
+<li>Kubernetes documentation: Leases, leader election in client-go, and
+kube-controller-manager <code>--leader-elect-*</code> flags</li>
+<li>PostgreSQL documentation: explicit locking,
+<code>SELECT ... FOR UPDATE</code>/<code>SKIP LOCKED</code>, advisory
+lock functions; PgBouncer documentation on pooling modes</li>
+<li>AWS, Amazon DynamoDB Lock Client (awslabs) and DynamoDB condition
+expressions</li>
+</ul>
+<p><em>Note on verification: Kleppmann’s post (date, HBase GC example,
+fencing tokens and conclusions) was read today. The Redlock algorithm
+details (five masters, validity time), antirez’s reply, the Kubernetes
+leader-election defaults (15 s, 10 s, 2 s), the Chubby and ZooKeeper
+details and the Postgres/PgBouncer behaviour come from the papers and
+docs as I know them and weren’t re-fetched; check the current docs
+before relying on a specific default.</em></p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a></div>
+          <div class="daynav"><a href="/reading/mtls-workload-identity.html"><div class="kicker">← Older · Nov 15</div><div class="t">Mutual TLS and workload identity: how services prove who they are</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
