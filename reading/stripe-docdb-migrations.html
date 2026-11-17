@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How Stripe moves petabytes between database shards without downtime · The Daily Commit</title>
+  <meta name="description" content="A case study of Stripe&#x27;s DocDB and its Data Movement Platform, which migrates live data between thousands of MongoDB-based shards with a traffic switch of under two seconds. Covers why sharded databases need online data movement, the six-step migration (register, bulk import, oplog replication, verification, versioned traffic switch, cleanup), the design choices behind each step, how it compares to Vitess, MongoDB&#x27;s balancer and Figma&#x27;s approach, and lessons for any team migrating data while it&#x27;s being written.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>How Stripe moves petabytes between database shards without downtime</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>16 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#docdb-what-stripe-built-on-top-of-mongodb">DocDB: what Stripe
+built on top of MongoDB</a><a href="#why-online-data-movement-is-a-core-capability">Why online
+data movement is a core capability</a><a href="#requirements-what-zero-downtime-has-to-mean">Requirements:
+what “zero downtime” has to mean</a><a href="#the-six-steps">The six steps</a><a href="#why-this-design-works-the-principles-behind-it">Why this
+design works: the principles behind it</a><a href="#how-others-solve-the-same-problem">How others solve the same
+problem</a><a href="#lessons-for-teams-that-arent-stripe">Lessons for teams that
+aren’t Stripe</a><a href="#open-questions-and-limitations">Open questions and
+limitations</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 16 min left</div>
+      </nav>
+      <article class="article" data-slug="stripe-docdb-migrations" data-minutes="16">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/case-study.html">Case Study</a> · November 17, 2026 · 16 min</div>
+        <h1>How Stripe moves petabytes between database shards without downtime</h1>
+        <p class="dek">A case study of Stripe&#x27;s DocDB and its Data Movement Platform, which migrates live data between thousands of MongoDB-based shards with a traffic switch of under two seconds. Covers why sharded databases need online data movement, the six-step migration (register, bulk import, oplog replication, verification, versioned traffic switch, cleanup), the design choices behind each step, how it compares to Vitess, MongoDB&#x27;s balancer and Figma&#x27;s approach, and lessons for any team migrating data while it&#x27;s being written.</p>
+<p>Stripe processed about $1 trillion in payments in 2023 and says its
+databases ran at 99.999% availability while doing it. Underneath is
+DocDB, an internal database service built on MongoDB Community, which
+serves over five million queries per second across more than 2,000
+shards. A fleet that size never stands still: shards get too hot or too
+big, others are nearly idle, MongoDB versions need upgrading, and large
+customers sometimes need their own hardware. All of that means moving
+data between shards while it’s being read and written by payment traffic
+that can’t tolerate downtime. In June 2024, Stripe’s database
+infrastructure team published how they do it: a system called the
+<strong>Data Movement Platform</strong>. This reading walks through that
+design step by step, explains why each step exists, compares it with
+other well-known approaches (Vitess, MongoDB’s own balancer, Figma’s
+Postgres sharding, which an earlier reading covered), and pulls out the
+general lessons for online data migration. The main source is Stripe’s
+post by Jimmy Morzaria and Suraj Narkhede; related sources are listed at
+the end.</p>
+<h2 id="docdb-what-stripe-built-on-top-of-mongodb">1. DocDB: what Stripe
+built on top of MongoDB</h2>
+<p>Stripe chose MongoDB early (around 2011) for its document model and
+developer productivity. Managed offerings like Atlas didn’t exist yet,
+so Stripe ran its own clusters, and over the years built a
+database-as-a-service layer around MongoDB Community called
+<strong>DocDB</strong>. According to the post, it now serves:</p>
+<ul>
+<li>more than <strong>five million queries per second</strong> from
+product applications,</li>
+<li>more than <strong>10,000 distinct query shapes</strong>,</li>
+<li><strong>petabytes</strong> of data in more than <strong>5,000
+collections</strong>,</li>
+<li>spread across more than <strong>2,000 shards</strong>.</li>
+</ul>
+<p>Applications don’t talk to MongoDB directly. They go through a fleet
+of <strong>database proxy servers</strong> written in Go, which parse
+each query, route it to the right shard (or several), merge results, and
+enforce reliability features such as admission control and access
+control. A <strong>chunk metadata service</strong> records which
+<strong>chunk</strong> (a contiguous range of a collection’s data) lives
+on which shard. <strong>Change data capture (CDC)</strong> pipelines
+ship each shard’s write log (the MongoDB oplog) into Kafka and archive
+it in object storage, where other systems consume it.</p>
+<p>This architecture matters for migration. Because every query goes
+through Stripe’s own proxies, and because routing comes from Stripe’s
+own metadata service, Stripe controls the exact moment traffic for a
+chunk moves from one shard to another. That’s the lever the whole design
+depends on.</p>
+<p>Stripe’s sharding also changed over time. Early on, it ran a small
+number of large shards, each holding tens of terabytes. Today it runs
+thousands of smaller ones. Smaller shards are faster to back up,
+restore, rebuild and upgrade, and a problem affects less data, but they
+also mean many more shards to manage, and a much greater need for an
+automatic way to move data between them.</p>
+<h2 id="why-online-data-movement-is-a-core-capability">2. Why online
+data movement is a core capability</h2>
+<p>The post lists the uses Stripe has for moving data, and they’re
+common to any sharded system:</p>
+<ul>
+<li><strong>Splitting hot or large shards.</strong> A shard that grows
+too large or too busy needs part of its data moved elsewhere, sometimes
+urgently during a traffic surge.</li>
+<li><strong>Bin-packing underused shards.</strong> The reverse problem:
+thousands of shards that are mostly idle waste money. In 2023, Stripe
+used the platform to consolidate thousands of under-utilised databases,
+moving <strong>1.5 petabytes</strong> of data and reducing the number of
+DocDB shards by about <strong>three quarters</strong>, without visible
+impact on applications.</li>
+<li><strong>Upgrades.</strong> Instead of upgrading MongoDB in place,
+version by version, Stripe used data movement to migrate the fleet to a
+newer major version <strong>in one step</strong>, skipping intermediate
+versions: build new shards on the new version and move data into them.
+That makes an upgrade a migration that can be verified and rolled back,
+rather than an in-place operation that can’t.</li>
+<li><strong>Tenant isolation.</strong> Moving a very large user onto
+dedicated shards (single tenancy).</li>
+</ul>
+<p>If data movement is slow, risky or manual, all of these become
+projects that teams avoid. If it’s routine, the fleet can be
+continuously reshaped. That’s the real payoff, and it’s why Stripe
+invested in a general platform rather than one-off migration
+scripts.</p>
+<h2 id="requirements-what-zero-downtime-has-to-mean">3. Requirements:
+what “zero downtime” has to mean</h2>
+<p>The post frames the requirements roughly as follows, and they make a
+good checklist for any migration system:</p>
+<ul>
+<li><strong>Correctness and completeness.</strong> Every document must
+end up on the target, identical to the source, including writes that
+happen during the migration.</li>
+<li><strong>Availability.</strong> Applications must keep reading and
+writing throughout. Any pause must be shorter than events the
+applications already tolerate. Stripe’s benchmark is a planned primary
+failover in a replica set, which typically takes a few seconds.</li>
+<li><strong>Granularity.</strong> Move any chunk or set of chunks, not
+only whole databases, so splits and merges are possible.</li>
+<li><strong>No impact on the source.</strong> A migration must not slow
+down the shard it’s draining, which is often a shard that’s already
+overloaded, which is the reason for moving data off it.</li>
+<li><strong>Reversibility.</strong> If the target misbehaves after the
+switch, be able to switch back.</li>
+</ul>
+<p>These requirements rule out the simplest approaches.
+Stop-copy-restart violates availability. Having applications dual-write
+to both locations puts correctness in the hands of every application
+team and is hard to make atomic. Reading the source heavily to copy it
+violates “no impact on the source.”</p>
+<h2 id="the-six-steps">4. The six steps</h2>
+<p>A <strong>coordinator</strong> service orchestrates each migration
+through six steps.</p>
+<figure class="diagram"><svg viewBox="0 0 760 350" role="img" aria-label="Stripe Data Movement Platform: six steps of a chunk migration and the versioned traffic switch" font-size="13"><defs><marker id="dm1117" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Moving a chunk between shards while it serves traffic</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Only step 5 touches live traffic, and it is designed to finish in under two seconds.</text><rect x="24" y="80" width="112" height="50" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="80" y="101" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">1 register</text><text x="80" y="117" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">intent + indexes</text><rect x="146" y="80" width="112" height="50" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="202" y="101" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">2 bulk import</text><text x="202" y="117" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">snapshot at T</text><line x1="136" y1="105" x2="145" y2="105" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#dm1117)"></line><rect x="268" y="80" width="112" height="50" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="324" y="101" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">3 replicate</text><text x="324" y="117" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">oplog via Kafka</text><line x1="258" y1="105" x2="267" y2="105" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#dm1117)"></line><rect x="390" y="80" width="112" height="50" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="446" y="101" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">4 verify</text><text x="446" y="117" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">compare snapshots</text><line x1="380" y1="105" x2="389" y2="105" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#dm1117)"></line><rect x="512" y="80" width="112" height="50" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25"></rect><text x="568" y="101" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">5 switch</text><text x="568" y="117" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">versioned gating</text><line x1="502" y1="105" x2="511" y2="105" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#dm1117)"></line><rect x="634" y="80" width="112" height="50" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="690" y="101" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">6 deregister</text><text x="690" y="117" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">drop source</text><line x1="624" y1="105" x2="633" y2="105" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#dm1117)"></line><line x1="512" y1="130" x2="60" y2="170" stroke="var(--cds-chart-axis)" stroke-dasharray="4 4"></line><line x1="624" y1="130" x2="700" y2="170" stroke="var(--cds-chart-axis)" stroke-dasharray="4 4"></line><rect x="60" y="170" width="640" height="110" rx="10" fill="var(--cds-chart-categorical-4)" fill-opacity="0.08" stroke="var(--cds-chart-categorical-4)" stroke-width="1"></rect><text x="170" y="200" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">a bump token</text><text x="170" y="218" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">source shard rejects</text><text x="170" y="232" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">reads + writes for chunk</text><text x="380" y="200" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">b drain</text><text x="380" y="218" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">replication applies</text><text x="380" y="232" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">last writes to target</text><line x1="240" y1="208" x2="308" y2="208" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#dm1117)"></line><text x="590" y="200" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">c reroute</text><text x="590" y="218" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">metadata: new shard</text><text x="590" y="232" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">+ new token; proxies follow</text><line x1="450" y1="208" x2="518" y2="208" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#dm1117)"></line><text x="380" y="266" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">under 2 s end to end; rejected requests succeed on retry</text><text x="24" y="312" font-size="11.5" fill="var(--cds-text-secondary)">Replication is bidirectional, so traffic can be switched back to the source if the target misbehaves.</text><text x="24" y="332" font-size="11.5" fill="var(--cds-text-secondary)">Source: Stripe engineering blog, June 2024.</text></svg></figure>
+<h3 id="step-1-register-the-migration">Step 1: Register the
+migration</h3>
+<p>The coordinator records the intent to move specific chunks from a
+source shard to a target shard in the chunk metadata service, and builds
+the needed <strong>indexes on the target</strong> before any data
+arrives. Registering first means every other component (proxies, CDC
+consumers, other migrations) can see that the chunk is in motion.
+Building indexes up front is cheaper than building them after a large
+import and means the target is ready to serve queries the moment traffic
+arrives.</p>
+<h3 id="step-2-bulk-import-a-snapshot">Step 2: Bulk import a
+snapshot</h3>
+<p>The coordinator takes a <strong>point-in-time snapshot</strong> of
+the chunk’s data as of some time T and loads it into the target. Two
+details from the post are worth noting:</p>
+<ul>
+<li><strong>Filtering:</strong> the import includes only documents in
+the chunks being moved, so a shard can be split.</li>
+<li><strong>Insertion order matters a lot.</strong> Initially, imports
+were slow. The team sorted documents by the most common index attributes
+and inserted them in that order, which they report increased write
+throughput by about <strong>10×</strong>. The reason is that MongoDB’s
+storage engine (WiredTiger) keeps data and indexes in B-trees. Inserting
+in index order appends to the right edge of the B-tree, touching the
+same few pages repeatedly and keeping them in cache; inserting in random
+order touches random leaf pages all over the tree, causing page splits,
+cache misses and much more I/O. It’s the same reason bulk loads into any
+B-tree database (Postgres, MySQL, SQL Server) run faster with pre-sorted
+input, and the same effect the earlier reading on database indexing
+described for random UUID primary keys.</li>
+</ul>
+<p>Using a snapshot rather than live reads from the primary keeps the
+import from competing with production traffic on the source.</p>
+<h3 id="step-3-replicate-changes-asynchronously">Step 3: Replicate
+changes asynchronously</h3>
+<p>While the import runs and afterwards, the source keeps taking writes.
+The coordinator replays every write since time T from the source to the
+target, using the <strong>oplog</strong> (MongoDB’s replication log).
+Stripe doesn’t read the oplog from the source shard directly; it uses
+the CDC stream that already ships oplog entries to
+<strong>Kafka</strong> and archives them in object storage. That keeps
+the migration from adding read load to the source, and it means the
+replication can catch up from the archive if it falls behind.</p>
+<p>Two design points:</p>
+<ul>
+<li><strong>Replication starts from T,</strong> the snapshot time, so
+snapshot plus replay is complete. Replaying operations that the snapshot
+already reflects must be harmless, which works because applying the same
+oplog entry twice produces the same state (oplog entries are written to
+be idempotent).</li>
+<li><strong>Replication is bidirectional.</strong> After the traffic
+switch, writes to the target are replicated back to the source. Writes
+are tagged so that they don’t loop back and forth endlessly.
+Bidirectional replication is what makes the switch
+<strong>reversible</strong>: until the migration is finished, the source
+is kept current, and traffic can be moved back.</li>
+</ul>
+<h3 id="step-4-verify-correctness">Step 4: Verify correctness</h3>
+<p>Before switching traffic, the coordinator compares
+<strong>point-in-time snapshots</strong> of the source and target to
+confirm they hold the same data. Verification is a separate, explicit
+step rather than an assumption that the import and replication worked.
+Bugs in migration tooling are usually subtle: a document type that
+serialises differently, a filter that’s off by one chunk boundary, an
+oplog entry type the replayer doesn’t handle. Comparing real data
+catches what tests don’t.</p>
+<h3 id="step-5-switch-traffic-with-versioned-gating">Step 5: Switch
+traffic with versioned gating</h3>
+<p>This is the delicate part. At some instant, the authoritative copy of
+the chunk has to move from source to target, with no write lost, no
+write applied in the wrong place, and as little disruption as possible.
+Stripe calls its protocol <strong>versioned gating</strong>:</p>
+<ul>
+<li>Every request the proxies send carries a <strong>version
+token</strong> for the chunk’s routing.</li>
+<li>Stripe <strong>patched MongoDB</strong> so that a shard rejects any
+request whose version token isn’t at least as new as the version it
+knows for that chunk.</li>
+</ul>
+<p>The switch then goes:</p>
+<ol type="1">
+<li><strong>Bump the version on the source shard.</strong> From this
+moment, the source rejects all reads and writes for the chunk that carry
+the old token. No new writes can land on the source.</li>
+<li><strong>Wait for replication to drain.</strong> The writes that
+landed before the bump are replicated to the target. Once replication
+has caught up, the target has every write.</li>
+<li><strong>Update the routing.</strong> The coordinator updates the
+chunk metadata service with the new shard and the new version token.
+Proxies pick up the new route and send traffic to the target.</li>
+</ol>
+<p>Requests that arrive during the switch are rejected by the source and
+succeed when retried against the new route. The post says the entire
+switch takes <strong>less than two seconds</strong>, shorter than a
+planned primary failover, which applications already handle.</p>
+<p>The version token is, in effect, a <strong>fencing token</strong>,
+the same idea from yesterday’s reading on distributed locks. A proxy
+that hasn’t yet learned the new route, or a delayed request from before
+the switch, can’t write to the old location, because the shard itself
+enforces the newer version. The guarantee is enforced at the storage
+layer, not by hoping every proxy updates in time. This is why Stripe
+needed to patch MongoDB: the shard is the only component that sees
+requests in their real order.</p>
+<h3 id="step-6-deregister-and-clean-up">Step 6: Deregister and clean
+up</h3>
+<p>The coordinator marks the migration complete in the metadata service
+and deletes the chunk’s data from the source. Deleting last keeps the
+rollback path open until the very end.</p>
+<h2 id="why-this-design-works-the-principles-behind-it">5. Why this
+design works: the principles behind it</h2>
+<p>Stepping back, several principles make the design robust.</p>
+<p><strong>Copy, then catch up, then cut over.</strong> Nearly every
+online migration system has this shape: a bulk copy of a consistent
+snapshot, a change-stream replay to catch up, and a short, controlled
+cut-over. The bulk copy does the heavy lifting off the critical path,
+replay makes the target converge, and the cut-over is short because only
+the last few writes need to drain.</p>
+<p><strong>Make the cut-over shorter than events you already
+tolerate.</strong> Stripe didn’t aim for literally zero unavailability;
+it aimed for a pause shorter than a routine failover, which every client
+is already built to retry through. That’s a much more achievable and
+testable target.</p>
+<p><strong>Enforce ownership at the storage layer.</strong> Routing
+metadata can be stale in any proxy at any time. Versioned gating means
+stale routes produce rejected requests (safe, retryable) rather than
+misplaced writes (data corruption).</p>
+<p><strong>Keep the old copy until you’re sure.</strong> Bidirectional
+replication and deferred deletion make every migration reversible until
+the last step. Reversibility is what lets a team run thousands of
+migrations without treating each one as a high-stakes event.</p>
+<p><strong>Reuse existing data pipelines.</strong> Replicating from the
+CDC stream in Kafka and object storage avoids putting load on the
+source, and it means the migration system relies on infrastructure that
+is already heavily exercised.</p>
+<p><strong>Verify explicitly.</strong> Treat “the data is identical” as
+something to check with real comparisons, not something to infer from
+the absence of errors.</p>
+<p><strong>Centralise orchestration.</strong> One coordinator owns the
+state machine of each migration, with every step recorded in the
+metadata service. Migrations can be paused, resumed and audited, and
+multiple migrations can run without conflicting.</p>
+<h2 id="how-others-solve-the-same-problem">6. How others solve the same
+problem</h2>
+<p>The same pattern shows up in other systems, with different
+trade-offs.</p>
+<h3 id="mongodbs-own-balancer">MongoDB’s own balancer</h3>
+<p>MongoDB’s sharded clusters include a <strong>balancer</strong> that
+moves chunks between shards automatically, using a similar
+clone-then-catch-up-then-commit process coordinated by config servers,
+and a final critical section where writes to the chunk are briefly
+blocked. Stripe’s post doesn’t say exactly why it built its own, but its
+architecture explains some of it: Stripe uses its own proxies and
+metadata service rather than MongoDB’s <code>mongos</code> routers, so
+it needs its own data movement that fits that routing layer. Building
+its own also gave it control over pacing, verification, reversibility,
+cross-version moves (needed for the one-step upgrades), and reading from
+the CDC archive rather than the source.</p>
+<h3 id="vitess">Vitess</h3>
+<p>Vitess, the sharding layer for MySQL created at YouTube and used by
+Slack, GitHub and others, has <strong>VReplication</strong>, which
+powers workflows like <code>MoveTables</code> and <code>Reshard</code>.
+It copies data, then streams binlog events to keep the target in sync,
+lets you verify with <code>VDiff</code>, and then switches reads and
+writes with <code>SwitchTraffic</code>, with a reverse replication
+stream so you can switch back. The shape is almost identical to
+Stripe’s: copy, catch up, verify, switch, keep a reverse path. Vitess’s
+routing layer (VTGate) and its topology service play the roles of
+Stripe’s proxies and chunk metadata service.</p>
+<h3 id="figmas-postgres-sharding">Figma’s Postgres sharding</h3>
+<p>The earlier reading on Figma covered how it horizontally sharded
+Postgres with its own proxy (DBProxy) and logical replication. Figma’s
+approach also relied on a routing layer it controlled, logical
+replication to keep new shards in sync, and a short, carefully
+choreographed cut-over, with a lot of emphasis on “shadow” reads and
+planning to catch problems before switching. Both companies converged on
+owning the proxy and the routing metadata, because that’s what makes a
+controlled cut-over possible.</p>
+<h3 id="application-level-migrations">Application-level migrations</h3>
+<p>Stripe itself described a different pattern in its 2017 post “Online
+migrations at scale,” for moving data between <em>data models</em> (such
+as splitting a field into a new table) rather than between shards. That
+pattern has four phases: <strong>dual-write</strong> to old and new,
+<strong>change reads</strong> to the new location, <strong>change
+writes</strong> so only the new location is written, and
+<strong>remove</strong> the old data, with verification and backfills
+along the way. It’s slower and requires application changes, but it can
+change the data’s shape, which infrastructure-level movement can’t. The
+two approaches complement each other: infrastructure moves data between
+machines; application migrations change what the data looks like.</p>
+<h2 id="lessons-for-teams-that-arent-stripe">7. Lessons for teams that
+aren’t Stripe</h2>
+<p>Most teams don’t need a platform that moves petabytes. The lessons
+still apply to smaller problems such as moving a table to a new
+database, splitting a monolith’s database, or migrating to a managed
+service.</p>
+<ul>
+<li><strong>Own your routing.</strong> If you might ever need to move
+data without downtime, put a layer between applications and the database
+that controls where queries go: a proxy, a data-access library, or at
+minimum a configuration switch for connection targets. Without it, every
+cut-over needs a coordinated deploy of every client.</li>
+<li><strong>Get a change stream.</strong> Postgres logical replication,
+MySQL binlog, MongoDB change streams and DynamoDB Streams all let you
+follow writes. CDC tools such as Debezium package this. The
+snapshot-plus-replay pattern only works if you can replay changes from
+the snapshot point.</li>
+<li><strong>Design a cut-over that fails safe.</strong> The worst
+outcome of a migration isn’t a few seconds of errors; it’s writes split
+between two databases with neither one complete. Block writes on the old
+location (a read-only flag, revoked permissions, or a version check)
+before routing writes to the new one.</li>
+<li><strong>Keep a way back.</strong> Reverse replication, or at least
+keeping the source intact and a way to replay writes back, turns a
+one-way door into a two-way one.</li>
+<li><strong>Verify with data.</strong> Row counts are a start; checksums
+of key ranges or sampled document comparisons are better.</li>
+<li><strong>Measure the pause and compare it with what clients already
+handle.</strong> If clients retry through a few-second failover, design
+the cut-over to fit inside that.</li>
+<li><strong>Sort your bulk loads.</strong> The 10× from inserting in
+index order is the kind of improvement that’s easy to miss and applies
+to any B-tree store.</li>
+</ul>
+<h2 id="open-questions-and-limitations">8. Open questions and
+limitations</h2>
+<p>The post leaves some things out, which are worth considering when you
+adapt the design:</p>
+<ul>
+<li><strong>Multi-chunk transactions.</strong> If a transaction touches
+documents in a chunk being moved and another that isn’t, the brief
+rejection window affects it as a whole. The post doesn’t go into how
+cross-chunk operations are handled during the switch.</li>
+<li><strong>Replication lag under load.</strong> The cut-over waits for
+replication to drain. If the source is very busy, lag could stretch the
+pause. Presumably the coordinator only starts the switch when lag is
+small, but the post doesn’t spell out the thresholds.</li>
+<li><strong>Operational load of thousands of shards.</strong> Smaller
+shards make each migration easier but add many more moving parts. Stripe
+mentions future work on a <strong>heat management</strong> system and
+<strong>shard autoscaling</strong>, which suggests the next step is
+deciding automatically <em>when</em> and <em>where</em> to move data,
+not just how.</li>
+<li><strong>Patching the database.</strong> Versioned gating needed a
+custom MongoDB patch. That’s a maintenance cost every upgrade has to
+carry, and teams without database engineers on staff may need to find
+the equivalent in their proxy layer instead, at the cost of a weaker
+guarantee.</li>
+</ul>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Stripe’s <strong>DocDB</strong> serves 5M+ QPS from 2,000+
+MongoDB-based shards through its own <strong>proxies</strong> and
+<strong>chunk metadata service</strong>, which gives it full control of
+routing.</li>
+<li>The <strong>Data Movement Platform</strong> migrates chunks in six
+steps: <strong>register, bulk import a snapshot, replicate the oplog via
+Kafka, verify, switch traffic, deregister</strong>.</li>
+<li>The <strong>versioned gating</strong> switch uses a version token
+enforced by a patched MongoDB as a <strong>fencing token</strong>: stale
+routes get rejected, not misapplied. The switch takes <strong>under two
+seconds</strong>, less than a routine failover.</li>
+<li><strong>Bidirectional replication</strong> and deferred deletion
+keep every migration <strong>reversible</strong> until the end.</li>
+<li><strong>Inserting in index order</strong> sped up bulk imports about
+<strong>10×</strong>, a general B-tree lesson.</li>
+<li>Data movement as a routine capability enabled <strong>consolidating
+shards by about three quarters (1.5 PB moved)</strong> and
+<strong>one-step major-version upgrades</strong>.</li>
+<li>Vitess, MongoDB’s balancer and Figma converged on the same shape:
+<strong>copy, catch up, verify, short fenced cut-over, keep a way
+back</strong>.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Stripe aimed for a cut-over shorter than a planned failover rather
+than literally zero errors. What is the equivalent “already tolerated”
+event in your systems, and how long is it?</li>
+<li>Why does versioned gating need to be enforced by the shard rather
+than by the proxies? What could go wrong if only proxies checked the
+version?</li>
+<li>You need to move one large Postgres table to a new database with no
+downtime, and you don’t have a proxy layer. Sketch a plan using logical
+replication. Where’s the riskiest moment, and how would you make it fail
+safe?</li>
+<li>When would you choose the application-level dual-write pattern
+(Stripe’s 2017 post) over infrastructure-level replication, and vice
+versa?</li>
+<li>Stripe upgraded MongoDB versions by migrating data to new shards
+instead of upgrading in place. What does that approach cost, and what
+does it buy?</li>
+<li>Thousands of small shards versus a few large ones: list the
+operational trade-offs. At what point would you need automated heat
+management?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Jimmy Morzaria, Suraj Narkhede, <a
+href="https://stripe.dev/blog/how-stripes-document-databases-supported-99.999-uptime-with-zero-downtime-data-migrations">“How
+Stripe’s document databases supported 99.999% uptime with zero-downtime
+data migrations”</a>, Stripe, June 2024</li>
+<li>Jacqueline Xu, “Online migrations at scale,” Stripe blog, 2017</li>
+<li>MongoDB documentation: sharded cluster balancer, chunk migration,
+oplog and change streams, WiredTiger storage engine</li>
+<li>Vitess documentation: VReplication, MoveTables, Reshard, VDiff and
+SwitchTraffic</li>
+<li>Figma engineering, “How Figma’s databases team lived to tell the
+scale” (2024), and the earlier reading on Figma’s Postgres sharding</li>
+<li>Martin Kleppmann, <em>Designing Data-Intensive Applications</em>,
+ch. 6 “Partitioning” and ch. 11 on change data capture</li>
+<li>Debezium documentation on change data capture</li>
+</ul>
+<p><em>Note on verification: Stripe’s figures and the description of
+DocDB, the six steps, versioned gating, the 10× import speed-up, the
+under-two-second switch and the 2023 consolidation were read from
+Stripe’s post today. The comparisons with MongoDB’s balancer, Vitess,
+Figma and Stripe’s 2017 post come from those projects’ documentation and
+posts as I know them and weren’t re-fetched; the reasons Stripe built
+its own platform instead of using MongoDB’s balancer are my inference,
+not stated in the post.</em></p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/case-study.html">Case Study</a><a class="chip" href="/topics/databases.html">Databases</a></div>
+          <div class="daynav"><a href="/reading/distributed-locks-leases.html"><div class="kicker">← Older · Nov 16</div><div class="t">Distributed locks, leases and leader election: why &#x27;only one at a time&#x27; is so hard</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
