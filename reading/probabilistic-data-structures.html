@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bloom filters, HyperLogLog and Count-Min: trading exactness for memory · The Daily Commit</title>
+  <meta name="description" content="The small, approximate data structures behind caches, databases and analytics at scale. Covers Bloom filters and the false-positive maths, where they show up (LSM trees, CDN cache admission, joins), cuckoo, quotient and ribbon filters, HyperLogLog for counting distinct values in 12 KB, Count-Min sketch for frequencies and heavy hitters, TinyLFU cache admission, quantile sketches for latency percentiles, mergeability, and how to choose and size them.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Bloom filters, HyperLogLog and Count-Min: trading exactness for memory</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>17 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#the-trade-bounded-error-for-tiny-mergeable-state">The trade:
+bounded error for tiny, mergeable state</a><a href="#bloom-filters-definitely-not-or-probably-yes">Bloom filters:
+“definitely not” or “probably yes”</a><a href="#where-bloom-filters-earn-their-keep">Where Bloom filters earn
+their keep</a><a href="#better-filters-cuckoo-quotient-ribbon-xor">Better filters:
+cuckoo, quotient, ribbon, xor</a><a href="#hyperloglog-counting-distinct-values-in-kilobytes">HyperLogLog: counting distinct values in kilobytes</a><a href="#count-min-sketch-approximate-frequencies">Count-Min sketch:
+approximate frequencies</a><a href="#tinylfu-count-min-as-a-cache-admission-policy">TinyLFU:
+Count-Min as a cache admission policy</a><a href="#quantile-sketches-percentiles-without-keeping-every-sample">Quantile sketches: percentiles without keeping every sample</a><a href="#choosing-and-sizing">Choosing and sizing</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 17 min left</div>
+      </nav>
+      <article class="article" data-slug="probabilistic-data-structures" data-minutes="17">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/caching.html">Caching</a> · November 19, 2026 · 17 min</div>
+        <h1>Bloom filters, HyperLogLog and Count-Min: trading exactness for memory</h1>
+        <p class="dek">The small, approximate data structures behind caches, databases and analytics at scale. Covers Bloom filters and the false-positive maths, where they show up (LSM trees, CDN cache admission, joins), cuckoo, quotient and ribbon filters, HyperLogLog for counting distinct values in 12 KB, Count-Min sketch for frequencies and heavy hitters, TinyLFU cache admission, quantile sketches for latency percentiles, mergeability, and how to choose and size them.</p>
+<p>Some questions are expensive to answer exactly and cheap to answer
+approximately. “Have I seen this key before?”, “How many unique users
+visited today?”, “Which URLs are the most popular right now?”, “What’s
+the p99 latency across 2,000 servers?” Answering these exactly needs
+memory proportional to the data: a set of every key, a hash table of
+every user, a counter per URL, every latency sample. Answering them
+approximately can take a few kilobytes, with an error you can choose and
+bound in advance. That trade is behind a surprising amount of
+infrastructure: Bloom filters in every LSM-tree database and in CDN
+caches, HyperLogLog in Redis and analytics warehouses, Count-Min
+sketches in cache admission and network monitoring, and quantile
+sketches in metrics systems. This reading explains how the main
+structures work, the maths you need to size them, where they’re used,
+and how to decide when approximate is good enough. It draws on the
+original papers (Bloom 1970, Flajolet et al. 2007, Cormode and
+Muthukrishnan 2005, Fan et al. 2014), Google’s HyperLogLog++ paper, the
+Redis and Caffeine documentation, and Apache DataSketches.</p>
+<h2 id="the-trade-bounded-error-for-tiny-mergeable-state">1. The trade:
+bounded error for tiny, mergeable state</h2>
+<p>All the structures in this reading share a few properties:</p>
+<ul>
+<li><strong>Fixed or sub-linear memory.</strong> The size depends on the
+accuracy you choose, not (or only weakly) on how much data you put
+in.</li>
+<li><strong>Errors in a known direction with a known bound.</strong> A
+Bloom filter can say “maybe” when the answer is “no”, but never “no”
+when the answer is “yes”. A Count-Min sketch can overestimate a count
+but never underestimates it. You can reason about these errors.</li>
+<li><strong>Hashing does the work.</strong> Each item is reduced to one
+or more hash values, and the structure stores something about those
+hashes. Good, independent hash functions are essential; a weak hash
+quietly breaks the guarantees.</li>
+<li><strong>Mergeability.</strong> Many sketches can be combined: the
+union of two Bloom filters is a bitwise OR, two HyperLogLogs merge by
+taking per-register maximums, two Count-Min sketches merge by adding
+counters. That’s what makes them so useful in distributed systems: each
+server or partition builds its own sketch, and you merge them centrally,
+without moving the raw data.</li>
+</ul>
+<p>The last property often matters more than the memory savings.
+Counting distinct users exactly across 1,000 partitions means shipping
+or shuffling every user ID; with HyperLogLog, each partition sends a few
+kilobytes.</p>
+<h2 id="bloom-filters-definitely-not-or-probably-yes">2. Bloom filters:
+“definitely not” or “probably yes”</h2>
+<p>Burton Bloom described the structure in 1970 (“Space/Time Trade-offs
+in Hash Coding with Allowable Errors”). It answers set membership with
+no false negatives and a tunable rate of false positives.</p>
+<p><strong>Structure:</strong> an array of m bits, all initially 0, and
+k independent hash functions, each mapping an item to a bit
+position.</p>
+<ul>
+<li><strong>Insert:</strong> hash the item k times and set those k bits
+to 1.</li>
+<li><strong>Query:</strong> hash the item k times. If any of those bits
+is 0, the item was <strong>definitely never inserted</strong>. If all
+are 1, it was <strong>probably</strong> inserted, or those bits were all
+set by other items: a false positive.</li>
+</ul>
+<figure class="diagram"><svg viewBox="0 0 760 340" role="img" aria-label="A Bloom filter with 16 bits and three hash functions, showing inserts and a false positive" font-size="13"><defs><marker id="bf1119" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">A Bloom filter: k hashes set k bits</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">16 bits, k = 3. Membership answers are "definitely not" or "probably yes".</text><rect x="100" y="170" width="36" height="34" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="118" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">0</text><text x="118" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">0</text><rect x="136" y="170" width="36" height="34" fill="var(--cds-chart-categorical-2)" fill-opacity="0.45" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="154" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">1</text><text x="154" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">1</text><rect x="172" y="170" width="36" height="34" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="190" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">0</text><text x="190" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">2</text><rect x="208" y="170" width="36" height="34" fill="var(--cds-chart-categorical-2)" fill-opacity="0.45" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="226" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">1</text><text x="226" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">3</text><rect x="244" y="170" width="36" height="34" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="262" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">0</text><text x="262" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">4</text><rect x="280" y="170" width="36" height="34" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="298" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">0</text><text x="298" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">5</text><rect x="316" y="170" width="36" height="34" fill="var(--cds-chart-categorical-2)" fill-opacity="0.45" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="334" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">1</text><text x="334" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">6</text><rect x="352" y="170" width="36" height="34" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="370" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">0</text><text x="370" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">7</text><rect x="388" y="170" width="36" height="34" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="406" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">0</text><text x="406" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">8</text><rect x="424" y="170" width="36" height="34" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="442" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">0</text><text x="442" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">9</text><rect x="460" y="170" width="36" height="34" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="478" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">0</text><text x="478" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">10</text><rect x="496" y="170" width="36" height="34" fill="var(--cds-chart-categorical-2)" fill-opacity="0.45" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="514" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">1</text><text x="514" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">11</text><rect x="532" y="170" width="36" height="34" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="550" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">0</text><text x="550" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">12</text><rect x="568" y="170" width="36" height="34" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="586" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">0</text><text x="586" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">13</text><rect x="604" y="170" width="36" height="34" fill="var(--cds-chart-categorical-2)" fill-opacity="0.45" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="622" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">1</text><text x="622" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">14</text><rect x="640" y="170" width="36" height="34" fill="none" fill-opacity="1" stroke="var(--cds-chart-axis)" stroke-width="1"></rect><text x="658" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">0</text><text x="658" y="220" text-anchor="middle" font-size="10" fill="var(--cds-text-secondary)">15</text><text x="200" y="100" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">insert "alice"</text><line x1="200" y1="106" x2="154" y2="168" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#bf1119)"></line><line x1="200" y1="106" x2="334" y2="168" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#bf1119)"></line><line x1="200" y1="106" x2="514" y2="168" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#bf1119)"></line><text x="580" y="100" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">insert "bob"</text><line x1="580" y1="106" x2="226" y2="168" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#bf1119)"></line><line x1="580" y1="106" x2="334" y2="168" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#bf1119)"></line><line x1="580" y1="106" x2="622" y2="168" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#bf1119)"></line><text x="298" y="282" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--cds-chart-categorical-4)">query "carol": bits 1, 3, 11 all set, false positive</text><line x1="298" y1="268" x2="154" y2="206" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#bf1119)"></line><line x1="298" y1="268" x2="226" y2="206" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#bf1119)"></line><line x1="298" y1="268" x2="514" y2="206" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#bf1119)"></line><text x="24" y="316" font-size="11.5" fill="var(--cds-text-secondary)">A query that hits any 0 bit (say "dave" at 2, 6, 9) is definitely absent. Bits are never cleared, so no deletes.</text></svg></figure>
+<h3 id="the-maths-you-need">The maths you need</h3>
+<p>With n items inserted into m bits using k hash functions, the
+probability that a particular bit is still 0 is about e^(−kn/m), so the
+false-positive rate is approximately:</p>
+<blockquote>
+<p>p ≈ (1 − e<sup>(−kn/m))</sup>k</p>
+</blockquote>
+<p>Two useful consequences:</p>
+<ul>
+<li>The best number of hash functions is <strong>k = (m/n) · ln
+2</strong>, which leaves about half the bits set.</li>
+<li>At that optimum, the bits needed per item depend only on the target
+false-positive rate: <strong>m/n ≈ −log₂(p) / ln 2 ≈ 1.44 ·
+log₂(1/p)</strong>. That works out to about <strong>9.6 bits per item
+for a 1% false-positive rate</strong>, and each further 10× reduction in
+the rate costs about 4.8 more bits per item.</li>
+</ul>
+<p>So a filter for 100 million keys at 1% false positives needs about
+120 MB, no matter how long the keys are. A hash set of the same keys
+would be many gigabytes. In practice, implementations don’t compute k
+separate hashes; the Kirsch–Mitzenmacher technique derives all k
+positions from two hash values (h₁ + i·h₂) with no loss of accuracy in
+practice.</p>
+<h3 id="limitations">Limitations</h3>
+<ul>
+<li><strong>No deletes.</strong> Clearing a bit might remove other items
+that share it. A <strong>counting Bloom filter</strong> replaces bits
+with small counters (typically 4 bits) to allow deletes, at 4× the
+space.</li>
+<li><strong>Fixed capacity.</strong> If you insert many more items than
+planned, the false-positive rate climbs steeply. Size for the expected
+count with headroom, or use <strong>scalable Bloom filters</strong> that
+add new, tighter filters as they fill.</li>
+<li><strong>No enumeration.</strong> You can’t list what’s in the
+filter.</li>
+<li><strong>Random memory access.</strong> k bit lookups touch k random
+cache lines. <strong>Blocked Bloom filters</strong> put all k bits for
+an item in one cache line (or SIMD word), trading a slightly higher
+false-positive rate for much faster lookups, which is what most
+high-performance implementations do.</li>
+</ul>
+<h2 id="where-bloom-filters-earn-their-keep">3. Where Bloom filters earn
+their keep</h2>
+<p>The pattern is always the same: a cheap in-memory check that avoids
+an expensive operation for items that aren’t there.</p>
+<p><strong>LSM-tree databases.</strong> RocksDB, Cassandra, HBase,
+LevelDB and ScyllaDB keep a Bloom filter for each SSTable file (the
+LSM-trees reading covered the structure). A point lookup for a key would
+otherwise have to search every level of the tree; with filters, the
+database skips any file whose filter says “not present” and only reads
+files that might contain the key. A 1% filter means 99% of unnecessary
+disk reads are avoided at about 10 bits per key. RocksDB has also
+adopted <strong>Ribbon filters</strong>, which reach the same
+false-positive rate in roughly 30% less memory at some extra CPU cost,
+an example of how much memory these filters consume at scale.</p>
+<p><strong>CDN cache admission.</strong> A large share of objects
+requested from a CDN are requested only once, ever. Caching them wastes
+disk writes and evicts useful content. Akamai’s engineers (Maggs and
+Sitaraman, “Algorithmic Nuggets in Content Delivery”, 2015) described
+keeping a Bloom filter of recently requested URLs and caching an object
+only on its <strong>second</strong> request: if the URL isn’t in the
+filter, record it and serve without caching; if it is, cache it. They
+reported that around three quarters of objects were these “one-hit
+wonders”, and that cache-on-second-hit substantially reduced disk writes
+while improving hit rates, because space was no longer wasted on objects
+that would never be requested again.</p>
+<p><strong>Distributed joins and query engines.</strong> When joining a
+large table with a small filtered one, the engine can build a Bloom
+filter of the small side’s join keys and send it to the scanners of the
+large side, which drop rows that can’t match before shipping them over
+the network. Spark, Trino, StarRocks and most MPP engines do this
+(“runtime filters” or “Bloom filter joins”), which is often a big win
+for star-schema queries.</p>
+<p><strong>Avoiding expensive lookups.</strong> Checking whether a
+username is taken or a password is in a breach list before hitting a
+database or remote API; Chrome’s former Safe Browsing design used a
+local probabilistic set of malicious URL prefixes before asking the
+server; web crawlers use them to avoid revisiting URLs.</p>
+<p><strong>Postgres</strong> has a <code>bloom</code> index extension
+that builds a per-row signature over many columns, useful for queries
+that filter on arbitrary combinations of columns where B-tree indexes on
+every combination would be impractical.</p>
+<h2 id="better-filters-cuckoo-quotient-ribbon-xor">4. Better filters:
+cuckoo, quotient, ribbon, xor</h2>
+<p>Bloom filters aren’t the most space-efficient option, and they can’t
+delete. Newer designs improve on them:</p>
+<ul>
+<li><strong>Cuckoo filters</strong> (Fan, Andersen, Kaminsky and
+Mitzenmacher, CoNEXT 2014) store a short <strong>fingerprint</strong> of
+each item in a cuckoo hash table, where each item has two candidate
+buckets. They support <strong>deletion</strong> (remove the
+fingerprint), have better lookup locality (two buckets to check), and
+use less space than Bloom filters for false-positive rates below about
+3%. Inserts can fail when the table is nearly full, so they need
+headroom.</li>
+<li><strong>Quotient filters</strong> store fingerprints in a compact,
+cache-friendly table using linear probing and can be resized and
+merged.</li>
+<li><strong>Xor and binary fuse filters</strong> and <strong>Ribbon
+filters</strong> are static: built once from a known set, they get close
+to the theoretical minimum space (around 1.08 to 1.23 times the minimum,
+versus 1.44 for Bloom). They’re ideal for immutable files like SSTables,
+which is why RocksDB uses Ribbon.</li>
+</ul>
+<p>The rule of thumb: Bloom for simplicity and incremental inserts;
+cuckoo if you need deletes; xor/ribbon for build-once sets where memory
+matters.</p>
+<h2 id="hyperloglog-counting-distinct-values-in-kilobytes">5.
+HyperLogLog: counting distinct values in kilobytes</h2>
+<p>Counting <strong>distinct</strong> items (unique visitors, unique
+IPs, distinct search queries) is harder than counting items, because you
+have to remember what you’ve already seen. Exactly, that’s a set of
+every distinct value. <strong>HyperLogLog</strong> (Flajolet, Fusy,
+Gandouet and Meunier, 2007) estimates the count with about 1–2% error
+using a few kilobytes, for cardinalities into the billions.</p>
+<h3 id="the-intuition">The intuition</h3>
+<p>Hash each item to a uniformly random bit string. Look at the position
+of the first 1 bit. Half of all hashes start with 1, a quarter with 01,
+an eighth with 001, and so on. If the longest run of leading zeros
+you’ve seen is 20, you’ve probably seen on the order of 2^20 distinct
+values, because that pattern occurs once in about a million random
+hashes. Duplicates don’t matter, because the same item always produces
+the same hash.</p>
+<p>One observation is a very noisy estimate. HyperLogLog reduces the
+noise by <strong>splitting the stream into m buckets</strong>
+(registers) using the first few bits of the hash, tracking the maximum
+leading-zero count separately in each register, and combining them with
+a <strong>harmonic mean</strong>, which limits the influence of outlier
+registers. The standard error is about <strong>1.04/√m</strong>.</p>
+<h3 id="real-numbers">Real numbers</h3>
+<p>Redis’s implementation uses 16,384 registers of 6 bits each, so a
+HyperLogLog key takes <strong>up to 12 KB</strong> and has a
+<strong>standard error of 0.81%</strong>, whether it has counted a
+thousand items or a billion. Commands are <code>PFADD</code> to add
+items, <code>PFCOUNT</code> to estimate, and <code>PFMERGE</code> to
+union several. Small counts use a sparse encoding that takes much less
+memory.</p>
+<p>Google’s <strong>HyperLogLog++</strong> (Heule, Nunkesser and Hall,
+EDBT 2013) is the version most analytics systems use. It uses 64-bit
+hashes (avoiding collisions at very large cardinalities), applies an
+empirically measured <strong>bias correction</strong> for small and
+medium counts where the original estimator is skewed, and uses a sparse
+representation for low cardinalities. BigQuery’s
+<code>APPROX_COUNT_DISTINCT</code> and <code>HLL_COUNT</code> functions,
+Druid, Presto/Trino’s <code>approx_distinct</code>, ClickHouse’s
+<code>uniq</code> family and many others are based on HyperLogLog
+variants.</p>
+<h3 id="why-its-so-useful-merging">Why it’s so useful: merging</h3>
+<p>HyperLogLog registers merge by taking the maximum of each register.
+That lets you:</p>
+<ul>
+<li>Store one HLL per day and get weekly or monthly unique counts by
+merging, without re-reading raw events. Distinct counts don’t add up
+across days, so this would otherwise be impossible without the raw
+data.</li>
+<li>Compute distinct counts in parallel across partitions and
+merge.</li>
+<li>Pre-aggregate in a rollup table (one sketch per dimension
+combination) and answer distinct-count queries over arbitrary slices at
+query time.</li>
+</ul>
+<h3 id="limits">Limits</h3>
+<ul>
+<li><strong>Intersections are weak.</strong> HLL supports union exactly
+but estimates intersections (users who visited both A and B) only via
+inclusion–exclusion, whose error explodes when the intersection is small
+relative to the sets. <strong>Theta sketches</strong> (Apache
+DataSketches) support set intersection and difference with better error
+behaviour.</li>
+<li><strong>No membership or listing.</strong> You can’t ask whether a
+specific user is counted.</li>
+<li><strong>Error is relative,</strong> so 0.81% of 10 million is
+±81,000. For billing or anything audited, use exact counts.</li>
+</ul>
+<h2 id="count-min-sketch-approximate-frequencies">6. Count-Min sketch:
+approximate frequencies</h2>
+<p>The <strong>Count-Min sketch</strong> (Cormode and Muthukrishnan,
+2005) estimates how many times each item has appeared in a stream, using
+memory that doesn’t grow with the number of distinct items.</p>
+<p><strong>Structure:</strong> a table of d rows and w columns of
+counters, with an independent hash function for each row.</p>
+<ul>
+<li><strong>Update:</strong> for each of the d rows, hash the item to a
+column and increment that counter.</li>
+<li><strong>Query:</strong> hash the item into each row and return the
+<strong>minimum</strong> of the d counters.</li>
+</ul>
+<p>Each counter holds the item’s true count plus the counts of every
+other item that collided with it in that row, so each counter is an
+overestimate, and the minimum across rows is the least polluted.
+Estimates are <strong>never below</strong> the true count. The
+guarantee: with width w = ⌈e/ε⌉ and depth d = ⌈ln(1/δ)⌉, the estimate is
+at most the true count plus ε·N (where N is the total of all counts)
+with probability at least 1 − δ. For example, ε = 0.001 and δ = 0.01
+gives a sketch of 2,719 × 5 counters, about 54 KB with 32-bit counters,
+for any number of distinct items.</p>
+<p>The error is relative to the <strong>total</strong> stream size, so
+Count-Min is accurate for frequent items and useless for rare ones: a
+URL seen 5 times in a stream of 100 million could be estimated at
+100,000. That’s fine for its main uses:</p>
+<ul>
+<li><strong>Heavy hitters / top-k.</strong> Keep a Count-Min sketch plus
+a small heap of the current top-k candidates. Each update checks whether
+the item’s estimate qualifies for the heap. This finds the most popular
+URLs, the noisiest tenants, the IPs sending the most traffic (DDoS
+detection) or the hottest keys in a cache, in a fixed amount of
+memory.</li>
+<li><strong>Hot key detection</strong> in databases and caches, where
+the goal is to notice a few keys getting a disproportionate share of
+traffic.</li>
+<li><strong>Approximate counting</strong> in streaming systems where
+exact per-key state would be too large.</li>
+</ul>
+<p><strong>Conservative update</strong> (only increment the counters
+that are currently at the minimum) reduces overestimation considerably
+in practice, at the cost of making the sketch harder to merge
+correctly.</p>
+<h2 id="tinylfu-count-min-as-a-cache-admission-policy">7. TinyLFU:
+Count-Min as a cache admission policy</h2>
+<p>The caching readings covered eviction (what to throw out).
+<strong>Admission</strong> is the other half: should a new item even
+enter the cache? An LRU cache admits everything, so a burst of one-off
+requests (a scan, a crawler) can flush out items that are genuinely
+popular.</p>
+<p><strong>TinyLFU</strong> (Einziger, Friedman and Manes, ACM
+Transactions on Storage, 2017) uses a compact frequency sketch to
+decide: when a new item would evict a victim, admit it only if its
+estimated recent frequency is higher than the victim’s. Frequencies are
+aged by periodically halving all counters, so the sketch reflects recent
+popularity rather than all-time counts.</p>
+<p><strong>W-TinyLFU</strong>, used by Java’s Caffeine library (and its
+ports, such as Ristretto in Go), adds a small LRU
+<strong>window</strong> in front so that new items get a short chance to
+build up frequency, plus a segmented LRU main area. Caffeine’s
+documentation describes its frequency sketch as a 4-bit Count-Min sketch
+costing about 8 bytes per cache entry, and it adjusts the window size
+automatically with hill climbing. Across a wide range of published
+traces, W-TinyLFU gets hit rates close to the theoretical optimum and
+well above LRU, for little memory. It’s a good example of a sketch
+improving a system’s core behaviour, not just its analytics.</p>
+<h2 id="quantile-sketches-percentiles-without-keeping-every-sample">8.
+Quantile sketches: percentiles without keeping every sample</h2>
+<p>Latency percentiles are one of the most important operational metrics
+and one of the easiest to compute wrongly. You <strong>cannot average
+percentiles</strong>: the average of 100 servers’ p99 latencies is not
+the fleet’s p99. Computing it exactly needs every sample, which is too
+much data. <strong>Quantile sketches</strong> keep a compact summary
+that answers “what’s the value at quantile q?” with bounded error and
+<strong>merges</strong> across servers and time windows.</p>
+<ul>
+<li><strong>t-digest</strong> (Ted Dunning) clusters samples into
+centroids, keeping clusters small near the tails, so it’s very accurate
+for extreme percentiles like p99 and p99.9. It’s widely used
+(Elasticsearch percentiles aggregation, many databases).</li>
+<li><strong>DDSketch</strong> (Datadog, VLDB 2019) uses logarithmically
+sized buckets so that every quantile estimate is within a fixed
+<strong>relative</strong> error (for example 1%) of the true value.
+That’s a natural guarantee for latency: being off by 1% of 2 ms or of 2
+s is equally acceptable. It’s fully mergeable.</li>
+<li><strong>KLL</strong> (Karnin, Lang, Liberty) has strong worst-case
+guarantees on <strong>rank</strong> error and is in Apache
+DataSketches.</li>
+<li><strong>HDR Histogram</strong> (Gil Tene) is a related
+fixed-precision histogram popular in benchmarking, designed to record
+latency without losing the tail.</li>
+</ul>
+<p>Prometheus histograms are a simple version of the same idea: fixed
+buckets you choose up front, merged by summing counts, with quantiles
+interpolated within buckets. Their accuracy depends on how well the
+buckets match the data, which is the problem that native (exponential)
+histograms address.</p>
+<h2 id="choosing-and-sizing">9. Choosing and sizing</h2>
+<p>A practical decision guide:</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Question</th>
+<th>Structure</th>
+<th>Error type</th>
+<th>Typical size</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Is X in the set?</td>
+<td>Bloom / cuckoo / ribbon filter</td>
+<td>false positives only</td>
+<td>~10 bits per item for 1%</td>
+</tr>
+<tr class="even">
+<td>How many distinct X?</td>
+<td>HyperLogLog (++), theta sketch</td>
+<td>±relative error</td>
+<td>12 KB for 0.81% (Redis)</td>
+</tr>
+<tr class="odd">
+<td>How often does X occur? Top k?</td>
+<td>Count-Min + heap</td>
+<td>overestimate by ≤ εN</td>
+<td>tens of KB</td>
+</tr>
+<tr class="even">
+<td>What’s the p99?</td>
+<td>t-digest, DDSketch, KLL</td>
+<td>rank or relative value error</td>
+<td>a few KB</td>
+</tr>
+</tbody>
+</table>
+<p>Some guidance for using them in real systems:</p>
+<ul>
+<li><strong>Decide what error is acceptable before choosing,</strong>
+and in which direction. A false positive in a Bloom filter in front of a
+database costs one wasted lookup; a false positive in a filter used to
+<em>skip</em> a security check is a vulnerability.</li>
+<li><strong>Approximate is for decisions and dashboards, not for
+money.</strong> Billing, quotas that customers see, and anything audited
+should use exact counts, possibly with a sketch as a fast
+pre-check.</li>
+<li><strong>Version the hash function and parameters.</strong> Sketches
+built with different hash seeds or register counts can’t be merged.
+Store the parameters with the sketch.</li>
+<li><strong>Watch capacity.</strong> Bloom filters degrade sharply when
+overfilled. Monitor the fill ratio (fraction of bits set) and rebuild
+before it passes the design point.</li>
+<li><strong>Use libraries.</strong> Apache DataSketches (Java, C++,
+Python), Redis’s built-in HyperLogLog and its probabilistic data types
+(Bloom, cuckoo, Count-Min, top-k, t-digest), and database functions like
+<code>approx_count_distinct</code> are tested and interoperable. Subtle
+bugs in hand-written sketches (biased hashes, wrong bias correction)
+produce numbers that look plausible and are wrong.</li>
+</ul>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Probabilistic structures trade a <strong>bounded, one-directional
+error</strong> for memory that’s <strong>tiny and independent of data
+size</strong>, and most are <strong>mergeable</strong>, which is what
+makes them ideal for distributed systems.</li>
+<li><strong>Bloom filters</strong> answer “definitely not” or “probably
+yes”. At the optimum, about <strong>9.6 bits per item gives 1% false
+positives</strong>. They power LSM-tree reads, CDN
+<strong>cache-on-second-hit</strong>, and runtime join filters.
+<strong>Cuckoo</strong> filters add deletes; <strong>xor/ribbon</strong>
+filters save space for static sets.</li>
+<li><strong>HyperLogLog</strong> counts distinct items with ~1/√m
+relative error; Redis uses <strong>12 KB for 0.81%</strong>. It unions
+perfectly and handles intersections poorly.</li>
+<li><strong>Count-Min</strong> estimates frequencies with an
+overestimate bounded by <strong>εN</strong>: great for heavy hitters and
+hot keys, useless for rare items.</li>
+<li><strong>TinyLFU</strong> uses a frequency sketch for <strong>cache
+admission</strong>; Caffeine’s W-TinyLFU gets near-optimal hit
+rates.</li>
+<li><strong>Quantile sketches</strong> (t-digest, DDSketch, KLL) give
+mergeable percentiles. Never average percentiles.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Your service checks a database for whether an email is already
+registered on every signup attempt, and bots are hammering it with
+random emails. Would a Bloom filter help? Where would the filter live,
+and how would you keep it up to date?</li>
+<li>You need daily, weekly and monthly unique users per country and per
+platform. Design the storage using HyperLogLog. What can’t you answer
+with this design?</li>
+<li>A cache uses LRU and its hit rate collapses every night when a batch
+job scans the whole key space. How would TinyLFU-style admission change
+that?</li>
+<li>Your dashboard shows the “average p99 latency” across 50 pods.
+What’s wrong with that number, and how would you compute the real fleet
+p99?</li>
+<li>A product manager wants a “trending searches” list updated every
+minute from 50,000 queries per second. Sketch a design with Count-Min
+and a heap. What error would users notice?</li>
+<li>Where in your stack would a false positive be harmless, and where
+would it be dangerous?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>B. H. Bloom, “Space/Time Trade-offs in Hash Coding with Allowable
+Errors,” Communications of the ACM, 1970</li>
+<li>A. Kirsch, M. Mitzenmacher, “Less Hashing, Same Performance:
+Building a Better Bloom Filter,” ESA 2006</li>
+<li>B. Fan, D. Andersen, M. Kaminsky, M. Mitzenmacher, “Cuckoo Filter:
+Practically Better Than Bloom,” CoNEXT 2014</li>
+<li>P. Dillinger, S. Walzer, “Ribbon filter: practically smaller than
+Bloom and Xor,” 2021, and the RocksDB wiki on Ribbon filters</li>
+<li>B. Maggs, R. Sitaraman, “Algorithmic Nuggets in Content Delivery,”
+ACM SIGCOMM CCR, 2015</li>
+<li>P. Flajolet, É. Fusy, O. Gandouet, F. Meunier, “HyperLogLog: the
+analysis of a near-optimal cardinality estimation algorithm,” AofA
+2007</li>
+<li>S. Heule, M. Nunkesser, A. Hall, “HyperLogLog in Practice:
+Algorithmic Engineering of a State of The Art Cardinality Estimation
+Algorithm,” EDBT 2013</li>
+<li><a
+href="https://redis.io/docs/latest/develop/data-types/probabilistic/hyperloglogs/">Redis
+documentation: HyperLogLog</a> (12 KB, 0.81% standard error) and
+probabilistic data types</li>
+<li>G. Cormode, S. Muthukrishnan, “An Improved Data Stream Summary: The
+Count-Min Sketch and its Applications,” Journal of Algorithms, 2005</li>
+<li>G. Einziger, R. Friedman, B. Manes, “TinyLFU: A Highly Efficient
+Cache Admission Policy,” ACM Transactions on Storage, 2017; <a
+href="https://github.com/ben-manes/caffeine/wiki/Efficiency">Caffeine
+wiki: Efficiency</a></li>
+<li>T. Dunning, “Computing Extremely Accurate Quantiles Using
+t-Digests”; C. Masson, J. Rim, H. Lee, “DDSketch: A Fast and
+Fully-Mergeable Quantile Sketch with Relative-Error Guarantees,” VLDB
+2019; Z. Karnin, K. Lang, E. Liberty, “Optimal Quantile Approximation in
+Streams,” FOCS 2016</li>
+<li>Apache DataSketches documentation (theta sketches, KLL, HLL)</li>
+</ul>
+<p><em>Note on verification: the Redis HyperLogLog figures and
+Caffeine’s W-TinyLFU and 4-bit Count-Min description were read from the
+linked pages today. The Akamai paper couldn’t be fetched, so its “around
+three quarters one-hit wonders” figure is from memory and stated
+loosely. Bloom, HyperLogLog and Count-Min formulas are standard results
+from the cited papers; the Ribbon (~30% smaller) and cuckoo (better
+below ~3%) comparisons come from those papers as I know them and weren’t
+re-checked today.</em></p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/caching.html">Caching</a><a class="chip" href="/topics/analytics.html">Analytics</a></div>
+          <div class="daynav"><a href="/reading/graphql-in-production.html"><div class="kicker">← Older · Nov 18</div><div class="t">GraphQL in production: N+1 queries, query cost, caching and federation</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
