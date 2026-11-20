@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Software supply chain security: from xz to Shai-Hulud, and what actually helps · The Daily Commit</title>
+  <meta name="description" content="How attackers compromise software before it reaches you, and the controls that make it harder. Covers the stages of the supply chain, landmark attacks (SolarWinds, Codecov, dependency confusion, event-stream, xz utils, tj-actions, the Shai-Hulud npm worm), dependency hygiene, CI/CD hardening, SBOMs, signing with Sigstore, SLSA provenance levels, reproducible builds, and a prioritised plan for a typical engineering team.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Software supply chain security: from xz to Shai-Hulud, and what actually helps</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>17 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#what-supply-chain-means-for-software">What “supply chain”
+means for software</a><a href="#attacks-that-defined-the-field">Attacks that defined the
+field</a><a href="#dependencies-the-largest-attack-surface">Dependencies: the
+largest attack surface</a><a href="#cicd-the-most-privileged-machine-you-own">CI/CD: the most
+privileged machine you own</a><a href="#sboms-knowing-what-you-run">SBOMs: knowing what you run</a><a href="#signing-and-provenance-sigstore-and-slsa">Signing and
+provenance: Sigstore and SLSA</a><a href="#enforcing-at-deploy-time">Enforcing at deploy time</a><a href="#a-practical-plan-for-a-typical-team">A practical plan for a
+typical team</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 17 min left</div>
+      </nav>
+      <article class="article" data-slug="software-supply-chain" data-minutes="17">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/security.html">Security</a> · November 20, 2026 · 17 min</div>
+        <h1>Software supply chain security: from xz to Shai-Hulud, and what actually helps</h1>
+        <p class="dek">How attackers compromise software before it reaches you, and the controls that make it harder. Covers the stages of the supply chain, landmark attacks (SolarWinds, Codecov, dependency confusion, event-stream, xz utils, tj-actions, the Shai-Hulud npm worm), dependency hygiene, CI/CD hardening, SBOMs, signing with Sigstore, SLSA provenance levels, reproducible builds, and a prioritised plan for a typical engineering team.</p>
+<p>Most of the code running in your production systems wasn’t written by
+your company. A typical service pulls in hundreds or thousands of
+open-source packages, is built by a CI system that runs third-party
+actions and scripts, and is shipped as a container image built on
+someone else’s base image. Each of those is a place where an attacker
+can insert code that you’ll then run with your own credentials. Over the
+past six years, that’s exactly what has happened, repeatedly and at
+scale: a build system compromised at SolarWinds, a backdoor patiently
+planted in the compression library xz, a popular GitHub Action rewritten
+to dump secrets, and in 2025 a self-propagating worm that stole npm
+tokens and republished hundreds of packages. This reading walks through
+the stages of the software supply chain, the attacks that defined each
+one, and the controls that work against them (dependency pinning, CI
+hardening, SBOMs, artifact signing with Sigstore, SLSA provenance and
+reproducible builds), ending with a practical order in which to adopt
+them. It draws on CISA advisories, the SLSA specification, the Sigstore
+project, Andres Freund’s xz disclosure, and incident write-ups from
+security firms. The earlier readings on secrets management and workload
+identity cover related ground on credentials.</p>
+<h2 id="what-supply-chain-means-for-software">1. What “supply chain”
+means for software</h2>
+<p>A useful model, close to the one SLSA uses, follows code from its
+author to production:</p>
+<ol type="1">
+<li><strong>Source:</strong> the code in a repository, and the people
+and accounts that can change it.</li>
+<li><strong>Dependencies:</strong> third-party packages pulled from
+registries (npm, PyPI, Maven Central, crates.io, Go modules), plus base
+images and system packages.</li>
+<li><strong>Build:</strong> the CI system and build scripts that turn
+source and dependencies into artifacts, including any third-party CI
+plugins or actions.</li>
+<li><strong>Artifacts:</strong> the resulting packages, binaries and
+container images.</li>
+<li><strong>Distribution and deployment:</strong> registries and package
+mirrors, download scripts, and the deployment system that pulls and runs
+artifacts.</li>
+</ol>
+<p>An attacker who controls any stage controls what you run. Two
+properties make these attacks especially effective. They’re
+<strong>one-to-many</strong>: compromise one popular package or build
+system and you reach every downstream user. And they <strong>arrive
+through trusted channels</strong>: the malicious code is signed by the
+right vendor, published by the right maintainer account, or built by
+your own CI, so the defences aimed at outside attackers don’t
+trigger.</p>
+<figure class="diagram"><svg viewBox="0 0 760 340" role="img" aria-label="Software supply chain stages with real attacks and matching controls" font-size="13"><defs><marker id="sc1120" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Every link between source and production is an attack surface</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Top: stages. Middle: real attacks at that stage. Bottom: the control that addresses it.</text><rect x="24" y="72" width="136" height="40" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="92" y="97" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">source</text><rect x="24" y="132" width="136" height="56" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-4)" stroke-width="1"></rect><text x="92" y="155" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">xz utils 2024</text><text x="92" y="172" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">maintainer takeover</text><rect x="24" y="208" width="136" height="56" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-3)" stroke-width="1"></rect><text x="92" y="231" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">review, 2FA,</text><text x="92" y="248" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">branch protection</text><rect x="170" y="72" width="136" height="40" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="238" y="97" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">dependencies</text><line x1="160" y1="92" x2="169" y2="92" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#sc1120)"></line><rect x="170" y="132" width="136" height="56" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-4)" stroke-width="1"></rect><text x="238" y="155" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">event-stream,</text><text x="238" y="172" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">Shai-Hulud 2025</text><rect x="170" y="208" width="136" height="56" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-3)" stroke-width="1"></rect><text x="238" y="231" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">lockfiles, pinning,</text><text x="238" y="248" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">delay new versions</text><rect x="316" y="72" width="136" height="40" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="384" y="97" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">CI + build</text><line x1="306" y1="92" x2="315" y2="92" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#sc1120)"></line><rect x="316" y="132" width="136" height="56" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-4)" stroke-width="1"></rect><text x="384" y="155" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">SolarWinds 2020,</text><text x="384" y="172" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">tj-actions 2025</text><rect x="316" y="208" width="136" height="56" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-3)" stroke-width="1"></rect><text x="384" y="231" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">pin actions by SHA,</text><text x="384" y="248" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">hermetic builds</text><rect x="462" y="72" width="136" height="40" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="530" y="97" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">artifact</text><line x1="452" y1="92" x2="461" y2="92" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#sc1120)"></line><rect x="462" y="132" width="136" height="56" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-4)" stroke-width="1"></rect><text x="530" y="155" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">unsigned or</text><text x="530" y="172" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">swapped binaries</text><rect x="462" y="208" width="136" height="56" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-3)" stroke-width="1"></rect><text x="530" y="231" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">sign + provenance</text><text x="530" y="248" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">(Sigstore, SLSA)</text><rect x="608" y="72" width="136" height="40" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="676" y="97" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">deploy</text><line x1="598" y1="92" x2="607" y2="92" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#sc1120)"></line><rect x="608" y="132" width="136" height="56" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-4)" stroke-width="1"></rect><text x="676" y="155" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">Codecov 2021</text><text x="676" y="172" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">script tampering</text><rect x="608" y="208" width="136" height="56" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.14" stroke="var(--cds-chart-categorical-3)" stroke-width="1"></rect><text x="676" y="231" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">verify signature</text><text x="676" y="248" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">at admission</text><text x="24" y="300" font-size="11.5" fill="var(--cds-text-secondary)">Across all stages: an SBOM so you know what you run, least-privilege CI tokens, and short-lived credentials.</text><text x="24" y="320" font-size="11.5" fill="var(--cds-text-secondary)">No single control covers the chain; provenance links them so a consumer can check where an artifact came from.</text></svg></figure>
+<h2 id="attacks-that-defined-the-field">2. Attacks that defined the
+field</h2>
+<h3 id="solarwinds-disclosed-december-2020-the-build-system">SolarWinds
+(disclosed December 2020): the build system</h3>
+<p>Attackers compromised the build environment for SolarWinds’ Orion
+network-monitoring product and inserted a backdoor (known as SUNBURST)
+into the build process itself. The source repository looked clean; the
+malicious code was injected while the product was compiled, and the
+resulting updates were signed with SolarWinds’ legitimate certificate.
+SolarWinds said that up to about 18,000 customers installed the affected
+updates, and the attackers then selectively exploited a small number of
+high-value targets, including several US government agencies. It showed
+that reviewing source code isn’t enough if the build can be tampered
+with, and it directly led to the US Executive Order 14028 (May 2021) on
+improving the nation’s cybersecurity, which called for SBOMs and secure
+development practices for software sold to the government.</p>
+<h3 id="codecov-2021-the-download-script">Codecov (2021): the download
+script</h3>
+<p>Codecov’s Bash uploader, a script that thousands of CI pipelines
+downloaded and ran with <code>curl | bash</code>, was modified by an
+attacker who obtained a credential from Codecov’s Docker image build
+process. The altered script sent the environment variables of every CI
+job that ran it (including secrets and tokens) to an attacker’s server,
+and the change went unnoticed for about two months. The lesson: anything
+your CI downloads and executes at build time is part of your supply
+chain, and CI environments are full of secrets.</p>
+<h3 id="dependency-confusion-2021-the-package-resolver">Dependency
+confusion (2021): the package resolver</h3>
+<p>Security researcher Alex Birsan showed that many companies’ build
+tools would install a <strong>public</strong> package in place of an
+<strong>internal</strong> one with the same name if the public one had a
+higher version number. By publishing harmless proof-of-concept packages
+with names taken from leaked internal manifests, he got code execution
+inside dozens of large companies, including Apple, Microsoft and PayPal,
+and collected substantial bug bounties. The fix is configuration: scope
+internal packages (npm <code>@company/</code> scopes), point resolvers
+at a single private registry that proxies the public one, and never let
+the resolver choose between sources by version.</p>
+<h3 id="event-stream-2018-and-the-maintainer-handover">event-stream
+(2018) and the maintainer handover</h3>
+<p>A widely used npm package, <code>event-stream</code>, was handed over
+by its tired maintainer to a volunteer who soon added a dependency
+containing obfuscated code targeting a specific Bitcoin wallet
+application. It was a reminder that open-source maintenance often rests
+on one unpaid person, and that ownership transfers are a supply chain
+event.</p>
+<h3 id="xz-utils-march-2024-the-patient-insider">xz utils (March 2024):
+the patient insider</h3>
+<p>The most sophisticated case so far. Over about two years, a
+contributor using the name “Jia Tan” built trust in the xz utils
+compression project, became a co-maintainer, and then shipped releases
+<strong>5.6.0 and 5.6.1</strong> containing a backdoor (CVE-2024-3094).
+The malicious code wasn’t in the visible source; it was hidden in binary
+test files and activated by changes to the build scripts included in the
+release tarballs, not in the git repository. On some Linux
+distributions, the OpenSSH server is linked (through systemd) with
+liblzma, so the backdoor could intercept SSH authentication and allow
+remote code execution for someone holding the attacker’s private
+key.</p>
+<p>It was caught on 29 March 2024, before reaching most stable
+distributions, largely by luck. Andres Freund, a Postgres developer at
+Microsoft, noticed that SSH logins on a Debian testing machine were
+using more CPU and taking about half a second longer than they should,
+investigated, and reported it to the oss-security mailing list. The
+incident showed that attackers will invest years in social engineering,
+that release tarballs can differ from the repository in dangerous ways,
+and that the health of critical but under-resourced projects is a
+security issue.</p>
+<h3
+id="tj-actionschanged-files-march-2025-third-party-ci-actions">tj-actions/changed-files
+(March 2025): third-party CI actions</h3>
+<p>The GitHub Action <code>tj-actions/changed-files</code>, used by tens
+of thousands of repositories (reports put it at around 23,000), was
+compromised: attackers modified the action’s code and moved its existing
+version tags to point at a malicious commit. Any workflow referencing
+the action by tag (<code>@v35</code>, <code>@v44</code>) ran the new
+code, which dumped the CI runner’s memory, including secrets, into the
+workflow logs. For public repositories, those logs are publicly
+readable. The investigation traced the compromise back to a token stolen
+through another action (<code>reviewdog/action-setup</code>), a chain of
+supply chain compromises. The lesson: a version tag in Git is a mutable
+pointer, and referencing third-party actions by tag means running
+whatever the tag points at today.</p>
+<h3 id="shai-hulud-september-2025-a-self-propagating-worm">Shai-Hulud
+(September 2025): a self-propagating worm</h3>
+<p>In September 2025 a worm spread through npm. According to CISA’s
+alert, it <strong>compromised over 500 packages</strong>. When a
+compromised package was installed, its code scanned the environment for
+credentials, especially GitHub personal access tokens and cloud keys for
+AWS, GCP and Azure, exfiltrated them, and published them to public
+GitHub repositories named “Shai-Hulud”. Then it used stolen npm
+credentials to <strong>inject itself into other packages the victim
+maintained and publish new versions</strong>, which spread it further
+without any human attacker involved. CISA advised pinning dependencies
+to versions published before 16 September 2025, rotating credentials,
+and reviewing for malicious repositories and workflows.</p>
+<p>Shai-Hulud combined several of the earlier patterns: install-time
+scripts executing on developer and CI machines, long-lived tokens
+available in the environment, and publishing rights that let one
+compromised account reach many packages.</p>
+<h2 id="dependencies-the-largest-attack-surface">3. Dependencies: the
+largest attack surface</h2>
+<p>Most teams’ biggest exposure is the dependency tree. Controls that
+work, roughly in order of value for effort:</p>
+<ul>
+<li><strong>Lockfiles everywhere, committed and enforced.</strong>
+<code>package-lock.json</code>, <code>pnpm-lock.yaml</code>,
+<code>poetry.lock</code>, <code>go.sum</code>, <code>Cargo.lock</code>.
+Install with the lockfile-respecting command (<code>npm ci</code>,
+<code>pip install --require-hashes</code>) so CI installs exactly what
+was reviewed, with integrity hashes. A lockfile turns “whatever the
+latest version is right now” into a specific, reviewable change.</li>
+<li><strong>Don’t take new versions immediately.</strong> Most malicious
+releases are detected within hours or days. Configuring update tools
+(Dependabot, Renovate) to wait a few days before proposing new versions
+(Renovate’s <code>minimumReleaseAge</code>, for example) avoids a lot of
+risk at little cost. Several recent package-manager releases also add
+options to refuse versions younger than a set age.</li>
+<li><strong>Limit install-time scripts.</strong> npm
+<code>preinstall</code>/<code>postinstall</code> scripts run arbitrary
+code on every machine that installs the package; that’s how many npm
+attacks execute. Disable them by default
+(<code>npm config set ignore-scripts true</code>, or pnpm, which blocks
+dependency lifecycle scripts by default in recent versions) and allow
+them only for packages that need them.</li>
+<li><strong>Use a private registry proxy</strong> (Artifactory, Nexus,
+cloud artifact registries) as the single source for all packages. It
+prevents dependency confusion, gives you a place to block known-bad
+versions quickly, and keeps builds working if the public registry is
+down.</li>
+<li><strong>Scan continuously</strong> for known vulnerabilities (OSV,
+GitHub Dependabot alerts, Snyk and others) <strong>and</strong> for
+known-malicious packages, which vulnerability databases sometimes treat
+separately. Tools like OpenSSF Scorecard help assess the health of a
+dependency before adopting it (maintainers, branch protection, signed
+releases, active fixes).</li>
+<li><strong>Prefer fewer, healthier dependencies.</strong> Every
+dependency is code you run and a set of maintainers you trust. A small
+utility function you can write in ten lines may not be worth a package
+with its own transitive tree.</li>
+</ul>
+<h2 id="cicd-the-most-privileged-machine-you-own">4. CI/CD: the most
+privileged machine you own</h2>
+<p>CI systems have access to source code, signing keys, cloud deployment
+credentials and package publishing tokens, and they execute code from
+many sources (your repository, pull requests, third-party actions,
+dependencies). That makes them prime targets. Hardening steps:</p>
+<ul>
+<li><strong>Pin third-party actions and plugins to a full commit
+SHA</strong>, not a tag: <code>uses: some/action@8f4b7f84...</code>
+rather than <code>@v4</code>. A SHA can’t be moved; a tag can, as
+tj-actions showed. Update tools can keep the SHAs current with readable
+version comments.</li>
+<li><strong>Least-privilege tokens.</strong> In GitHub Actions, set the
+default <code>GITHUB_TOKEN</code> permissions to read-only at the
+organisation level and grant write permissions per job only where
+needed.</li>
+<li><strong>No long-lived cloud credentials in CI.</strong> Use OIDC
+federation (GitHub Actions, GitLab and others issue a signed OIDC token
+per job) to exchange for short-lived cloud credentials scoped to that
+repository and branch. A stolen token then expires in minutes and only
+works for that context. The workload identity reading covered the
+mechanism.</li>
+<li><strong>Separate untrusted from trusted workflows.</strong>
+Workflows triggered by pull requests from forks must not have access to
+secrets. GitHub’s <code>pull_request_target</code> trigger runs with
+secrets in the context of the base repository and has been the source of
+many “pwn request” vulnerabilities when combined with checking out the
+PR’s code.</li>
+<li><strong>Isolate the build.</strong> Ephemeral runners that are
+destroyed after each job prevent one job from tampering with the next.
+Hermetic builds, which can only use declared inputs and have no network
+access during compilation, prevent a build from quietly fetching
+something it shouldn’t.</li>
+<li><strong>Protect publishing.</strong> Require two-factor
+authentication on registry accounts, use <strong>trusted
+publishing</strong> where registries support it (PyPI, npm and crates.io
+now let CI publish via OIDC without stored API tokens), and restrict who
+and what can publish.</li>
+<li><strong>Protect the source.</strong> Branch protection, required
+reviews, signed commits or at least verified committer identity, and 2FA
+for everyone with write access. Watch for changes to CI configuration
+files themselves, which are as sensitive as code.</li>
+</ul>
+<h2 id="sboms-knowing-what-you-run">5. SBOMs: knowing what you run</h2>
+<p>When Log4Shell (CVE-2021-44228) was disclosed in December 2021, the
+first question every organisation had to answer was “where do we use
+log4j?”, and many couldn’t answer it quickly, because log4j was buried
+in transitive dependencies and vendored into third-party products. A
+<strong>software bill of materials (SBOM)</strong> is a machine-readable
+list of the components in an artifact: names, versions, suppliers,
+hashes and relationships, typically in the <strong>SPDX</strong> or
+<strong>CycloneDX</strong> formats.</p>
+<p>What SBOMs are good for:</p>
+<ul>
+<li><strong>Answering “are we affected?”</strong> in minutes when the
+next big vulnerability lands, by querying SBOMs for every deployed
+artifact.</li>
+<li><strong>Licence compliance</strong>, which is where the SPDX format
+originated.</li>
+<li><strong>Procurement and regulation.</strong> EO 14028 drove SBOM
+requirements for US federal suppliers, and the EU’s Cyber Resilience Act
+brings documentation requirements for products sold in the EU.</li>
+</ul>
+<p>What they aren’t: an SBOM is an inventory, not a security control. It
+doesn’t stop a malicious package; it helps you respond. Its value
+depends on generating it automatically from the actual build (tools like
+Syft, Trivy or the build system itself), storing it with the artifact,
+and having a way to query across all of them. A <strong>VEX</strong>
+(Vulnerability Exploitability eXchange) document can accompany an SBOM
+to say which known vulnerabilities actually affect the product, which
+cuts down scanner noise.</p>
+<h2 id="signing-and-provenance-sigstore-and-slsa">6. Signing and
+provenance: Sigstore and SLSA</h2>
+<p>Knowing <em>what</em> is in an artifact is one question. Knowing
+<strong>where it came from and how it was built</strong> is another, and
+it’s the one that would have helped with SolarWinds and Codecov.</p>
+<h3 id="signing-with-sigstore">Signing with Sigstore</h3>
+<p>Traditional code signing requires managing long-lived private keys,
+which are hard to protect, and most open-source projects never did it.
+<strong>Sigstore</strong>, a Linux Foundation / OpenSSF project launched
+in 2021, makes signing nearly free:</p>
+<ul>
+<li><strong>Fulcio</strong> is a certificate authority that issues
+<strong>short-lived signing certificates</strong> (valid for about ten
+minutes) bound to an identity proven via OIDC, such as a developer’s
+email account or a CI workflow’s identity (“this GitHub Actions workflow
+in this repository on this branch”).</li>
+<li><strong>Rekor</strong> is a public, append-only <strong>transparency
+log</strong> that records every signature, so signatures can be audited
+and a compromised identity’s misuse can be detected.</li>
+<li><strong>Cosign</strong> and language-specific clients sign and
+verify artifacts and container images.</li>
+</ul>
+<p>This is “keyless” signing: there’s no long-lived key to steal, and
+the signature says <em>which identity</em> signed it, which a verifier
+can check against policy (“only accept images signed by our release
+workflow”). npm, PyPI, Maven Central, Homebrew and Kubernetes itself use
+Sigstore for signatures or provenance.</p>
+<h3 id="slsa-levels-for-build-integrity">SLSA: levels for build
+integrity</h3>
+<p><strong>SLSA</strong> (Supply-chain Levels for Software Artifacts,
+pronounced “salsa”) is an OpenSSF framework, originally from Google’s
+internal practices, that defines incremental levels of assurance. In the
+v1.0 specification, the <strong>Build track</strong> has four
+levels:</p>
+<ul>
+<li><strong>Build L0:</strong> no guarantees.</li>
+<li><strong>Build L1: provenance exists.</strong> The build produces a
+provenance document describing how the artifact was built (source
+repository and commit, build platform, build command, inputs).</li>
+<li><strong>Build L2: hosted build platform, signed provenance.</strong>
+The build runs on a hosted CI service, which signs the provenance, so it
+can’t be forged by a developer’s machine.</li>
+<li><strong>Build L3: hardened builds.</strong> The build platform
+prevents builds from influencing each other and keeps signing material
+out of reach of the user-defined build steps, so even a malicious build
+script can’t forge provenance.</li>
+</ul>
+<p>Provenance is typically expressed as an <strong>in-toto
+attestation</strong> and signed (often with Sigstore). npm’s
+<strong>provenance</strong> feature
+(<code>npm publish --provenance</code> from a supported CI) links each
+published package version to the exact source commit and workflow that
+built it, viewable on the package page. GitHub’s artifact attestations
+offer the same for any build artifact.</p>
+<p>The value of provenance is verification at the consumer side: a
+deployment system or admission controller can refuse images that lack
+provenance from your release workflow, or that were built from a branch
+other than <code>main</code>. In the Codecov case, verification against
+the expected source would have flagged a script that didn’t match its
+repository. Against SolarWinds-style build compromise, SLSA L3’s
+isolation requirements are what matter, because provenance from a
+compromised build system would otherwise attest to the tampered
+artifact.</p>
+<h3 id="reproducible-builds">Reproducible builds</h3>
+<p>A build is <strong>reproducible</strong> if anyone can rebuild the
+same source and get a bit-for-bit identical artifact. Then independent
+parties can verify that a published binary matches its source, and a
+compromised build server would be caught by the mismatch. Debian, Arch
+Linux, NixOS and others have done a lot of work toward this (the
+Reproducible Builds project). It requires removing timestamps, file
+ordering differences and other nondeterminism, which is hard for complex
+software, but it’s the strongest defence against build tampering. The xz
+incident was also a reminder that release tarballs should be
+reproducible from the tagged repository, since that’s where its
+malicious build script was hidden.</p>
+<h2 id="enforcing-at-deploy-time">7. Enforcing at deploy time</h2>
+<p>Signing and provenance only help if something checks them. In
+Kubernetes, admission controllers such as <strong>Sigstore’s
+policy-controller</strong> or <strong>Kyverno</strong> can enforce rules
+like: images must come from our registry, must be signed by our release
+workflow identity, and must have SLSA provenance showing they were built
+from our repository’s protected branch. Similar checks can run in
+deployment pipelines for non-Kubernetes targets. Start in audit mode,
+measure how many images would fail, fix the pipelines, then enforce.</p>
+<h2 id="a-practical-plan-for-a-typical-team">8. A practical plan for a
+typical team</h2>
+<p>Not everything above is equally urgent. A reasonable order, by risk
+reduced per unit of effort:</p>
+<ol type="1">
+<li><strong>Lock and pin.</strong> Commit lockfiles and install from
+them in CI. Pin third-party CI actions to SHAs. This alone would have
+blunted tj-actions and most “malicious new version” attacks.</li>
+<li><strong>Remove long-lived secrets from CI.</strong> Switch to OIDC
+federation for cloud access and trusted publishing for package
+registries. Set default CI token permissions to read-only. This limits
+the damage of almost every attack in section 2, since most of them were
+credential theft.</li>
+<li><strong>Turn on 2FA and branch protection</strong> for source
+repositories and registry accounts.</li>
+<li><strong>Delay and gate updates.</strong> Use automated update tools
+with a minimum release age, and block install scripts by default.</li>
+<li><strong>Use a private registry proxy</strong> for all
+dependencies.</li>
+<li><strong>Generate SBOMs</strong> for every artifact and store them
+where you can query them.</li>
+<li><strong>Sign artifacts and generate provenance</strong> from CI
+(Sigstore, SLSA Build L2 via your CI’s attestation features).</li>
+<li><strong>Verify at deploy</strong> with admission policies, first in
+audit mode.</li>
+<li><strong>Invest upstream.</strong> Identify the small, critical
+open-source projects you depend on and consider funding or contributing
+to them; xz showed that their health is part of your security.</li>
+</ol>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>The supply chain runs from <strong>source → dependencies → build →
+artifacts → deployment</strong>, and attacks at any stage deliver code
+you’ll run with your own credentials, through trusted channels.</li>
+<li><strong>SolarWinds</strong> (build tampering),
+<strong>Codecov</strong> (download script), <strong>dependency
+confusion</strong> (resolver), <strong>xz utils</strong> (years-long
+maintainer infiltration, CVE-2024-3094 in 5.6.0/5.6.1),
+<strong>tj-actions</strong> (moved tags, secrets in logs) and
+<strong>Shai-Hulud</strong> (a worm that compromised 500+ npm packages)
+each exposed a different weak link.</li>
+<li><strong>Lockfiles, SHA pinning, delayed updates and blocked install
+scripts</strong> are cheap and stop the most common attacks.</li>
+<li><strong>CI is your most privileged system:</strong> use OIDC instead
+of stored secrets, least-privilege tokens, ephemeral runners, and
+trusted publishing.</li>
+<li><strong>SBOMs</strong> answer “are we affected?” fast but don’t
+prevent anything on their own.</li>
+<li><strong>Sigstore</strong> makes keyless, identity-bound signing
+practical; <strong>SLSA</strong> levels (L1 provenance, L2 signed
+provenance from a hosted builder, L3 hardened builds) and
+<strong>reproducible builds</strong> make build integrity
+verifiable.</li>
+<li>Controls only matter if <strong>something verifies them at deploy
+time.</strong></li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>If a package in your dependency tree published a malicious version
+an hour ago, would your next CI run pick it up? Trace exactly what would
+happen in your setup.</li>
+<li>Which secrets does your CI have access to today, and which of them
+are long-lived? What would it take to replace them with OIDC
+federation?</li>
+<li>The xz backdoor lived in release tarballs, not the git repository.
+Where else in your stack do you consume artifacts that might differ from
+their source?</li>
+<li>Your organisation wants to require SLSA Build L3 for everything.
+What would that mean for your current CI, and which artifacts would you
+start with?</li>
+<li>A new critical CVE drops in a widely used library. How long would it
+take you to list every affected service and version today? What would
+make it faster?</li>
+<li>How would you decide which open-source dependencies are “critical”
+enough to fund or help maintain?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>CISA, <a
+href="https://www.cisa.gov/news-events/alerts/2025/09/23/widespread-supply-chain-compromise-impacting-npm-ecosystem">“Widespread
+Supply Chain Compromise Impacting npm Ecosystem”</a>, September 2025
+(Shai-Hulud)</li>
+<li>Andres Freund, <a
+href="https://openwall.com/lists/oss-security/2024/03/29/4">“backdoor in
+upstream xz/liblzma leading to ssh server compromise”</a>, oss-security,
+29 March 2024; <a
+href="https://en.wikipedia.org/wiki/XZ_Utils_backdoor">Wikipedia: XZ
+Utils backdoor</a>; <a
+href="https://access.redhat.com/security/cve/cve-2024-3094">Red Hat
+CVE-2024-3094</a></li>
+<li>Palo Alto Networks Unit 42, <a
+href="https://unit42.paloaltonetworks.com/github-actions-supply-chain-attack/">“GitHub
+Actions supply chain attack”</a> (tj-actions/changed-files and
+reviewdog); <a
+href="https://osv.dev/vulnerability/GHSA-mrrh-fwg8-r2c3">GHSA-mrrh-fwg8-r2c3</a>;
+<a
+href="https://socket.dev/blog/github-actions-supply-chain-attack-puts-thousands-of-projects-at-risk">Socket
+analysis</a></li>
+<li>SolarWinds security advisory and FireEye/Mandiant SUNBURST analysis
+(December 2020); US Executive Order 14028, “Improving the Nation’s
+Cybersecurity” (May 2021)</li>
+<li>Codecov, “Bash Uploader Security Update” (April 2021)</li>
+<li>Alex Birsan, “Dependency Confusion: How I Hacked Into Apple,
+Microsoft and Dozens of Other Companies” (February 2021)</li>
+<li><a href="https://slsa.dev/spec/v1.0/levels">SLSA specification v1.0:
+Security levels</a> (Build L0–L3; v1.2 is now current)</li>
+<li>Sigstore documentation (Fulcio, Rekor, Cosign) and the Sigstore
+policy-controller; in-toto attestation framework</li>
+<li>npm documentation on provenance statements and trusted publishing;
+PyPI trusted publishers documentation</li>
+<li>SPDX and CycloneDX specifications; CISA SBOM and VEX resources;
+Reproducible Builds project (reproducible-builds.org)</li>
+<li>OpenSSF Scorecard; GitHub Actions security hardening guide (pinning
+to SHAs, <code>GITHUB_TOKEN</code> permissions,
+<code>pull_request_target</code>)</li>
+</ul>
+<p><em>Note on verification: the Shai-Hulud details and SLSA build
+levels were read from CISA and slsa.dev today, and the xz and tj-actions
+facts were checked against the search results linked above. Details of
+SolarWinds (about 18,000 customers), Codecov, dependency confusion and
+event-stream, Fulcio’s ten-minute certificate lifetime, and the specific
+package-manager options for release-age delays and install scripts come
+from the original disclosures and docs as I know them and weren’t
+re-fetched today.</em></p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/security.html">Security</a><a class="chip" href="/topics/infrastructure.html">Infrastructure</a></div>
+          <div class="daynav"><a href="/reading/probabilistic-data-structures.html"><div class="kicker">← Older · Nov 19</div><div class="t">Bloom filters, HyperLogLog and Count-Min: trading exactness for memory</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
