@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Database replication and failover: what you lose, and when · The Daily Commit</title>
+  <meta name="description" content="How single-leader databases like Postgres and MySQL replicate and fail over, and the data-loss and split-brain risks behind each choice. Covers physical vs logical replication, asynchronous, synchronous and quorum commit, replication lag and read-your-writes, failure detection, automated failover with Patroni and Orchestrator, fencing and split brain, rejoining an old primary with pg_rewind, GitHub&#x27;s 2018 cross-region failover incident, and how managed services like Aurora change the picture.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Database replication and failover: what you lose, and when</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>16 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#what-replication-copies">What replication copies</a><a href="#asynchronous-synchronous-and-quorum-commit">Asynchronous,
+synchronous and quorum commit</a><a href="#replication-lag-and-reading-from-replicas">Replication lag
+and reading from replicas</a><a href="#failover-the-hard-part">Failover: the hard part</a><a href="#patroni-failover-with-a-consensus-store">Patroni: failover
+with a consensus store</a><a href="#github-october-2018-when-failover-is-correct-and-still-wrong">GitHub, October 2018: when failover is correct and still wrong</a><a href="#bringing-the-old-primary-back">Bringing the old primary
+back</a><a href="#how-managed-and-cloud-native-databases-change-things">How
+managed and cloud-native databases change things</a><a href="#a-checklist-for-your-own-setup">A checklist for your own
+setup</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 16 min left</div>
+      </nav>
+      <article class="article" data-slug="replication-failover" data-minutes="16">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/databases.html">Databases</a> · November 21, 2026 · 16 min</div>
+        <h1>Database replication and failover: what you lose, and when</h1>
+        <p class="dek">How single-leader databases like Postgres and MySQL replicate and fail over, and the data-loss and split-brain risks behind each choice. Covers physical vs logical replication, asynchronous, synchronous and quorum commit, replication lag and read-your-writes, failure detection, automated failover with Patroni and Orchestrator, fencing and split brain, rejoining an old primary with pg_rewind, GitHub&#x27;s 2018 cross-region failover incident, and how managed services like Aurora change the picture.</p>
+<p>Almost every production relational database runs as a primary with
+one or more replicas. Replicas serve reads, provide a hot spare, and
+feed analytics and backups. The setup looks routine until the primary
+fails, and then a set of questions that were easy to ignore become
+urgent. Was every acknowledged write on a replica when the primary died?
+Which replica should take over, and who decides? What if the old primary
+isn’t dead, just unreachable, and keeps accepting writes? How do you
+bring it back without corrupting data? Getting these answers wrong leads
+to lost transactions, split brain, or a day-long incident like GitHub’s
+in 2018. This reading explains how replication works in Postgres and
+MySQL, the durability trade-off between asynchronous, synchronous and
+quorum commit, how automated failover tools decide when and where to
+fail over, why fencing matters, and what managed services do
+differently. It draws on the PostgreSQL and Patroni documentation,
+GitHub’s post-incident analysis, <em>Designing Data-Intensive
+Applications</em>, and AWS’s Aurora paper. The earlier readings on WAL
+and crash recovery, Raft, and distributed locks are useful
+background.</p>
+<h2 id="what-replication-copies">1. What replication copies</h2>
+<p>A single-leader database replicates by shipping its changes from the
+primary to replicas. There are two broad ways to describe those
+changes.</p>
+<p><strong>Physical replication</strong> ships the write-ahead log
+itself: byte-level changes to data pages. In Postgres this is
+<strong>streaming replication</strong>: each standby connects to the
+primary, receives WAL records as they’re generated, writes them to its
+own WAL, and replays them, so the standby is a block-for-block copy of
+the primary. It replicates everything (all databases, indexes, schema
+changes) with very little overhead, and a standby can serve read-only
+queries while it replays (<strong>hot standby</strong>). The limitations
+are that replicas must run the same major version and architecture, you
+can’t replicate a subset of tables, and you can’t write to the
+replica.</p>
+<p><strong>Logical replication</strong> ships row-level changes: “insert
+this row into table T”, “update the row with primary key 42”. Postgres’s
+built-in logical replication (publications and subscriptions) and
+MySQL’s row-based binary log both work this way. Logical replication can
+go across major versions (which makes it a common upgrade path),
+replicate selected tables, and feed other systems through change data
+capture (Debezium and similar). It’s more expensive, doesn’t replicate
+schema changes automatically in Postgres, and needs care with sequences
+and conflicts.</p>
+<p>MySQL’s traditional replication is logical (binary log events, now
+usually row-based) rather than physical, and MySQL with GTIDs (global
+transaction identifiers) makes it easier to know exactly which
+transactions each replica has applied, which matters a lot during
+failover.</p>
+<p>For high availability, the important question isn’t the format; it’s
+<strong>when the primary considers a write committed relative to when
+replicas have it.</strong></p>
+<h2 id="asynchronous-synchronous-and-quorum-commit">2. Asynchronous,
+synchronous and quorum commit</h2>
+<figure class="diagram"><svg viewBox="0 0 760 380" role="img" aria-label="Asynchronous versus synchronous replication commit timelines" font-size="13"><defs><marker id="rp1121" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">When does "committed" mean "safe on two machines"?</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Same write, two replication modes. Time runs left to right.</text><text x="24" y="82" font-size="11" fill="var(--cds-text-primary)" text-anchor="start" font-weight="600">Asynchronous (default)</text><text x="24" y="109" font-size="12" font-weight="600" fill="var(--cds-text-primary)">client</text><line x1="110" y1="105" x2="736" y2="105" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4"></line><text x="24" y="149" font-size="12" font-weight="600" fill="var(--cds-text-primary)">primary</text><line x1="110" y1="145" x2="736" y2="145" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4"></line><text x="24" y="189" font-size="12" font-weight="600" fill="var(--cds-text-primary)">replica</text><line x1="110" y1="185" x2="736" y2="185" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4"></line><line x1="130" y1="108" x2="170" y2="142" stroke="var(--cds-chart-axis)" stroke-width="1.6" marker-end="url(#rp1121)"></line><text x="178" y="137" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start" >COMMIT</text><line x1="230" y1="142" x2="270" y2="108" stroke="var(--cds-chart-axis)" stroke-width="1.6" marker-end="url(#rp1121)"></line><text x="278" y="104" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start" >OK after local WAL flush</text><line x1="330" y1="148" x2="470" y2="182" stroke="var(--cds-chart-axis)" stroke-width="1.6" marker-end="url(#rp1121)"></line><text x="478" y="188" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start" >WAL arrives later</text><rect x="272" y="150" width="200" height="12" rx="3" fill="var(--cds-chart-categorical-4)" fill-opacity="0.35"></rect><text x="372" y="212" font-size="11" fill="var(--cds-chart-categorical-4)" text-anchor="middle" >primary dies here: acknowledged write lost</text><text x="24" y="232" font-size="11" fill="var(--cds-text-primary)" text-anchor="start" font-weight="600">Synchronous (wait for a standby flush)</text><text x="24" y="259" font-size="12" font-weight="600" fill="var(--cds-text-primary)">client</text><line x1="110" y1="255" x2="736" y2="255" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4"></line><text x="24" y="299" font-size="12" font-weight="600" fill="var(--cds-text-primary)">primary</text><line x1="110" y1="295" x2="736" y2="295" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4"></line><text x="24" y="339" font-size="12" font-weight="600" fill="var(--cds-text-primary)">replica</text><line x1="110" y1="335" x2="736" y2="335" stroke="var(--cds-chart-axis)" stroke-dasharray="3 4"></line><line x1="130" y1="258" x2="170" y2="292" stroke="var(--cds-chart-axis)" stroke-width="1.6" marker-end="url(#rp1121)"></line><text x="178" y="287" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start" >COMMIT</text><line x1="220" y1="298" x2="300" y2="332" stroke="var(--cds-chart-axis)" stroke-width="1.6" marker-end="url(#rp1121)"></line><text x="308" y="346" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start" >standby flushes</text><line x1="380" y1="332" x2="440" y2="298" stroke="var(--cds-chart-axis)" stroke-width="1.6" marker-end="url(#rp1121)"></line><text x="448" y="316" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start" >ack</text><line x1="470" y1="292" x2="520" y2="258" stroke="var(--cds-chart-axis)" stroke-width="1.6" marker-end="url(#rp1121)"></line><text x="528" y="254" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start" >OK: on two machines</text><rect x="180" y="300" width="290" height="10" rx="3" fill="var(--cds-chart-categorical-2)" fill-opacity="0.35"></rect><text x="540" y="302" font-size="11" fill="var(--cds-text-secondary)" text-anchor="start" >commit waits a network round trip</text><text x="24" y="372" font-size="11.5" fill="var(--cds-text-secondary)">If the only sync standby is down, writes block unless something (Patroni, quorum ANY k) changes the rule.</text></svg></figure>
+<h3 id="asynchronous-replication">Asynchronous replication</h3>
+<p>By default, both Postgres and MySQL replicate
+<strong>asynchronously</strong>. The primary flushes the commit to its
+own WAL (or binlog), acknowledges the client, and ships the change to
+replicas in the background. Replicas usually lag by milliseconds, but
+the lag can grow to seconds or minutes under heavy write load,
+long-running queries on the replica, or network trouble.</p>
+<p>The consequence: if the primary fails permanently, any writes it
+acknowledged but hadn’t yet shipped are <strong>lost</strong> when a
+replica is promoted. The amount you can lose is the replication lag at
+the moment of failure. This is the <strong>recovery point objective
+(RPO)</strong> of asynchronous replication: usually small, never
+guaranteed to be zero.</p>
+<h3 id="synchronous-replication">Synchronous replication</h3>
+<p>With <strong>synchronous replication</strong>, the primary waits for
+at least one standby to confirm it has the commit before acknowledging
+the client. In Postgres this is controlled by
+<code>synchronous_standby_names</code> together with
+<code>synchronous_commit</code>:</p>
+<ul>
+<li><code>synchronous_commit = on</code> (with standbys named): wait
+until the standby has <strong>flushed</strong> the WAL to disk.</li>
+<li><code>remote_write</code>: wait until the standby has written it to
+its OS (survives a standby Postgres crash, not a standby OS crash).</li>
+<li><code>remote_apply</code>: wait until the standby has
+<strong>replayed</strong> it, so a read on that standby immediately
+after commit sees the write.</li>
+</ul>
+<p>The cost is latency (every commit waits at least one network round
+trip, which matters a lot across regions) and availability: if the
+synchronous standby is down or unreachable, commits
+<strong>block</strong>. A two-node setup with one synchronous standby
+therefore has <em>worse</em> write availability than a single node,
+unless something changes the rule when the standby fails.</p>
+<h3 id="priority-and-quorum">Priority and quorum</h3>
+<p>Postgres lets you name several standbys and choose how many must
+confirm:</p>
+<ul>
+<li><code>FIRST 1 (s1, s2, s3)</code> is
+<strong>priority-based</strong>: wait for the highest-priority available
+standby (s1, or s2 if s1 is down, and so on).</li>
+<li><code>ANY 2 (s1, s2, s3)</code> is <strong>quorum-based</strong>:
+wait for any two of the three to confirm.</li>
+</ul>
+<p>Quorum commit is the sweet spot for many setups: with three standbys
+and <code>ANY 1</code>, every commit is on at least two machines, and
+any single standby can fail without blocking writes. MySQL’s equivalent
+is <strong>semi-synchronous replication</strong>, where the primary
+waits for at least a configured number of replicas to acknowledge
+receipt of the transaction before returning to the client, and falls
+back to asynchronous after a timeout unless configured otherwise. That
+fallback is a durability gap worth knowing about: under a network
+problem, a semi-sync setup can quietly become async.</p>
+<h3 id="what-zero-data-loss-really-requires">What “zero data loss”
+really requires</h3>
+<p>Synchronous replication only guarantees zero loss if failover
+promotes a replica that <strong>has</strong> the synchronous writes.
+Promote the wrong replica (one that was behind) and the guarantee is
+gone. The replication mode and the failover logic have to agree, which
+is why tools like Patroni manage both.</p>
+<h2 id="replication-lag-and-reading-from-replicas">3. Replication lag
+and reading from replicas</h2>
+<p>Reading from replicas spreads load, but with asynchronous
+replication, reads can be stale. The classic anomalies (DDIA chapter 5
+describes them well):</p>
+<ul>
+<li><strong>Read-your-writes violations.</strong> A user updates their
+profile, the next page load reads from a lagging replica, and their
+change appears to be gone.</li>
+<li><strong>Monotonic read violations.</strong> Two successive reads go
+to different replicas with different lag, so data appears to move
+backwards in time.</li>
+<li><strong>Consistent prefix violations.</strong> Related writes (a
+question and its answer) appear in the wrong order when they come from
+different partitions or replicas.</li>
+</ul>
+<p>Common mitigations:</p>
+<ul>
+<li><strong>Read your own writes from the primary</strong> for a short
+window after a user writes (for example, route that user’s reads to the
+primary for a few seconds, or for data they own).</li>
+<li><strong>Track positions.</strong> After a write, record the
+primary’s WAL position (LSN in Postgres, GTID in MySQL) in the session;
+route reads only to replicas that have replayed past it, or wait until
+they have. Postgres’s <code>remote_apply</code> does this at commit time
+for synchronous standbys.</li>
+<li><strong>Sticky routing</strong>: send all of a user’s reads to the
+same replica to avoid going backwards.</li>
+<li><strong>Monitor lag</strong> (<code>pg_stat_replication</code> on
+the primary shows each standby’s sent, written, flushed and replayed
+LSN; <code>replay_lag</code> gives a time estimate) and take replicas
+out of rotation when they fall behind a threshold.</li>
+</ul>
+<p>A replica running long analytical queries can also slow replication:
+Postgres must either pause replay (delaying the replica) or cancel the
+query when replay conflicts with rows it’s reading
+(<code>max_standby_streaming_delay</code>), or prevent the conflict by
+having the primary keep old rows (<code>hot_standby_feedback</code>),
+which can cause table bloat on the primary. Separate replicas for OLTP
+reads and for analytics avoid fighting over these settings.</p>
+<h2 id="failover-the-hard-part">4. Failover: the hard part</h2>
+<p>Failover means promoting a replica to primary and redirecting writes
+to it. Doing it manually is slow (minutes to hours, often at 3 a.m.);
+doing it automatically requires answering three questions correctly.</p>
+<h3 id="is-the-primary-actually-dead">Is the primary actually dead?</h3>
+<p>A primary that doesn’t respond to health checks may be crashed,
+overloaded, paused, or simply unreachable from the monitor while working
+perfectly for clients. Failure detection in distributed systems is
+fundamentally imperfect (the timeouts discussion in the resilience
+reading applies). Practical rules:</p>
+<ul>
+<li><strong>Check from several vantage points.</strong> A monitor in one
+location can be partitioned from a healthy primary. Tools like
+Orchestrator (for MySQL) check whether the <strong>replicas</strong> can
+still see the primary, not only whether the monitor can: if replicas are
+still receiving replication traffic, the primary is alive.</li>
+<li><strong>Tune timeouts to your tolerance.</strong> Fast detection
+means more false failovers; a failover on a healthy primary is itself an
+incident.</li>
+</ul>
+<h3 id="which-replica-should-take-over">Which replica should take
+over?</h3>
+<p>The best candidate is the one with the most data: the highest
+replayed (or received) position. Promoting a lagging replica loses
+everything it hadn’t received. With synchronous or quorum replication,
+the candidate must be a replica known to hold all acknowledged commits.
+Tools also consider configured priorities, data centre placement, and
+replica health. Patroni has <code>maximum_lag_on_failover</code>, the
+largest replication lag (in bytes) a replica may have and still be
+eligible.</p>
+<h3 id="how-do-you-stop-the-old-primary">How do you stop the old
+primary?</h3>
+<p>This is the question that turns failover from routine into
+catastrophic. If the old primary is still running and some clients can
+still reach it, you now have <strong>two primaries accepting
+writes</strong>: split brain. Their data diverges, and reconciling it
+later is manual, slow and error-prone.</p>
+<p>The defences, which echo the distributed locks reading:</p>
+<ul>
+<li><strong>Fencing.</strong> Make sure the old primary can’t accept
+writes before the new one does. Options include shutting it down or
+cutting its power (STONITH, “shoot the other node in the head”),
+revoking its network access, or having it demote itself.</li>
+<li><strong>Leases.</strong> The primary holds a leader lease in a
+consensus store and demotes itself to read-only if it can’t renew in
+time. As the locks reading explained, a paused process can’t notice that
+its lease expired, so this works best combined with fencing at the
+routing layer.</li>
+<li><strong>Single routing authority.</strong> Clients find the primary
+through one mechanism (a proxy, a DNS name, a virtual IP, or a service
+discovery entry) that’s updated as part of failover, so the old primary
+stops receiving traffic even if it’s alive.</li>
+</ul>
+<h2 id="patroni-failover-with-a-consensus-store">5. Patroni: failover
+with a consensus store</h2>
+<p>Patroni is the most widely used automated failover manager for
+Postgres. Its design is a good template for any leader-based system.</p>
+<ul>
+<li>Each Postgres node runs a <strong>Patroni agent</strong> that
+manages the local Postgres (start, stop, promote, demote,
+reconfigure).</li>
+<li>The agents coordinate through a <strong>distributed configuration
+store (DCS)</strong>: etcd, Consul, ZooKeeper or the Kubernetes API, all
+backed by consensus.</li>
+<li>The primary’s agent holds a <strong>leader key</strong> in the DCS
+with a time to live (<code>ttl</code>, 30 seconds by default) and renews
+it every <code>loop_wait</code> (10 seconds by default). Patroni
+requires <code>loop_wait + 2 × retry_timeout ≤ ttl</code>, so the leader
+gives up before its key can expire while it’s still retrying.</li>
+<li>If the primary’s agent <strong>can’t renew</strong> the key (it lost
+contact with the DCS), it <strong>demotes</strong> its own Postgres to a
+read-only replica. That’s self-fencing: a primary that’s cut off from
+the consensus store stops accepting writes.</li>
+<li>If the leader key <strong>expires</strong>, the healthy replicas
+race to acquire it. Only eligible replicas may try: ones within
+<code>maximum_lag_on_failover</code>, and in synchronous mode only the
+last known leader or a synchronous replica. The winner promotes
+itself.</li>
+<li>Clients find the primary through HAProxy or PgBouncer checking
+Patroni’s REST API, through a Kubernetes service pointed at the leader
+pod, or through a callback that updates DNS or a virtual IP.</li>
+</ul>
+<p>Patroni’s <strong><code>synchronous_mode</code></strong> ties
+replication to failover. Patroni manages
+<code>synchronous_standby_names</code> itself, choosing healthy replicas
+as synchronous standbys, and only a synchronous replica may be promoted.
+That gives zero loss of acknowledged commits at failover, at the cost of
+write availability when no synchronous replica is healthy (Patroni can
+be configured either to keep blocking or to fall back). Newer versions
+also support a <strong>quorum</strong> mode based on
+<code>ANY k</code>.</p>
+<p>The DCS is what makes split brain unlikely: leadership is a single
+key in a linearisable store, and a primary that can’t see the store
+demotes itself. The remaining risk is the lease timing window, and the
+old primary still needs to be kept away from clients by the routing
+layer.</p>
+<h2 id="github-october-2018-when-failover-is-correct-and-still-wrong">6.
+GitHub, October 2018: when failover is correct and still wrong</h2>
+<p>GitHub’s post-incident analysis of 21 October 2018 is one of the most
+instructive published failover incidents.</p>
+<p>During routine maintenance replacing failing optical equipment, the
+connection between GitHub’s US East Coast network hub and its primary
+East Coast data centre was lost. Connectivity was restored in <strong>43
+seconds</strong>. In that window, GitHub’s MySQL failover tool,
+Orchestrator (which itself uses Raft for its own leadership), behaved
+exactly as designed: the Orchestrator nodes in the US West Coast data
+centre and in a public cloud region formed a quorum, judged the East
+Coast primaries unreachable, and <strong>failed over database clusters
+to primaries on the West Coast</strong>.</p>
+<p>When connectivity returned:</p>
+<ul>
+<li>The <strong>West Coast primaries</strong> were now taking writes,
+while the East Coast primaries held <strong>a few seconds of
+writes</strong> that had never replicated west (one of the busiest
+clusters had 954 writes in the affected window).</li>
+<li>The application tier, which was mostly on the East Coast, now had to
+cross the continent for every database write. The added latency made
+many applications unable to function.</li>
+<li><strong>Failing back</strong> wasn’t safe: both sides had writes the
+other lacked.</li>
+</ul>
+<p>GitHub chose to prioritise data integrity: they deliberately degraded
+the site, restored the East Coast databases from backups, replayed the
+West Coast writes to catch up, and only then failed back, reconciling
+the orphaned East Coast writes manually afterwards. The site was
+degraded for <strong>24 hours and 11 minutes</strong>.</p>
+<p>Lessons GitHub and others drew:</p>
+<ul>
+<li><strong>A correct failover can be the wrong decision.</strong>
+Failing over across regions for a 43-second blip turned a brief
+partition into a day-long incident. Many teams now require cross-region
+failover to be a deliberate, human-approved action, or allow automated
+failover only within a region.</li>
+<li><strong>Topology must match application placement.</strong> A
+database primary far from its applications can be as unavailable as a
+dead one.</li>
+<li><strong>Asynchronous replication plus automatic failover implies
+possible data loss.</strong> If you choose that combination, plan how to
+find and reconcile orphaned writes.</li>
+<li><strong>Restores take time at scale.</strong> Restoring
+multi-terabyte databases took hours, which dominated the incident’s
+length. Backup restore speed is part of your failover plan.</li>
+</ul>
+<h2 id="bringing-the-old-primary-back">7. Bringing the old primary
+back</h2>
+<p>After a failover, the old primary may have <strong>diverged</strong>:
+it applied writes (or at least WAL) that the new primary never received.
+It can’t simply start replicating from the new primary, because its
+history forked.</p>
+<p>Options in Postgres:</p>
+<ul>
+<li><strong>Rebuild it from scratch</strong> with a fresh base backup
+(<code>pg_basebackup</code>) from the new primary. Simple and safe, but
+slow for large databases.</li>
+<li><strong><code>pg_rewind</code></strong> compares the old primary’s
+data directory with the new primary’s, finds the point where their
+timelines diverged, and copies back only the blocks that changed since
+then, making the old primary a valid replica of the new one much faster.
+It requires <code>wal_log_hints</code> or data checksums to be enabled,
+which is worth turning on in advance.</li>
+<li><strong>Timelines</strong> help here: each promotion starts a new
+Postgres timeline ID, and WAL files record which timeline they belong
+to, so a replica can follow the history across failovers and the system
+can detect forks.</li>
+</ul>
+<p>Patroni can run <code>pg_rewind</code> automatically when a former
+primary rejoins. Whatever the method, the writes that existed only on
+the old primary are discarded from the database. If they mattered, they
+need to be extracted and reconciled before the rewind, which is why
+capturing them (from the old WAL or logs) is part of a careful
+runbook.</p>
+<h2 id="how-managed-and-cloud-native-databases-change-things">8. How
+managed and cloud-native databases change things</h2>
+<p>Managed services hide much of this, but the trade-offs don’t
+disappear.</p>
+<ul>
+<li><strong>Amazon RDS Multi-AZ</strong> (classic) keeps a synchronous
+standby in another Availability Zone using storage-level replication,
+and fails over automatically, typically in one to two minutes, by
+updating the instance’s DNS name. The standby isn’t readable; it exists
+only for failover.</li>
+<li><strong>Amazon Aurora</strong> separates compute from storage. Its
+SIGMOD 2017 paper describes a storage layer that keeps six copies of the
+data across three Availability Zones and acknowledges a write once four
+of the six have it. Replicas share the same storage volume, so they
+don’t replay a separate copy of the data, and replication lag is
+typically short. Failover promotes a replica that attaches to the same
+volume, with no data loss for acknowledged writes, and is usually faster
+than with separate storage.</li>
+<li><strong>Distributed SQL databases</strong> (Spanner, CockroachDB,
+YugabyteDB) replicate every range with consensus (the Raft and Spanner
+readings covered this), so a leader failure is handled per range
+automatically, without a separate failover tool, at the cost of higher
+write latency.</li>
+</ul>
+<p>Even with these, application-level concerns remain: clients must
+reconnect and retry (connection pools must notice the DNS change, which
+many cache for too long), in-flight transactions are lost and must be
+retried idempotently, and read-your-writes on readable replicas is still
+the application’s problem.</p>
+<h2 id="a-checklist-for-your-own-setup">9. A checklist for your own
+setup</h2>
+<ul>
+<li><strong>Know your RPO and RTO</strong> for each database, in
+numbers, and pick the replication mode that matches. “Zero data loss”
+means synchronous or quorum commit and failover rules that respect
+it.</li>
+<li><strong>Prefer quorum commit</strong> (<code>ANY k</code>) over a
+single synchronous standby, so one replica failure doesn’t block
+writes.</li>
+<li><strong>Automate failover within a region</strong> with a
+consensus-backed tool (Patroni, Orchestrator, a managed service). Make
+<strong>cross-region failover</strong> a deliberate decision unless
+you’ve tested the application’s behaviour on the other side.</li>
+<li><strong>Fence the old primary</strong> through a single routing
+authority and self-demotion; test that a partitioned primary stops
+accepting writes.</li>
+<li><strong>Monitor replication lag</strong> and alert on it; take
+lagging replicas out of read rotation.</li>
+<li><strong>Handle stale reads</strong> where users would notice:
+read-your-writes routing or LSN/GTID waits.</li>
+<li><strong>Enable what rejoining needs</strong>
+(<code>wal_log_hints</code> or checksums for <code>pg_rewind</code>) and
+keep runbooks for reconciling orphaned writes.</li>
+<li><strong>Practise.</strong> Run failovers regularly in staging and,
+carefully, in production. Measure how long clients take to reconnect,
+including DNS and connection pool caching.</li>
+<li><strong>Test restores.</strong> Backup restore speed sets a floor on
+your worst-case recovery time.</li>
+</ul>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>Replication ships changes <strong>physically</strong> (WAL blocks:
+whole-cluster copies, same version) or <strong>logically</strong> (row
+changes: selective, cross-version, CDC).</li>
+<li><strong>Asynchronous</strong> commit is fast but can lose the writes
+in flight at failure. <strong>Synchronous</strong> commit waits for a
+standby and blocks if it’s down. <strong>Quorum</strong> commit
+(<code>ANY k</code>) gets zero loss without a single point of
+blocking.</li>
+<li><strong>Replication lag</strong> causes read-your-writes and
+monotonic-read anomalies; route by LSN/GTID or read recent writes from
+the primary.</li>
+<li>Automated failover must answer <strong>is it dead, who’s most up to
+date, and how do we stop the old primary</strong>. Getting the last one
+wrong causes <strong>split brain</strong>.</li>
+<li><strong>Patroni</strong> uses a leader key with a TTL in a consensus
+store, self-demotion on lost contact, lag limits, and synchronous mode
+to tie durability to promotion.</li>
+<li><strong>GitHub 2018</strong>: a 43-second partition triggered a
+correct cross-region failover that led to 24 hours and 11 minutes of
+degradation. Topology, latency and orphaned writes matter as much as the
+failover mechanism.</li>
+<li>After failover, a diverged old primary must be <strong>rewound or
+rebuilt</strong>, discarding writes that only it had.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>For your main database, what’s the RPO today in practice? What would
+you have to change to make it zero, and what would it cost in latency
+and availability?</li>
+<li>You run a primary and two replicas with
+<code>synchronous_standby_names = 'FIRST 1 (r1, r2)'</code>. Walk
+through what happens when r1 fails, then when both fail. How would
+<code>ANY 1 (r1, r2)</code> differ?</li>
+<li>A user updates their settings and immediately sees the old values.
+Design a fix that doesn’t send all reads to the primary.</li>
+<li>In the GitHub incident, should Orchestrator have been allowed to
+fail over across regions automatically? What rule would you write
+instead?</li>
+<li>Your monitoring host loses network access to a healthy primary for
+20 seconds. What prevents an unnecessary failover in your setup? What
+prevents split brain if one happens anyway?</li>
+<li>After a failover, the old primary had 300 writes the new one never
+received. How would you find them, and how would you decide what to do
+with them?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>GitHub, <a
+href="https://github.blog/news-insights/company-news/oct21-post-incident-analysis/">“October
+21 post-incident analysis”</a>, October 2018</li>
+<li><a
+href="https://www.postgresql.org/docs/current/runtime-config-replication.html">PostgreSQL
+documentation: Replication settings</a>
+(<code>synchronous_standby_names</code> with FIRST and ANY), High
+Availability, Load Balancing and Replication chapter,
+<code>pg_stat_replication</code>, <code>pg_rewind</code>, logical
+replication</li>
+<li><a
+href="https://patroni.readthedocs.io/en/latest/dynamic_configuration.html">Patroni
+documentation: dynamic configuration</a> (ttl, loop_wait, retry_timeout,
+maximum_lag_on_failover, synchronous_mode) and replication modes</li>
+<li>MySQL documentation: GTIDs, semi-synchronous replication;
+Orchestrator documentation (failure detection via replicas, Raft
+mode)</li>
+<li>Martin Kleppmann, <em>Designing Data-Intensive Applications</em>
+(O’Reilly, 2017), ch. 5 “Replication”</li>
+<li>A. Verbitski et al., “Amazon Aurora: Design Considerations for High
+Throughput Cloud-Native Relational Databases,” SIGMOD 2017; Amazon RDS
+Multi-AZ documentation</li>
+<li>Earlier readings on WAL and crash recovery, Raft consensus,
+distributed locks and leases, and resilience patterns on this site</li>
+</ul>
+<p><em>Note on verification: the GitHub incident details, Patroni’s
+defaults and synchronous mode, and Postgres’s FIRST/ANY syntax were read
+from the linked pages today. MySQL semi-sync fallback behaviour,
+Orchestrator’s detection approach, <code>pg_rewind</code> prerequisites,
+RDS Multi-AZ failover times and the Aurora quorum numbers come from
+documentation and the Aurora paper as I know them and weren’t re-fetched
+today.</em></p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/databases.html">Databases</a><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a></div>
+          <div class="daynav"><a href="/reading/software-supply-chain.html"><div class="kicker">← Older · Nov 20</div><div class="t">Software supply chain security: from xz to Shai-Hulud, and what actually helps</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
