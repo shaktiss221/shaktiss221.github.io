@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>When configuration takes down the internet: Cloudflare 2019 and 2025, and how to ship config safely · The Daily Commit</title>
+  <meta name="description" content="A case study of two Cloudflare outages caused by configuration, not code, compared with CrowdStrike 2024 and Google Cloud 2025. Covers what happened on 18 November 2025 (a permission change, a doubled feature file and a panicking proxy) and on 2 July 2019 (a backtracking regex pushed globally), why config and data pipelines bypass the safety nets built for code, and the practices that help (validate generated config like user input, stage every global change, fail safe, kill switches, and keep your incident tooling independent).">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>When configuration takes down the internet: Cloudflare 2019 and 2025, and how to ship config safely</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>15 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#why-configuration-is-so-dangerous">Why configuration is so
+dangerous</a><a href="#cloudflare-2-july-2019-one-regex-every-cpu">Cloudflare, 2
+July 2019: one regex, every CPU</a><a href="#cloudflare-18-november-2025-a-doubled-feature-file">Cloudflare, 18 November 2025: a doubled feature file</a><a href="#the-same-pattern-elsewhere">The same pattern elsewhere</a><a href="#the-common-anatomy">The common anatomy</a><a href="#practices-that-help">Practices that help</a><a href="#how-this-connects-to-resilience-patterns">How this connects
+to resilience patterns</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 15 min left</div>
+      </nav>
+      <article class="article" data-slug="config-changes-outages" data-minutes="15">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/case-study.html">Case Study</a> · November 22, 2026 · 15 min</div>
+        <h1>When configuration takes down the internet: Cloudflare 2019 and 2025, and how to ship config safely</h1>
+        <p class="dek">A case study of two Cloudflare outages caused by configuration, not code, compared with CrowdStrike 2024 and Google Cloud 2025. Covers what happened on 18 November 2025 (a permission change, a doubled feature file and a panicking proxy) and on 2 July 2019 (a backtracking regex pushed globally), why config and data pipelines bypass the safety nets built for code, and the practices that help (validate generated config like user input, stage every global change, fail safe, kill switches, and keep your incident tooling independent).</p>
+<p>Most large outages don’t start with a bad code deploy. Code deploys
+go through review, tests, canaries and staged rollouts. They start with
+something that <em>isn’t treated as a deploy</em>: a configuration
+change, a rules update, a feature file regenerated by a pipeline, a
+permission tweak in a database. These changes often take effect
+everywhere within seconds, through fast paths built specifically so that
+they can. Cloudflare has published two unusually detailed post-mortems
+of exactly this kind. On 2 July 2019, a single regular expression in a
+firewall rule pushed to every server at once used up all their CPU for
+27 minutes. On 18 November 2025, a database permission change caused an
+automatically generated “feature file” to double in size, and
+Cloudflare’s core proxy crashed on it across the network for about three
+hours, with full recovery taking nearly six. This reading walks through
+both incidents, compares them with CrowdStrike’s July 2024 crash and
+Google Cloud’s June 2025 outage, and draws out the engineering practices
+that make configuration and data changes as safe as code. The earlier
+reading on progressive delivery covered staged rollouts of code; this
+one is about everything that ships <em>around</em> them.</p>
+<h2 id="why-configuration-is-so-dangerous">1. Why configuration is so
+dangerous</h2>
+<p>Configuration is anything that changes a system’s behaviour without
+changing its binary: feature flags, routing rules, firewall rules, rate
+limits, allow lists, ML model weights, feature lists, quota policies,
+DNS records. Several properties make it riskier than code in
+practice:</p>
+<ul>
+<li><strong>It’s designed to be fast.</strong> The point of a firewall
+rules pipeline is to block a new attack within seconds everywhere. The
+point of a feature-flag system is to change behaviour without a deploy.
+Speed and global reach are the features, and they’re also the blast
+radius.</li>
+<li><strong>It skips the code pipeline.</strong> Code changes get unit
+tests, integration tests, canaries and gradual rollout. Config changes
+often get a schema check, if that.</li>
+<li><strong>It’s often generated, not written.</strong> Many “config
+files” are produced by other systems: a job queries a database and emits
+a feature list, a pipeline compiles rules, a service publishes a policy.
+A change upstream (to the data, the query, or the permissions behind it)
+changes the output with nobody reviewing the output itself.</li>
+<li><strong>It’s trusted.</strong> Code that parses user input is
+defensive. Code that loads the company’s own config files usually isn’t,
+because “we generated it, so it’s valid”.</li>
+<li><strong>It’s shared.</strong> One config file is read by every
+server, so one bad value hits everything at once.</li>
+</ul>
+<p>Google’s SRE writing and Facebook’s paper on its configuration system
+(Tang et al., “Holistic Configuration Management at Facebook”, SOSP
+2015) both make the same point: config changes are a major source of
+production incidents, and they deserve the same rigour as code,
+including review, automated validation, canarying and gradual
+rollout.</p>
+<h2 id="cloudflare-2-july-2019-one-regex-every-cpu">2. Cloudflare, 2
+July 2019: one regex, every CPU</h2>
+<h3 id="what-happened">What happened</h3>
+<p>Cloudflare’s Web Application Firewall (WAF) inspects HTTP requests
+using managed rules, many of them regular expressions, and the WAF rules
+pipeline was designed to push new rules to the whole network quickly so
+that emerging attacks could be blocked fast.</p>
+<p>At 13:42 UTC an engineer deployed an update to WAF rules. One new
+rule contained a regular expression that, simplified, looked like
+<code>.*(?:.*=.*)</code>. Two <code>.*</code> patterns in sequence force
+a backtracking regex engine to try a huge number of ways of splitting
+the input when no match is found. Cloudflare’s write-up shows how fast
+the step count grows with input length: thousands of steps for a
+20-character string, and far more for realistic request sizes.</p>
+<p>The rule was meant to run in “simulate” (log-only) mode, but it was
+still evaluated against live traffic, so its cost was paid on every
+request. Because the WAF deployment process allowed global pushes, the
+rule reached every server at once. CPU usage on every core handling HTTP
+and HTTPS traffic <strong>spiked to nearly 100%</strong>, and
+Cloudflare’s proxies started returning 502 errors across the
+network.</p>
+<p>Cloudflare’s engineers used a <strong>global kill switch</strong> to
+disable the WAF at 14:07; traffic and CPU were back to normal by 14:09.
+The outage lasted <strong>27 minutes</strong>.</p>
+<h3 id="what-made-it-worse">What made it worse</h3>
+<p>The post-mortem was frank about contributing factors:</p>
+<ul>
+<li><strong>A CPU protection had been removed.</strong> The WAF had
+previously had a safeguard against excessive regex CPU use; it had been
+removed weeks earlier during a refactor and not replaced.</li>
+<li><strong>The regex engine</strong> (a backtracking engine) didn’t
+guarantee linear-time matching.</li>
+<li><strong>Global deployment was allowed</strong> for WAF rules, by
+design, with no staged rollout.</li>
+<li><strong>Incident tooling depended on the failing system.</strong>
+Access to internal dashboards and tools went through Cloudflare’s own
+network, which made it harder to respond.</li>
+</ul>
+<h3 id="remediation">Remediation</h3>
+<p>Cloudflare’s listed fixes became a template for config safety:</p>
+<ul>
+<li>Re-introduce CPU protection and review all of the thousands of
+existing managed WAF rules for backtracking risk.</li>
+<li>Add <strong>performance profiling</strong> of rules to the test
+suite.</li>
+<li>Switch to a regex engine with <strong>linear-time
+guarantees</strong> (Rust’s <code>regex</code> crate or RE2), which
+don’t backtrack and so can’t blow up this way.</li>
+<li>Change the procedure so WAF rule changes roll out <strong>in
+stages</strong>, like code, with global emergency pushes reserved for
+active attacks.</li>
+<li>Make sure dashboards and APIs can be reached even if the edge is
+down.</li>
+</ul>
+<p>The regex engine change is the deepest fix: it removed an entire
+<em>class</em> of failure rather than catching one instance of it.</p>
+<h2 id="cloudflare-18-november-2025-a-doubled-feature-file">3.
+Cloudflare, 18 November 2025: a doubled feature file</h2>
+<h3 id="what-happened-1">What happened</h3>
+<p>Cloudflare’s <strong>Bot Management</strong> system scores each
+request on how likely it is to come from a bot, using a machine-learning
+model. The model’s inputs (“features”) are described in a
+<strong>feature file</strong> that’s regenerated every few minutes by a
+query against Cloudflare’s ClickHouse analytics database and pushed to
+every machine in the network, so the model can adapt quickly to new bot
+behaviour.</p>
+<figure class="diagram"><svg viewBox="0 0 760 330" role="img" aria-label="Chain of events in the Cloudflare outage of 18 November 2025" font-size="13"><defs><marker id="cf1122" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">A safe-looking change, amplified by a config pipeline</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Cloudflare, 18 November 2025. Each step was reasonable on its own.</text><rect x="24" y="76" width="132" height="56" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="90" y="100" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">DB permission</text><text x="90" y="118" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">change, 11:05</text><rect x="170" y="76" width="132" height="56" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="236" y="100" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">query returns</text><text x="236" y="118" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">duplicate rows</text><line x1="156" y1="104" x2="169" y2="104" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#cf1122)"></line><rect x="316" y="76" width="132" height="56" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="382" y="100" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">feature file</text><text x="382" y="118" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">doubles in size</text><line x1="302" y1="104" x2="315" y2="104" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#cf1122)"></line><rect x="462" y="76" width="132" height="56" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="528" y="100" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">pushed to every</text><text x="528" y="118" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">machine, every 5 min</text><line x1="448" y1="104" x2="461" y2="104" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#cf1122)"></line><rect x="608" y="76" width="132" height="56" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25"></rect><text x="674" y="100" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">proxy hits 200</text><text x="674" y="118" text-anchor="middle" font-size="11.5" fill="var(--cds-text-secondary)">limit, panics</text><line x1="594" y1="104" x2="607" y2="104" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#cf1122)"></line><line x1="60" y1="210" x2="720" y2="210" stroke="var(--cds-chart-axis)" stroke-width="1.5"></line><circle cx="68" cy="210" r="5" fill="var(--cds-chart-categorical-4)"></circle><text x="82" y="196" text-anchor="end" font-size="12" font-weight="600" fill="var(--cds-text-primary)">11:05</text><text x="82" y="180" text-anchor="end" font-size="11" fill="var(--cds-text-secondary)">change</text><circle cx="95" cy="210" r="5" fill="var(--cds-chart-categorical-4)"></circle><text x="89" y="232" text-anchor="start" font-size="12" font-weight="600" fill="var(--cds-text-primary)">11:20</text><text x="89" y="248" text-anchor="start" font-size="11" fill="var(--cds-text-secondary)">errors begin</text><circle cx="429" cy="210" r="5" fill="var(--cds-chart-categorical-4)"></circle><text x="429" y="196" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">14:30</text><text x="429" y="232" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">core traffic back</text><circle cx="704" cy="210" r="5" fill="var(--cds-chart-categorical-4)"></circle><text x="704" y="196" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">17:06</text><text x="704" y="232" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">fully recovered</text><text x="24" y="168" font-size="11.5" fill="var(--cds-text-secondary)">Timeline (UTC). Good and bad files alternated every five minutes, so errors came and went.</text><text x="24" y="282" font-size="11.5" fill="var(--cds-text-secondary)">The file was generated internally, so it was trusted; the proxy treated "too many features" as impossible.</text><text x="24" y="302" font-size="11.5" fill="var(--cds-text-secondary)">Fix themes: validate internal config like user input, kill switches, and fail safe instead of panicking.</text></svg></figure>
+<p>The chain of events, from Cloudflare’s post-mortem:</p>
+<ol type="1">
+<li><strong>A database permission change.</strong> At 11:05 UTC, a
+change to ClickHouse permissions was deployed as part of an effort to
+make access more explicit. After the change, users could see metadata
+for tables in an additional underlying database (<code>r0</code>) that
+had previously been hidden from them.</li>
+<li><strong>The query returned duplicates.</strong> The query that
+builds the feature file read column metadata without filtering by
+database name. With the extra visibility, it returned each feature’s
+columns twice.</li>
+<li><strong>The feature file doubled in size.</strong> The file now
+listed far more features than usual.</li>
+<li><strong>It was pushed everywhere.</strong> The new file propagated
+to every machine as designed.</li>
+<li><strong>The proxy panicked.</strong> Cloudflare’s core proxy
+preallocates memory for Bot Management features and enforces a
+<strong>limit of 200 features</strong> (normal usage was around 60). The
+doubled file exceeded the limit. In the newer Rust-based proxy (FL2),
+that error reached an <code>unwrap()</code> on an <code>Err</code>
+value, which panics, so requests that used Bot Management failed with
+HTTP 5xx errors. Customers on the older proxy (FL) didn’t get errors,
+but every request got a bot score of zero, which broke rules that
+blocked bots.</li>
+</ol>
+<p>Network-wide failures began at about <strong>11:20 UTC</strong>. Core
+traffic was largely flowing again by <strong>14:30</strong>, and
+everything was fully restored by <strong>17:06</strong>.</p>
+<h3 id="why-it-was-hard-to-diagnose">Why it was hard to diagnose</h3>
+<p>Two things misled the responders:</p>
+<ul>
+<li><strong>The errors came and went.</strong> The ClickHouse cluster
+was being updated node by node, so the query that generated the feature
+file sometimes ran on an updated node (producing a bad file) and
+sometimes on an old one (producing a good file). Every five minutes the
+network got either a good or a bad file, so the system kept recovering
+and failing again. That pattern looks much more like an attack than like
+a bad deploy.</li>
+<li><strong>Cloudflare’s status page went down at the same
+time.</strong> It’s hosted independently of Cloudflare’s infrastructure,
+and its failure was a coincidence, but together with the fluctuating
+errors (and a run of record-setting DDoS attacks in the preceding
+weeks), it led the team to suspect a massive attack at first.</li>
+</ul>
+<p>Once the feature file was identified, the team stopped the generation
+and propagation of new files, manually inserted a known-good file into
+the distribution queue, and restarted the proxy fleet. Many downstream
+services (Workers KV, Access, the dashboard’s login with Turnstile)
+depended on the core proxy and recovered in turn.</p>
+<h3 id="remediation-1">Remediation</h3>
+<p>Cloudflare listed these themes:</p>
+<ul>
+<li><strong>Harden ingestion of Cloudflare-generated configuration files
+the same way as user-generated input.</strong> In other words, stop
+trusting internal data just because it’s internal.</li>
+<li><strong>Add more global kill switches</strong> for features, so a
+misbehaving module can be turned off everywhere quickly.</li>
+<li><strong>Stop core dumps and error reporting from overwhelming system
+resources,</strong> which had added to the load during the
+incident.</li>
+<li><strong>Review failure modes for error conditions across all core
+proxy modules.</strong></li>
+</ul>
+<h2 id="the-same-pattern-elsewhere">4. The same pattern elsewhere</h2>
+<h3 id="crowdstrike-july-2024">CrowdStrike, July 2024</h3>
+<p>CrowdStrike’s Falcon sensor runs inside the Windows kernel and
+receives <strong>Rapid Response Content</strong>, configuration-like
+updates that tell the sensor what behaviours to detect, separately from
+sensor code releases and much more frequently. According to
+CrowdStrike’s root cause analysis, a template type added earlier in 2024
+defined <strong>21 input fields</strong>, but the integration code that
+invoked it supplied only <strong>20 values</strong>. On 19 July 2024,
+two new content instances used the 21st field. The sensor’s content
+interpreter read beyond the end of its input array, and because it runs
+in the kernel, the out-of-bounds read crashed Windows. Microsoft
+estimated that about <strong>8.5 million Windows devices</strong> were
+affected, less than 1% of all Windows machines but concentrated in
+airlines, hospitals, banks and broadcasters. Many machines needed manual
+intervention to recover.</p>
+<p>The parallels with Cloudflare 2025 are striking: a content/config
+channel designed for fast global delivery, a mismatch between what the
+data contained and what the consuming code expected (21 vs 20 fields;
+more than 200 features), validation that trusted the data, and a crash
+rather than a graceful fallback. The progressive delivery reading
+covered CrowdStrike’s subsequent move to staged content deployment.</p>
+<h3 id="google-cloud-june-2025">Google Cloud, June 2025</h3>
+<p>On 12 June 2025, a large Google Cloud outage affected many products
+for several hours. Google’s incident report described a new feature in
+<strong>Service Control</strong>, the system that checks API requests
+against quota and policy, that had been rolled out region by region but
+whose new code path wasn’t protected by a feature flag. When a policy
+change containing unintended blank fields was written to the globally
+replicated policy data store, it reached every region within seconds;
+the new code path hit a null pointer on the blank fields and crashed in
+a loop everywhere. Recovery in the largest region took longer because
+restarting tasks overloaded the infrastructure they depended on.</p>
+<p>Again: code rolled out carefully, but <strong>data</strong>
+replicated globally in seconds and exercised an untested path, with no
+flag to turn it off and no graceful handling of unexpected input.</p>
+<h2 id="the-common-anatomy">5. The common anatomy</h2>
+<p>Put side by side, these incidents share a structure:</p>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th></th>
+<th>Trigger</th>
+<th>Fast global path</th>
+<th>Unvalidated assumption</th>
+<th>Failure mode</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Cloudflare 2019</td>
+<td>new WAF rule</td>
+<td>WAF rules pushed to all servers at once</td>
+<td>regexes are cheap</td>
+<td>CPU exhaustion</td>
+</tr>
+<tr class="even">
+<td>CrowdStrike 2024</td>
+<td>new detection content</td>
+<td>Rapid Response Content to all sensors</td>
+<td>input has the expected field count</td>
+<td>kernel crash</td>
+</tr>
+<tr class="odd">
+<td>Google Cloud 2025</td>
+<td>policy data with blank fields</td>
+<td>globally replicated policy store</td>
+<td>fields are populated</td>
+<td>null-pointer crash loop</td>
+</tr>
+<tr class="even">
+<td>Cloudflare 2025</td>
+<td>DB permission change</td>
+<td>feature file regenerated and pushed every few minutes</td>
+<td>feature count stays under 200</td>
+<td>proxy panic</td>
+</tr>
+</tbody>
+</table>
+<p>Four lessons fall out.</p>
+<ol type="1">
+<li><strong>The dangerous change wasn’t recognised as a deploy.</strong>
+A rule update, a content file, a policy row, a permissions change: none
+went through the staged rollout that code would have.</li>
+<li><strong>Global propagation was fast by design</strong>, so there was
+no window for canaries to catch the problem.</li>
+<li><strong>The consuming code trusted the data.</strong> A limit, a
+field count or a non-null assumption was enforced by crashing.</li>
+<li><strong>Recovery needed a separate lever</strong> (a kill switch, a
+known-good file, a manual fix), and how quickly it could be pulled
+determined the outage length.</li>
+</ol>
+<h2 id="practices-that-help">6. Practices that help</h2>
+<h3 id="treat-config-and-data-as-deploys">Treat config and data as
+deploys</h3>
+<ul>
+<li><strong>Version and review</strong> configuration like code. Store
+it in a repository or a system with history, diffs and approvals.</li>
+<li><strong>Stage every change</strong>, including generated ones: a
+canary set of machines, then a region, then the world, with automated
+health checks between stages. Emergency fast paths should exist but
+require an explicit, logged decision. After 2019, Cloudflare reserved
+global WAF pushes for active attacks.</li>
+<li><strong>Diff generated outputs.</strong> When a pipeline regenerates
+a file, compare the new output with the last one: size, number of
+entries, distribution of values. A feature file that doubles in size, or
+a rule set whose evaluation cost jumps, should stop the pipeline and
+page someone rather than ship. Facebook’s Configerator, for example,
+runs validators and canary tests on config changes before they’re
+distributed.</li>
+<li><strong>Know your config’s upstream dependencies.</strong> The
+Cloudflare 2025 trigger was a permission change in a database that a
+config generator read from. Map which data sources feed generated
+configs, and treat changes to those sources as changes to the
+configs.</li>
+</ul>
+<h3 id="make-consumers-defensive">Make consumers defensive</h3>
+<ul>
+<li><strong>Validate internal input like external input.</strong> Check
+schema, sizes, counts and ranges on load. Cloudflare’s main remediation
+is exactly this.</li>
+<li><strong>Fail safe, not fatal.</strong> If a new config is invalid,
+keep running with the <strong>last known good</strong> version and
+alert, instead of crashing. Most systems that load config periodically
+can do this, and it turns “global outage” into “stale config for a
+while”. The equivalent in code is not using <code>unwrap()</code>,
+<code>assert</code> or unchecked array access on paths fed by external
+data.</li>
+<li><strong>Remove whole classes of failure.</strong> Linear-time regex
+engines, memory-safe parsers, bounded interpreters, and strict schemas
+with generated parsers eliminate categories of bug instead of catching
+instances.</li>
+<li><strong>Bound resource use.</strong> Per-request CPU limits,
+timeouts on rule evaluation, and size limits enforced with clear errors
+(not panics) contain the damage of a bad rule.</li>
+</ul>
+<h3 id="prepare-the-escape-hatches">Prepare the escape hatches</h3>
+<ul>
+<li><strong>Kill switches</strong> for each major feature or module,
+reachable globally within seconds, tested regularly. Both Cloudflare
+incidents were ended by switching something off.</li>
+<li><strong>Pinning and rollback for generated config:</strong> the
+ability to freeze the pipeline and push a known-good file. In 2025 this
+was the critical recovery step.</li>
+<li><strong>Feature flags around new code paths</strong> that consume
+new kinds of data, as Google’s report emphasised, so a crash can be
+avoided by turning the path off.</li>
+<li><strong>Independent incident tooling.</strong> Dashboards, status
+pages, chat, paging and access to production must not depend on the
+system that’s failing. Cloudflare’s 2019 incident was slowed by tools
+that went through its own edge.</li>
+</ul>
+<h3 id="learn-from-the-near-misses">Learn from the near misses</h3>
+<ul>
+<li><strong>Watch for flapping.</strong> An error rate that oscillates
+on a regular cycle points to something periodic: a cron job, a pipeline
+cadence, a rolling update. In 2025 the five-minute cycle was the clue
+that the problem was the feature file.</li>
+<li><strong>Write down “impossible” states.</strong> The 200-feature
+limit was reasonable, but nothing monitored how close the system was to
+it. Alert on approaching limits, not just on crossing them.</li>
+</ul>
+<h2 id="how-this-connects-to-resilience-patterns">7. How this connects
+to resilience patterns</h2>
+<p>The resilience reading covered timeouts, retries and circuit breakers
+for calls between services. Config safety is the same philosophy applied
+to a different input:</p>
+<ul>
+<li><strong>Bulkheads and cells</strong> limit blast radius. If
+configuration is rolled out cell by cell, a bad file breaks one cell,
+not the world.</li>
+<li><strong>Graceful degradation</strong> (serving with a stale config,
+or with a feature disabled) beats failing closed for most features.
+Whether a security feature should fail open or closed is a deliberate
+product decision, worth making in advance rather than during an
+incident.</li>
+<li><strong>Metastable failures</strong>: restarting thousands of
+crashed processes at once can overload shared dependencies, which
+happened in the Google Cloud recovery. Staggered restarts and backoff
+apply to recovery too.</li>
+</ul>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li><strong>Configuration, rules, content and generated data are
+deploys,</strong> and they cause many of the largest outages precisely
+because they skip the safeguards built for code.</li>
+<li><strong>Cloudflare 2019:</strong> a backtracking regex in a WAF
+rule, pushed globally at once, saturated CPU network-wide for 27
+minutes. Fixes: linear-time regex engines, rule profiling, staged
+rollouts.</li>
+<li><strong>Cloudflare 2025:</strong> a ClickHouse permission change
+made a feature-file query return duplicates; the file exceeded the
+proxy’s 200-feature limit and the proxy panicked. Errors began around
+11:20 UTC, with full recovery at 17:06. Fixes: treat internal config
+like user input, more kill switches, review failure modes.</li>
+<li><strong>CrowdStrike 2024</strong> (21 vs 20 fields, about 8.5
+million devices) and <strong>Google Cloud 2025</strong> (blank policy
+fields, no feature flag) follow the same pattern.</li>
+<li>Practices that help: <strong>stage all global changes, diff
+generated outputs, validate on load, fall back to last known good, build
+kill switches, flag new code paths, and keep incident tooling
+independent.</strong></li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>List the ways production behaviour can change in your systems
+<em>without</em> a code deploy. Which of them roll out in stages, and
+which reach everything at once?</li>
+<li>Do you have any generated config files (feature lists, allow lists,
+routing tables)? What would happen if one doubled in size or came out
+empty tomorrow?</li>
+<li>Your service loads a config file that fails validation. Should it
+crash, keep the old config, or run with defaults? Does the answer differ
+for a security feature?</li>
+<li>Cloudflare’s errors flapped every five minutes. What other periodic
+signals in your systems could mislead an incident response, and how
+would you spot them?</li>
+<li>Which of your incident tools (dashboards, status page, chat, deploy
+system) would still work if your main production platform were
+down?</li>
+<li>Where in your code does an “impossible” condition from data cause a
+panic, an assert failure or an unchecked access? How would you find
+those places?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Cloudflare, <a
+href="https://blog.cloudflare.com/18-november-2025-outage/">“Cloudflare
+outage on November 18, 2025”</a></li>
+<li>Cloudflare, <a
+href="https://blog.cloudflare.com/details-of-the-cloudflare-outage-on-july-2-2019/">“Details
+of the Cloudflare outage on July 2, 2019”</a></li>
+<li>CrowdStrike, <a
+href="https://www.crowdstrike.com/wp-content/uploads/2024/08/Channel-File-291-Incident-Root-Cause-Analysis-08.06.2024.pdf">Channel
+File 291 Incident Root Cause Analysis</a> (August 2024)</li>
+<li>Microsoft, <a
+href="https://blogs.microsoft.com/blog/2024/07/20/helping-our-customers-through-the-crowdstrike-outage/">“Helping
+our customers through the CrowdStrike outage”</a> (July 2024)</li>
+<li>Google Cloud, Service Health incident report for the 12 June 2025
+multi-product outage</li>
+<li>C. Tang et al., “Holistic Configuration Management at Facebook,”
+SOSP 2015</li>
+<li>Google, <em>Site Reliability Engineering</em> and <em>The Site
+Reliability Workbook</em>, chapters on configuration design and
+canarying releases</li>
+<li>AWS Builders’ Library, “Automating safe, hands-off deployments” and
+“Static stability using Availability Zones”</li>
+<li>Russ Cox, “Regular Expression Matching Can Be Simple And Fast”
+(2007), on linear-time regex engines such as RE2</li>
+</ul>
+<p><em>Note on verification: the two Cloudflare incidents, the
+CrowdStrike RCA details and Microsoft’s 8.5 million estimate were read
+from the linked pages today (some details of the Cloudflare posts came
+from a summary of the full text rather than verbatim reading). The
+Google Cloud June 2025 account is from Google’s incident report as I
+remember it and wasn’t re-fetched; check it before quoting specifics.
+The Facebook, Google SRE and AWS references are from those sources as I
+know them.</em></p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/case-study.html">Case Study</a><a class="chip" href="/topics/infrastructure.html">Infrastructure</a></div>
+          <div class="daynav"><a href="/reading/replication-failover.html"><div class="kicker">← Older · Nov 21</div><div class="t">Database replication and failover: what you lose, and when</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
