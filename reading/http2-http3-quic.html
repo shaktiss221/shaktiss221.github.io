@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HTTP/2, HTTP/3 and QUIC: why the web moved off TCP · The Daily Commit</title>
+  <meta name="description" content="How HTTP evolved from one request per connection to multiplexed streams over a new UDP-based transport. Covers HTTP/1.1&#x27;s limits, HTTP/2 framing, multiplexing, HPACK and flow control, head-of-line blocking in TCP, QUIC&#x27;s design (streams, built-in TLS 1.3, connection IDs and migration, 0-RTT, user-space congestion control), HTTP/3 and QPACK, what happened to server push, the Rapid Reset attack, and the operational trade-offs of running HTTP/3 in production.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>HTTP/2, HTTP/3 and QUIC: why the web moved off TCP</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>15 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#http1.1-and-its-workarounds">HTTP/1.1 and its
+workarounds</a><a href="#http2-multiplexing-over-one-connection">HTTP/2: multiplexing
+over one connection</a><a href="#tcps-head-of-line-blocking">TCP’s head-of-line blocking</a><a href="#quic-a-new-transport-over-udp">QUIC: a new transport over
+UDP</a><a href="#http3-http-over-quic">HTTP/3: HTTP over QUIC</a><a href="#what-this-means-for-apis-and-backends">What this means for
+APIs and backends</a><a href="#rapid-reset-when-cancellation-becomes-an-attack">Rapid Reset:
+when cancellation becomes an attack</a><a href="#running-these-protocols-in-production">Running these
+protocols in production</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 15 min left</div>
+      </nav>
+      <article class="article" data-slug="http2-http3-quic" data-minutes="15">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/networking.html">Networking</a> · November 24, 2026 · 15 min</div>
+        <h1>HTTP/2, HTTP/3 and QUIC: why the web moved off TCP</h1>
+        <p class="dek">How HTTP evolved from one request per connection to multiplexed streams over a new UDP-based transport. Covers HTTP/1.1&#x27;s limits, HTTP/2 framing, multiplexing, HPACK and flow control, head-of-line blocking in TCP, QUIC&#x27;s design (streams, built-in TLS 1.3, connection IDs and migration, 0-RTT, user-space congestion control), HTTP/3 and QPACK, what happened to server push, the Rapid Reset attack, and the operational trade-offs of running HTTP/3 in production.</p>
+<p>For its first twenty years, HTTP ran on a simple model: open a TCP
+connection, send a request, wait for the response. Web pages grew from
+one document to hundreds of resources, and that model became the main
+bottleneck. HTTP/2 (2015) fixed the application layer by multiplexing
+many requests over one connection, only to run into a limit in TCP
+itself. So the industry, led by Google, did something unusual: it built
+a new transport protocol, <strong>QUIC</strong>, on top of UDP, folded
+TLS 1.3 into it, and standardised <strong>HTTP/3</strong> on top (QUIC
+as RFC 9000 in May 2021, HTTP/3 as RFC 9114 in June 2022). Today most
+large sites and every major browser support HTTP/3. For backend
+engineers this matters beyond browsers: gRPC runs on HTTP/2, load
+balancers and proxies must understand all three versions, and problems
+like the 2023 HTTP/2 Rapid Reset attack show that multiplexing changes
+how servers must defend themselves. This reading explains what each
+version changed and why, the mechanics of QUIC, and what to consider
+when running these protocols. It draws on the RFCs, Cloudflare’s,
+Google’s and Chrome’s engineering writing, and Ilya Grigorik’s <em>High
+Performance Browser Networking</em>. The TLS 1.3 reading covers the
+handshake that QUIC builds on.</p>
+<h2 id="http1.1-and-its-workarounds">1. HTTP/1.1 and its
+workarounds</h2>
+<p>HTTP/1.1 (1997, revised as RFC 9112 in 2022) is a text protocol. On a
+connection, the client sends a request and must receive the whole
+response before the next one can be answered. Keep-alive lets a
+connection be reused, but requests are still processed one at a time.
+<strong>Pipelining</strong> (sending several requests without waiting)
+was in the spec but responses still had to come back in order, so one
+slow response blocked the rest (<strong>head-of-line blocking at the
+HTTP layer</strong>), and buggy intermediaries meant browsers never
+enabled it.</p>
+<p>Browsers worked around this by opening <strong>about six parallel
+connections per host</strong>, and sites worked around <em>that</em>
+with tricks: <strong>domain sharding</strong> (spreading assets across
+<code>static1.</code>, <code>static2.</code> hostnames for more
+connections), <strong>spriting</strong> images into one file,
+<strong>inlining</strong> small resources, and
+<strong>concatenating</strong> scripts. Each connection paid for its own
+TCP handshake, TLS handshake and slow-start ramp-up, and headers
+(cookies, user agents) were resent in full, uncompressed, on every
+request.</p>
+<h2 id="http2-multiplexing-over-one-connection">2. HTTP/2: multiplexing
+over one connection</h2>
+<p>HTTP/2 grew out of Google’s SPDY experiment and was published as RFC
+7540 in 2015 (revised as RFC 9113 in 2022). It keeps HTTP’s semantics
+(methods, status codes, headers) but changes how they’re carried.</p>
+<h3 id="binary-framing-and-streams">Binary framing and streams</h3>
+<p>Everything is sent as <strong>frames</strong> with a fixed header:
+type, length, flags and a <strong>stream ID</strong>. A
+<strong>stream</strong> is one request/response exchange. Frames from
+many streams are <strong>interleaved</strong> on a single TCP
+connection, and the receiver reassembles them by stream ID. Key frame
+types include <code>HEADERS</code>, <code>DATA</code>,
+<code>SETTINGS</code>, <code>WINDOW_UPDATE</code>,
+<code>RST_STREAM</code> (cancel one stream), <code>PING</code> and
+<code>GOAWAY</code> (graceful connection shutdown).</p>
+<p>The results:</p>
+<ul>
+<li><strong>One connection per origin</strong> carries all requests
+concurrently. No more six-connection limit, no sharding.</li>
+<li><strong>No HTTP-level head-of-line blocking:</strong> a slow
+response doesn’t block others; their frames are interleaved.</li>
+<li><strong>Cancellation is cheap:</strong> <code>RST_STREAM</code>
+cancels one request without closing the connection (which, as section 7
+shows, became an attack vector).</li>
+</ul>
+<p>Many HTTP/1.1 workarounds become counterproductive: sharding defeats
+the single connection, and concatenation hurts caching granularity.</p>
+<h3 id="hpack-header-compression">HPACK header compression</h3>
+<p>Headers are highly repetitive across requests on the same connection.
+<strong>HPACK</strong> (RFC 7541) compresses them using a static table
+of common headers, a <strong>dynamic table</strong> of headers seen
+earlier on the connection (so a repeated cookie becomes a small index),
+and Huffman coding for literals. HPACK was designed specifically to
+avoid the compression side-channel attacks (CRIME) that broke earlier
+attempts to compress headers with general-purpose compression.</p>
+<h3 id="flow-control-and-priorities">Flow control and priorities</h3>
+<p>HTTP/2 adds <strong>flow control</strong> per stream and per
+connection: the receiver advertises how many bytes it’s willing to
+accept, using <code>WINDOW_UPDATE</code> frames, so a fast sender can’t
+overwhelm a slow consumer of one stream. This matters for proxies and
+for gRPC streaming, where a misconfigured window can cap throughput on
+high-latency links.</p>
+<p>The original <strong>priority</strong> scheme (a dependency tree with
+weights) proved complex and inconsistently implemented. RFC 9218 (2022)
+replaced it with a much simpler <strong>Extensible Priorities</strong>
+scheme (an urgency level and an incremental flag), used by both HTTP/2
+and HTTP/3.</p>
+<h3 id="server-push-and-its-removal">Server push and its removal</h3>
+<p>HTTP/2 allowed a server to <strong>push</strong> responses the client
+hadn’t asked for yet, such as CSS the page would need. In practice it
+was hard to use well: servers pushed resources the browser already had
+cached, competed with more important responses, and rarely improved
+performance. Chrome’s team reported that only about 1.25% of HTTP/2
+sites used push, falling to around 0.7%, and that many HTTP/3
+implementations never built it. Chrome disabled push by default in
+<strong>Chrome 106</strong> (2022). The recommended replacement is the
+<strong>103 Early Hints</strong> status code, which tells the browser
+early which resources to fetch, leaving the browser (which knows its
+cache) in control, plus <code>&lt;link rel=preload&gt;</code>.</p>
+<h2 id="tcps-head-of-line-blocking">3. TCP’s head-of-line blocking</h2>
+<p>HTTP/2 solved head-of-line blocking at the HTTP layer but moved it
+down a layer. TCP guarantees an <strong>ordered byte stream</strong>. If
+one packet is lost, every byte after it waits in the receiver’s buffer
+until the lost packet is retransmitted, even if those bytes belong to
+completely different HTTP/2 streams.</p>
+<figure class="diagram"><svg viewBox="0 0 760 330" role="img" aria-label="Head-of-line blocking in HTTP/2 over TCP versus HTTP/3 over QUIC when one packet is lost" font-size="13"><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">One lost packet: who has to wait?</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Three streams (A, B, C) share one connection. Packet 3, carrying stream B, is lost.</text><text x="24" y="98" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">HTTP/2 over TCP</text><text x="24" y="114" font-size="11" fill="var(--cds-text-secondary)">one ordered byte stream</text><rect x="230" y="80" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.3" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25" ></rect><text x="255" y="103" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">A1</text><rect x="290" y="80" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-4)" fill-opacity="0.05" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25" stroke-dasharray="4 3"></rect><text x="315" y="103" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">B2</text><text x="315" y="132" text-anchor="middle" font-size="11" fill="var(--cds-chart-categorical-4)">lost</text><rect x="350" y="80" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-3)" fill-opacity="0.05" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25" stroke-dasharray="4 3"></rect><text x="375" y="103" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">C3</text><text x="375" y="132" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">waits</text><rect x="410" y="80" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-4)" fill-opacity="0.05" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25" stroke-dasharray="4 3"></rect><text x="435" y="103" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">B4</text><text x="435" y="132" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">waits</text><rect x="470" y="80" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.05" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25" stroke-dasharray="4 3"></rect><text x="495" y="103" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">A5</text><text x="495" y="132" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">waits</text><rect x="530" y="80" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-3)" fill-opacity="0.05" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25" stroke-dasharray="4 3"></rect><text x="555" y="103" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">C6</text><text x="555" y="132" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">waits</text><rect x="590" y="80" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.05" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25" stroke-dasharray="4 3"></rect><text x="615" y="103" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">A7</text><text x="615" y="132" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">waits</text><rect x="650" y="80" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-4)" fill-opacity="0.05" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25" stroke-dasharray="4 3"></rect><text x="675" y="103" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">B8</text><text x="675" y="132" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">waits</text><text x="24" y="188" font-size="12.5" font-weight="600" fill="var(--cds-text-primary)">HTTP/3 over QUIC</text><text x="24" y="204" font-size="11" fill="var(--cds-text-secondary)">independent streams</text><rect x="230" y="170" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.3" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25" ></rect><text x="255" y="193" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">A1</text><rect x="290" y="170" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-4)" fill-opacity="0.05" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25" stroke-dasharray="4 3"></rect><text x="315" y="193" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">B2</text><text x="315" y="222" text-anchor="middle" font-size="11" fill="var(--cds-chart-categorical-4)">lost</text><rect x="350" y="170" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-3)" fill-opacity="0.3" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25" ></rect><text x="375" y="193" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">C3</text><rect x="410" y="170" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-4)" fill-opacity="0.05" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25" stroke-dasharray="4 3"></rect><text x="435" y="193" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">B4</text><text x="435" y="222" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">waits</text><rect x="470" y="170" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.3" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25" ></rect><text x="495" y="193" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">A5</text><rect x="530" y="170" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-3)" fill-opacity="0.3" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25" ></rect><text x="555" y="193" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">C6</text><rect x="590" y="170" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-1)" fill-opacity="0.3" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25" ></rect><text x="615" y="193" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">A7</text><rect x="650" y="170" width="50" height="36" rx="6" fill="var(--cds-chart-categorical-4)" fill-opacity="0.05" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25" stroke-dasharray="4 3"></rect><text x="675" y="193" text-anchor="middle" font-size="12" font-weight="600" fill="var(--cds-text-primary)">B8</text><text x="675" y="222" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">waits</text><text x="24" y="282" font-size="11.5" fill="var(--cds-text-secondary)">TCP delivers bytes in order, so everything after the gap waits for the retransmit, even other streams.</text><text x="24" y="302" font-size="11.5" fill="var(--cds-text-secondary)">QUIC orders data per stream, so only stream B waits; A and C are delivered to the application immediately.</text></svg></figure>
+<p>On a clean network this rarely matters. On lossy networks (mobile,
+congested Wi-Fi), a single loss stalls every request on the connection
+for at least a round trip. With HTTP/1.1’s six connections, a loss
+stalls only one of them, so on lossy links HTTP/2’s single connection
+can perform <strong>worse</strong> than HTTP/1.1.</p>
+<p>Fixing this inside TCP isn’t practical. TCP is implemented in
+operating system kernels and inspected or modified by countless
+middleboxes (firewalls, NATs, load balancers), which drop or mangle
+packets with unfamiliar options. Changes to TCP take a decade or more to
+deploy widely, a problem known as <strong>ossification</strong>.
+Google’s answer was to build a new transport in user space, over UDP,
+which middleboxes already pass.</p>
+<h2 id="quic-a-new-transport-over-udp">4. QUIC: a new transport over
+UDP</h2>
+<p>QUIC started at Google around 2012, was deployed between Chrome and
+Google’s servers, and was then redesigned and standardised by the IETF
+(RFC 9000 for the transport, RFC 9001 for its use of TLS, RFC 9002 for
+loss detection and congestion control). Its main design points:</p>
+<h3 id="streams-are-native-to-the-transport">Streams are native to the
+transport</h3>
+<p>QUIC carries many independent <strong>streams</strong> within one
+connection, each with its own ordering. A lost packet only delays the
+streams whose data it carried; other streams continue to be delivered to
+the application. That eliminates transport-level head-of-line blocking
+between streams.</p>
+<h3 id="tls-1.3-is-built-in">TLS 1.3 is built in</h3>
+<p>Instead of layering TLS on top of a transport, QUIC
+<strong>integrates the TLS 1.3 handshake</strong> into its own: the TLS
+handshake messages travel in QUIC’s CRYPTO frames, and the keys TLS
+produces encrypt QUIC packets. Consequences:</p>
+<ul>
+<li><strong>Fewer round trips.</strong> A new connection completes the
+transport and cryptographic handshake in <strong>one round
+trip</strong>, versus TCP’s handshake plus TLS 1.3’s (two round trips
+before the first request). With a previous session,
+<strong>0-RTT</strong> lets the client send its first request in the
+very first flight, with the same replay caveats as TLS 1.3 0-RTT (only
+safe for idempotent requests).</li>
+<li><strong>Encryption is mandatory</strong> and covers almost the whole
+packet, including most of the transport headers (packet numbers,
+acknowledgements). Only a few fields, such as the connection ID, remain
+visible. This prevents middleboxes from depending on transport
+internals, which is exactly what ossified TCP, but it also reduces what
+network operators can observe.</li>
+</ul>
+<h3 id="connection-ids-and-migration">Connection IDs and migration</h3>
+<p>A TCP connection is identified by its four-tuple (source IP, source
+port, destination IP, destination port). If any of these changes, such
+as a phone moving from Wi-Fi to cellular or a NAT rebinding the port,
+the connection dies. QUIC connections are identified by
+<strong>connection IDs</strong> chosen by each endpoint, so a connection
+can <strong>migrate</strong> to a new network path and keep going, after
+the endpoints validate the new path. Endpoints can switch between
+several connection IDs so that an observer can’t link the old and new
+paths easily.</p>
+<p>Connection IDs also matter for load balancers: because the four-tuple
+can change, a QUIC-aware load balancer routes by connection ID,
+typically by encoding a server identifier into the ID the server chooses
+(the IETF QUIC-LB draft standardises a scheme for this).</p>
+<h3 id="loss-recovery-and-congestion-control-in-user-space">Loss
+recovery and congestion control in user space</h3>
+<p>QUIC improves on TCP’s loss detection: every packet gets a new,
+never-reused <strong>packet number</strong>, even for retransmitted
+data, which removes TCP’s ambiguity about whether an ACK refers to the
+original or the retransmission, and ACKs carry more precise information
+(including ranges and ACK delay). Congestion control (commonly CUBIC or
+BBR) runs in the application’s QUIC library rather than the kernel, so
+it can be updated with an app or server release rather than an OS
+upgrade. The flip side is that every implementation must get these hard
+algorithms right.</p>
+<h3 id="costs">Costs</h3>
+<ul>
+<li><strong>CPU.</strong> QUIC runs in user space, encrypts each packet
+individually, and can’t use the decades of kernel and NIC optimisations
+for TCP (segmentation offload, kernel bypass for TCP). Early deployments
+used noticeably more CPU per byte than TCP+TLS. Techniques like UDP
+generic segmentation offload (GSO), batching system calls, and hardware
+offload have narrowed the gap, but it’s still a real cost for
+high-throughput servers.</li>
+<li><strong>UDP is sometimes blocked or throttled</strong> by enterprise
+firewalls and some networks. Clients therefore race or fall back to TCP:
+browsers discover HTTP/3 support via the <code>Alt-Svc</code> header or
+DNS <strong>HTTPS records</strong> (covered in the DNS reading) and fall
+back to HTTP/2 if QUIC fails.</li>
+<li><strong>Amplification protection.</strong> Because UDP source
+addresses can be spoofed, a QUIC server may send at most three times as
+many bytes as it has received from an unverified client address, and
+clients pad their first packet to at least 1,200 bytes. Servers can use
+Retry packets to validate addresses under attack.</li>
+</ul>
+<h2 id="http3-http-over-quic">5. HTTP/3: HTTP over QUIC</h2>
+<p>HTTP/3 (RFC 9114) maps HTTP semantics onto QUIC. It looks a lot like
+HTTP/2 with the transport’s job removed:</p>
+<ul>
+<li>Each request/response uses its own <strong>QUIC stream</strong>, so
+there are no stream IDs in HTTP/3 frames and no HTTP-level flow control;
+QUIC handles both.</li>
+<li><strong>QPACK</strong> (RFC 9204) replaces HPACK. HPACK assumed
+in-order delivery of all headers on the connection; with independent
+streams, a header block could reference a dynamic table entry that
+hasn’t arrived yet. QPACK sends dynamic table updates on dedicated
+streams and lets the encoder control how much it risks blocking, so
+header compression doesn’t reintroduce head-of-line blocking.</li>
+<li>Control information (settings, <code>GOAWAY</code>) goes on a
+dedicated control stream.</li>
+</ul>
+<p>HTTP semantics (RFC 9110) are shared by all versions, so
+applications, frameworks and caches don’t need to know which version
+carried a request.</p>
+<h3 id="adoption">Adoption</h3>
+<p>All major browsers support HTTP/3, as do large CDNs and cloud load
+balancers. Cloudflare’s 2024 Radar Year in Review reported that about
+20.5% of requests it saw used HTTP/3, with HTTP/2 at nearly half; its
+2025 review said both shares grew slightly. HTTP/3 is mostly used on the
+edge, between clients and CDNs or load balancers. Inside data centres,
+where loss is rare and latency is low, TCP-based HTTP/2 (often gRPC) and
+HTTP/1.1 remain the norm, and many origins still speak HTTP/1.1 to their
+CDN.</p>
+<h2 id="what-this-means-for-apis-and-backends">6. What this means for
+APIs and backends</h2>
+<ul>
+<li><strong>gRPC depends on HTTP/2.</strong> It uses HTTP/2 streams for
+each call, trailers for status, and flow control for streaming. That’s
+why gRPC needs proxies and load balancers that support HTTP/2 end to
+end, and why connection-level load balancing (L4) can pin all of a
+client’s calls to one backend: one long-lived HTTP/2 connection carries
+everything. The load balancing reading covered the fix (L7 balancing per
+request, or client-side balancing). gRPC over HTTP/3 exists but isn’t
+yet widely used.</li>
+<li><strong>Long-lived connections need explicit lifetimes.</strong> One
+HTTP/2 or HTTP/3 connection can stay open for hours, so deployments and
+scaling events don’t rebalance traffic unless servers send
+<code>GOAWAY</code> periodically or after a maximum connection age.</li>
+<li><strong>Connection coalescing.</strong> Browsers reuse an HTTP/2 or
+HTTP/3 connection for different hostnames if they resolve to the same IP
+and the certificate covers both, which changes how traffic is
+distributed and can surprise operators with misdirected requests (the
+<code>421 Misdirected Request</code> status exists for this).</li>
+<li><strong>Concurrency limits move.</strong> Instead of limiting
+connections, servers limit <strong>concurrent streams per
+connection</strong> (<code>SETTINGS_MAX_CONCURRENT_STREAMS</code> in
+HTTP/2, stream credit in QUIC). A single client connection can now
+generate a lot of parallel work, which leads directly to the next
+section.</li>
+</ul>
+<h2 id="rapid-reset-when-cancellation-becomes-an-attack">7. Rapid Reset:
+when cancellation becomes an attack</h2>
+<p>In October 2023, Google, Cloudflare and AWS jointly disclosed
+<strong>CVE-2023-44487</strong>, the HTTP/2 <strong>Rapid Reset</strong>
+attack. An attacker opens a stream with a request and immediately
+cancels it with <code>RST_STREAM</code>, then repeats, as fast as
+possible. Cancelled streams don’t count toward the concurrent-stream
+limit, so the client is never throttled by it, but the server still does
+work to parse each request, and often starts forwarding it to a backend
+before noticing the cancellation.</p>
+<p>The scale was extraordinary. Google reported a peak of <strong>398
+million requests per second</strong> in a two-minute attack. Cloudflare
+reported a peak of just over <strong>201 million requests per
+second</strong>, from a botnet of only about <strong>20,000
+machines</strong>, showing how much leverage the technique gave each
+attacking machine.</p>
+<p>Mitigations, now in most HTTP/2 servers and proxies:</p>
+<ul>
+<li><strong>Track resets per connection</strong> and close connections
+(with <code>GOAWAY</code>) that cancel too many streams too
+quickly.</li>
+<li><strong>Count recently reset streams</strong> against concurrency
+limits, or limit the rate of new streams.</li>
+<li><strong>Delay expensive work</strong> (backend dispatch) until a
+request has proven it isn’t immediately cancelled, where possible.</li>
+</ul>
+<p>The broader lesson connects to the GraphQL reading: when a protocol
+lets one client ask for many units of work cheaply, rate limiting must
+count the work, not the connections or requests that look cheap.</p>
+<h2 id="running-these-protocols-in-production">8. Running these
+protocols in production</h2>
+<p>A practical checklist:</p>
+<ul>
+<li><strong>At the edge,</strong> enable HTTP/3 alongside HTTP/2 and
+advertise it with <code>Alt-Svc</code> and DNS HTTPS records. Open UDP
+443 in firewalls and security groups, and make sure DDoS protection
+covers UDP.</li>
+<li><strong>Measure real-user performance</strong> by protocol,
+especially at the tail and on mobile networks, where HTTP/3’s benefits
+concentrate. For users on low-loss, low-latency connections, the
+difference may be small.</li>
+<li><strong>Watch CPU</strong> on HTTP/3 terminators, and use
+implementations that support GSO and batching.</li>
+<li><strong>Load balancers:</strong> if you terminate QUIC yourself
+behind an L4 balancer, it needs to route by connection ID or rely on
+consistent hashing that tolerates migration.</li>
+<li><strong>Keep internal traffic simple:</strong> HTTP/2 (or gRPC)
+internally, with sane <code>MAX_CONCURRENT_STREAMS</code>, flow-control
+windows sized for your bandwidth-delay product, and maximum connection
+ages.</li>
+<li><strong>Patch and configure HTTP/2 servers against abuse:</strong>
+reset-rate limits, header size limits, stream limits, and idle
+timeouts.</li>
+<li><strong>Retire HTTP/1.1-era tricks:</strong> domain sharding,
+spriting and aggressive concatenation hurt more than they help
+today.</li>
+<li><strong>Use 103 Early Hints and preload</strong> instead of server
+push.</li>
+</ul>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li><strong>HTTP/1.1</strong> handles one request at a time per
+connection, which led to six-connection limits and workarounds like
+sharding and concatenation.</li>
+<li><strong>HTTP/2</strong> multiplexes many streams over one TCP
+connection with binary frames, <strong>HPACK</strong> header compression
+and flow control. Server push was removed from Chrome in version 106;
+<strong>103 Early Hints</strong> replaces it.</li>
+<li><strong>TCP’s ordered byte stream</strong> reintroduces head-of-line
+blocking: one lost packet stalls every stream, and TCP is too ossified
+to change.</li>
+<li><strong>QUIC</strong> (RFC 9000, 2021) runs over UDP with native
+independent streams, integrated <strong>TLS 1.3</strong> (1-RTT,
+optional 0-RTT), encrypted headers, <strong>connection IDs</strong> that
+survive network changes, and user-space congestion control, at a cost in
+CPU and occasional UDP blocking.</li>
+<li><strong>HTTP/3</strong> (RFC 9114, 2022) maps HTTP onto QUIC streams
+with <strong>QPACK</strong>. It’s widely used at the edge (about 20% of
+Cloudflare’s requests in 2024), while HTTP/2 dominates inside data
+centres.</li>
+<li>Multiplexing shifts limits from connections to
+<strong>streams</strong>; the <strong>Rapid Reset</strong> attack
+(CVE-2023-44487, up to 398M rps) exploited cheap stream
+cancellation.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Your API’s mobile clients see poor p99 latency on cellular networks.
+How would you determine whether HTTP/3 would help, and what would you
+measure before and after?</li>
+<li>Why can HTTP/2 perform worse than HTTP/1.1 on a lossy network? Which
+of your traffic would be affected?</li>
+<li>Your gRPC service behind an L4 load balancer shows one backend at
+90% CPU and others idle. Explain why, and list two fixes.</li>
+<li>QUIC encrypts nearly all transport headers. What does that make
+harder for your network or security team, and is the trade-off worth
+it?</li>
+<li>How does your HTTP/2 server or proxy defend against Rapid Reset
+today? How would you test it?</li>
+<li>Should you enable HTTP/3 between your CDN and your origin servers,
+or only between clients and the CDN? What would change your answer?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>RFC 9110 (HTTP Semantics), RFC 9112 (HTTP/1.1), RFC 7540 and RFC
+9113 (HTTP/2), RFC 7541 (HPACK), RFC 9218 (Extensible Priorities)</li>
+<li><a href="https://www.rfc-editor.org/rfc/rfc9000">RFC 9000</a> (QUIC,
+May 2021), RFC 9001 (Using TLS to Secure QUIC), RFC 9002 (QUIC Loss
+Detection and Congestion Control), <a
+href="https://www.rfc-editor.org/rfc/rfc9114">RFC 9114</a> (HTTP/3, June
+2022), RFC 9204 (QPACK); IETF QUIC-LB draft</li>
+<li>Chrome for Developers, <a
+href="https://developer.chrome.com/blog/removing-push">“Remove HTTP/2
+Server Push from Chrome”</a> (Chrome 106, Early Hints)</li>
+<li>Cloudflare, <a
+href="https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack/">“HTTP/2
+Rapid Reset: deconstructing the record-breaking attack”</a>; Google
+Cloud, <a
+href="https://cloud.google.com/blog/products/identity-security/google-cloud-mitigated-largest-ddos-attack-peaking-above-398-million-rps">“Google
+mitigated the largest DDoS attack to date, peaking above 398 million
+rps”</a> (October 2023)</li>
+<li>Cloudflare, <a
+href="https://blog.cloudflare.com/radar-2024-year-in-review/">Radar 2024
+Year in Review</a> and <a
+href="https://blog.cloudflare.com/radar-2025-year-in-review/">2025 Year
+in Review</a></li>
+<li>A. Langley et al., “The QUIC Transport Protocol: Design and
+Internet-Scale Deployment,” SIGCOMM 2017</li>
+<li>Ilya Grigorik, <em>High Performance Browser Networking</em>
+(O’Reilly), chapters on HTTP/1.x, HTTP/2 and TLS</li>
+<li>gRPC documentation on HTTP/2 transport, keepalive and max connection
+age</li>
+</ul>
+<p><em>Note on verification: the RFC dates, Chrome’s server push
+removal, the Rapid Reset figures (Cloudflare’s partly from a summary of
+the page) and Cloudflare’s HTTP/3 share were read today. Details such as
+QUIC’s 3× amplification limit and 1,200-byte minimum, HPACK/QPACK
+mechanics, priorities, connection coalescing and CPU-cost observations
+come from the RFCs and engineering literature as I know them and weren’t
+re-fetched.</em></p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/networking.html">Networking</a><a class="chip" href="/topics/apis.html">APIs</a></div>
+          <div class="daynav"><a href="/reading/parquet-iceberg-lakehouse.html"><div class="kicker">← Older · Nov 23</div><div class="t">Parquet, Iceberg and the lakehouse: how tables are built from files</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
