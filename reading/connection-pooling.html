@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Database connection pooling: why fewer connections make a faster database · The Daily Commit</title>
+  <meta name="description" content="Why database connections are expensive, why more of them usually makes things slower, and how to size and layer connection pools. Covers what a Postgres connection costs, contention and Little&#x27;s law, the HikariCP sizing formula and the Oracle 2048-to-96 example, application pools vs external poolers, PgBouncer&#x27;s session/transaction/statement modes and their caveats (including prepared statements), serverless and Kubernetes connection storms, timeouts and leaks, and a step-by-step sizing method.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Database connection pooling: why fewer connections make a faster database</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>14 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#what-a-connection-costs">What a connection costs</a><a href="#why-more-connections-can-mean-less-throughput">Why more
+connections can mean less throughput</a><a href="#how-big-should-a-pool-be">How big should a pool be?</a><a href="#application-side-pools">Application-side pools</a><a href="#when-application-pools-arent-enough-external-poolers">When
+application pools aren’t enough: external poolers</a><a href="#pgbouncers-pooling-modes">PgBouncer’s pooling modes</a><a href="#connection-storms-failovers-and-serverless">Connection
+storms, failovers and serverless</a><a href="#observing-pools">Observing pools</a><a href="#a-sizing-method">A sizing method</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 14 min left</div>
+      </nav>
+      <article class="article" data-slug="connection-pooling" data-minutes="14">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/databases.html">Databases</a> · November 25, 2026 · 14 min</div>
+        <h1>Database connection pooling: why fewer connections make a faster database</h1>
+        <p class="dek">Why database connections are expensive, why more of them usually makes things slower, and how to size and layer connection pools. Covers what a Postgres connection costs, contention and Little&#x27;s law, the HikariCP sizing formula and the Oracle 2048-to-96 example, application pools vs external poolers, PgBouncer&#x27;s session/transaction/statement modes and their caveats (including prepared statements), serverless and Kubernetes connection storms, timeouts and leaks, and a step-by-step sizing method.</p>
+<p>When a database gets slow under load, the instinct is to allow more
+connections so more work can happen at once. It usually makes things
+worse. A database server has a fixed number of CPU cores and disks; past
+a certain point, extra concurrent queries don’t add throughput, they add
+contention for locks, CPU caches and memory, and every query takes
+longer. Meanwhile each connection has its own cost, especially in
+Postgres, where every connection is a separate operating system process.
+The well-known HikariCP write-up describes an Oracle performance
+demonstration where cutting a pool from 2,048 connections to 96 reduced
+response times from around 100 ms to around 2 ms. Getting connection
+management right means understanding why that happens, sizing pools from
+the database’s capacity rather than the application’s wishes, and adding
+the right pooling layer when there are many application instances. This
+reading covers all of it, using Postgres as the main example. It draws
+on the HikariCP pool-sizing guide, the PgBouncer documentation, Andres
+Freund’s analysis of Postgres connection scalability, and the Postgres
+documentation. The earlier Figma case study showed pooling as one of the
+first scaling steps for a growing Postgres deployment.</p>
+<h2 id="what-a-connection-costs">1. What a connection costs</h2>
+<p>Opening a database connection isn’t free, and keeping one open isn’t
+free either.</p>
+<p><strong>Opening a connection</strong> involves a TCP handshake,
+usually a TLS handshake, authentication (SCRAM password exchange or
+certificate checks), and session setup. In Postgres, the postmaster
+process also <strong>forks a new backend process</strong> for every
+connection. Altogether that’s typically a few milliseconds, sometimes
+tens of milliseconds with TLS across zones, which is often longer than
+the query itself. Opening a fresh connection per request is therefore a
+classic performance bug.</p>
+<p><strong>Keeping a connection open</strong> costs memory and CPU on
+the server:</p>
+<ul>
+<li>Each Postgres backend is a process with its own memory: catalog and
+relation caches, prepared statement plans, and per-query working memory
+(<code>work_mem</code> for each sort or hash operation, which can be
+allocated several times per query).</li>
+<li>Even idle connections had a real CPU cost in older versions.
+Postgres takes a <strong>snapshot</strong> at the start of each
+statement to decide which row versions are visible, and computing it
+used to scale with the number of connections. Andres Freund’s 2020
+analysis showed that throughput with a single active connection dropped
+sharply when thousands of <em>idle</em> connections were open. Postgres
+14 reworked snapshot computation so this cost mostly disappeared; his
+workstation benchmark with 10,000 idle connections roughly doubled
+throughput (from about 16,000 to 33,000 transactions per second). Even
+so, many connections still cost memory, and many <em>active</em>
+connections still contend.</li>
+</ul>
+<p>Postgres’s default <code>max_connections</code> is 100. Raising it to
+thousands is possible but usually the wrong fix, for the reasons in the
+next section.</p>
+<p>MySQL uses a thread per connection rather than a process, which is
+cheaper, and MySQL Enterprise and MariaDB offer thread pools, but the
+contention argument below applies to every database.</p>
+<h2 id="why-more-connections-can-mean-less-throughput">2. Why more
+connections can mean less throughput</h2>
+<p>Picture a database server with 16 cores. At any instant it can run 16
+query threads on CPU (more if some are waiting on disk or locks). If 16
+queries are running, each gets a full core. If 400 queries are running,
+the operating system time-slices them: each gets a fraction of a core,
+constantly context-switching, evicting each other’s data from CPU
+caches. Total throughput doesn’t rise; it often falls, because of:</p>
+<ul>
+<li><strong>Context switching and cache misses.</strong> More runnable
+processes than cores means time spent switching instead of working.</li>
+<li><strong>Lock contention.</strong> More concurrent transactions mean
+more waits on row locks, and on internal locks (buffer mappings, WAL
+insertion, lock manager partitions), which can collapse throughput at
+high concurrency.</li>
+<li><strong>Memory pressure.</strong> Hundreds of active queries each
+using <code>work_mem</code> for sorts and hashes can push the server
+into swap or reduce the OS page cache, slowing everything.</li>
+</ul>
+<p><strong>Little’s law</strong> helps reason about this: the number of
+requests in a system equals throughput times average time in the system
+(L = λW). If the database can complete 2,000 queries per second at 5 ms
+each, then about 10 queries are in progress at any moment. Allowing 500
+concurrent queries doesn’t make the database complete more than 2,000
+per second; it just means the extra 490 are waiting somewhere. The only
+question is <strong>where they wait</strong>. Waiting inside the
+database (as contending processes) slows the work in progress. Waiting
+in a queue in front of the database (a pool) costs almost nothing and
+keeps the database at its efficient operating point.</p>
+<p>This is the key insight behind connection pooling: <strong>a pool is
+a concurrency limiter with a queue in front of the
+database.</strong></p>
+<h2 id="how-big-should-a-pool-be">3. How big should a pool be?</h2>
+<p>The HikariCP project’s “About Pool Sizing” page popularised a
+starting formula, originally from the Postgres community:</p>
+<blockquote>
+<p>connections = (core_count × 2) + effective_spindle_count</p>
+</blockquote>
+<p><code>core_count</code> is the number of CPU cores on the
+<strong>database server</strong> (not the application), and
+<code>effective_spindle_count</code> approximates how many concurrent
+disk I/O operations the storage can usefully serve (zero if the working
+set is fully cached; on SSDs, a modest number). For a 16-core database
+with fast storage, that suggests on the order of 32 to 40 connections
+actively running queries.</p>
+<p>The same page describes an Oracle Real-World Performance
+demonstration in which reducing a connection pool from <strong>2,048 to
+96</strong> connections cut response times from around <strong>100 ms to
+around 2 ms</strong>, more than 50 times faster, with no other
+change.</p>
+<p>Treat the formula as a starting point, then test:</p>
+<ul>
+<li><strong>Long waits outside the CPU</strong> (slow disks, network
+storage, lock waits, queries that call out to extensions) justify more
+connections, because each one spends time not using a core.</li>
+<li><strong>Short, CPU-bound queries</strong> need fewer.</li>
+<li><strong>The limit is the total across all clients.</strong> If you
+have 20 application instances, each with a pool of 20, the database sees
+400 connections. The formula applies to the total the database sees,
+which is where things usually go wrong.</li>
+</ul>
+<p>A pool that’s “too small” shows up as requests waiting for a
+connection while the database has spare CPU. A pool that’s too large
+shows up as a busy database with rising query latency and little gain in
+throughput. Measure both sides.</p>
+<h2 id="application-side-pools">4. Application-side pools</h2>
+<p>Most applications use an in-process pool: HikariCP for Java, the pool
+in <code>database/sql</code> for Go, SQLAlchemy’s pool for Python,
+<code>pg-pool</code> for Node.js, and so on. They all work
+similarly:</p>
+<ul>
+<li>Keep a set of open connections (bounded by a
+<strong>maximum</strong> size, often with a <strong>minimum
+idle</strong> count).</li>
+<li>Hand a connection to code that needs one; if none is free, make the
+caller <strong>wait</strong>, up to a <strong>timeout</strong>.</li>
+<li>Validate connections (a quick check or relying on driver-level
+keepalives) and replace broken ones.</li>
+<li>Close connections after a <strong>maximum lifetime</strong>, so
+they’re periodically refreshed. This matters behind load balancers and
+proxies that silently drop long-lived idle connections, and after
+database failovers.</li>
+</ul>
+<p>Settings worth getting right:</p>
+<ul>
+<li><strong>Maximum pool size:</strong> derived from the database’s
+capacity divided by the number of application instances, not from the
+application’s thread count.</li>
+<li><strong>Connection acquisition timeout:</strong> how long a request
+waits for a connection before failing. Keep it short (hundreds of
+milliseconds to a few seconds) so that overload produces fast errors
+instead of piled-up requests, which the resilience reading covered as
+load shedding.</li>
+<li><strong>Maximum lifetime:</strong> shorter than any network idle
+timeout between the application and the database, and slightly
+randomised so connections don’t all expire at once.</li>
+<li><strong>Minimum idle:</strong> often best set equal to the maximum
+(a fixed-size pool), avoiding the latency of opening connections under
+sudden load.</li>
+<li><strong>Leak detection:</strong> log a warning if code holds a
+connection longer than a threshold. Leaked connections (borrowed and
+never returned, often in error paths) are a common cause of pool
+exhaustion.</li>
+</ul>
+<p>Holding a connection for a long time without using it, such as while
+making an HTTP call to another service in the middle of a transaction,
+is another common anti-pattern. It ties up a scarce resource and holds
+database locks while waiting on something else.</p>
+<h2 id="when-application-pools-arent-enough-external-poolers">5. When
+application pools aren’t enough: external poolers</h2>
+<p>Application pools work well with a handful of long-lived instances.
+They struggle when:</p>
+<ul>
+<li><strong>There are many instances.</strong> Fifty Kubernetes pods
+with a pool of 20 each means 1,000 connections, even if each pod is
+mostly idle. Autoscaling makes it worse: scaling out adds connections
+exactly when the database is busiest.</li>
+<li><strong>Instances are short-lived.</strong> Serverless functions
+(AWS Lambda, Cloud Functions) and per-request processes can’t keep a
+meaningful pool, and each cold start opens new connections. A traffic
+spike can open thousands of connections in seconds, a <strong>connection
+storm</strong>.</li>
+<li><strong>Many applications share one database</strong>, each sizing
+its pool independently.</li>
+</ul>
+<p>The answer is an <strong>external pooler</strong> between the
+applications and the database. It accepts a large number of cheap client
+connections and multiplexes them over a small number of real database
+connections.</p>
+<figure class="diagram"><svg viewBox="0 0 760 330" role="img" aria-label="Connection fan-in from many application pods through PgBouncer to a small number of Postgres connections" font-size="13"><defs><marker id="cp1125" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Two layers of pooling: many clients, few database backends</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Example: 50 pods with a pool of 20 each would need 1,000 Postgres processes without a pooler.</text><rect x="24" y="76" width="150" height="42" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="99" y="95" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">pod 1</text><text x="99" y="110" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">app pool: 20</text><line x1="176" y1="97" x2="318" y2="170" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#cp1125)"></line><rect x="24" y="128" width="150" height="42" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="99" y="147" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">pod 2</text><text x="99" y="162" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">app pool: 20</text><line x1="176" y1="149" x2="318" y2="170" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#cp1125)"></line><rect x="24" y="180" width="150" height="42" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="99" y="199" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">pod 3</text><text x="99" y="214" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">app pool: 20</text><line x1="176" y1="201" x2="318" y2="170" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#cp1125)"></line><rect x="24" y="232" width="150" height="42" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="99" y="251" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">pod 50</text><text x="99" y="266" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">app pool: 20</text><line x1="176" y1="253" x2="318" y2="170" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#cp1125)"></line><text x="99" y="226" text-anchor="middle" font-size="14" fill="var(--cds-text-primary)">⋮</text><rect x="320" y="135" width="150" height="70" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="395" y="168" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">PgBouncer</text><text x="395" y="183" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">transaction mode</text><line x1="472" y1="170" x2="588" y2="170" stroke="var(--cds-chart-axis)" stroke-width="3" marker-end="url(#cp1125)"></line><rect x="590" y="120" width="146" height="100" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="663" y="168" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">Postgres</text><text x="663" y="183" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">~40 backends</text><text x="246" y="118" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">1,000 client conns</text><text x="530" y="160" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">40 server conns</text><text x="395" y="226" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">queues clients when</text><text x="395" y="240" font-size="11" fill="var(--cds-text-secondary)" text-anchor="middle">all server conns busy</text><text x="24" y="300" font-size="11.5" fill="var(--cds-text-secondary)">The database does its best work with roughly a few connections per CPU core actively running queries.</text><text x="24" y="318" font-size="11.5" fill="var(--cds-text-secondary)">Waiting belongs in a cheap queue (the pooler), not in hundreds of contending database processes.</text></svg></figure>
+<p>Options for Postgres include <strong>PgBouncer</strong> (the
+long-standing, lightweight standard), <strong>PgCat</strong> and
+<strong>Supavisor</strong> (newer, with sharding or multi-tenant
+features), <strong>Odyssey</strong>, and managed proxies such as
+<strong>Amazon RDS Proxy</strong>, plus poolers built into managed
+Postgres services. Many teams use both layers: a small application pool
+per instance, connected to an external pooler, which holds the
+database-side limit.</p>
+<h2 id="pgbouncers-pooling-modes">6. PgBouncer’s pooling modes</h2>
+<p>PgBouncer’s most important setting is <code>pool_mode</code>, which
+decides when a server connection is returned to the pool for another
+client:</p>
+<ul>
+<li><strong>Session mode</strong> (the default): a server connection is
+assigned to a client for the whole client connection and returned when
+the client disconnects. It’s fully compatible with all Postgres
+features, but it only helps if clients connect and disconnect
+frequently; long-lived clients each hold a server connection, just as
+without a pooler.</li>
+<li><strong>Transaction mode:</strong> a server connection is assigned
+only for the duration of a <strong>transaction</strong> and returned
+when it commits or rolls back. Between transactions, the client holds
+nothing. This is the mode that delivers large multiplexing ratios
+(thousands of clients over dozens of server connections), and it’s what
+most deployments use.</li>
+<li><strong>Statement mode:</strong> returned after every statement;
+multi-statement transactions aren’t allowed. Rarely used, mostly for
+simple autocommit workloads.</li>
+</ul>
+<h3 id="the-transaction-mode-caveats">The transaction-mode caveats</h3>
+<p>Because consecutive transactions from one client may run on different
+server connections, anything that relies on <strong>session
+state</strong> breaks or behaves unexpectedly in transaction mode:</p>
+<ul>
+<li><strong><code>SET</code> of session parameters</strong> (search
+path, time zone, statement timeout) applies to whichever server
+connection ran it, then leaks to the next client that gets that
+connection. Use <code>SET LOCAL</code> inside a transaction, or set
+parameters per role or per database instead.</li>
+<li><strong>Session-level advisory locks</strong> (covered in the
+distributed locks reading) are tied to a server connection, so a lock
+taken in one transaction may be “held” by a connection the client no
+longer has. Use transaction-level advisory locks.</li>
+<li><strong><code>LISTEN</code>/<code>NOTIFY</code></strong> needs a
+persistent session and doesn’t work through transaction pooling.</li>
+<li><strong>Temporary tables</strong> and <strong>cursors held across
+transactions</strong> don’t survive.</li>
+<li><strong>Protocol-level prepared statements</strong> historically
+broke, because a statement prepared on one server connection didn’t
+exist on the next. Many drivers prepare statements automatically, so
+this was the most common surprise. <strong>PgBouncer 1.21 (October
+2023)</strong> added support for prepared statements in transaction and
+statement modes, tracking them with <code>max_prepared_statements</code>
+and re-preparing them transparently on whichever server connection a
+client gets; newer releases enable this by default (200 statements).
+With older PgBouncer versions, drivers had to be configured to disable
+server-side prepared statements.</li>
+</ul>
+<p>Other useful settings: <code>default_pool_size</code> (server
+connections per user/database pair, 20 by default),
+<code>max_client_conn</code> (client connections allowed, 100 by
+default, usually raised to thousands), <code>reserve_pool_size</code>
+for bursts, and <code>server_lifetime</code> /
+<code>server_idle_timeout</code> to recycle server connections.</p>
+<p>A single PgBouncer process is single-threaded, so very
+high-throughput deployments run several instances (or use
+<code>so_reuseport</code> to share a port), or use multi-threaded
+alternatives. The pooler also becomes a component in the critical path:
+it needs health checks, redundancy and monitoring like any other.</p>
+<h2 id="connection-storms-failovers-and-serverless">7. Connection
+storms, failovers and serverless</h2>
+<p>Pools behave interestingly at the edges:</p>
+<ul>
+<li><strong>Deployments and restarts.</strong> Every new application
+instance opens its pool at start-up. Rolling out 100 pods at once can
+open thousands of connections in a few seconds. Staggered rollouts, lazy
+pool initialisation, or an external pooler absorb this.</li>
+<li><strong>Database failover.</strong> When the primary changes (the
+replication and failover reading covered this), every pooled connection
+to the old primary breaks at once. Pools must detect dead connections
+(validation, TCP keepalives, maximum lifetime) and reconnect, ideally
+with backoff and jitter so they don’t stampede the new primary.
+DNS-based failover also requires that pools and drivers re-resolve the
+hostname rather than caching the old address.</li>
+<li><strong>Serverless.</strong> Functions should connect through a
+pooler or proxy (RDS Proxy, Supavisor, a managed Postgres’s built-in
+pooler), or use an HTTP-based database API where the provider offers
+one, rather than opening direct connections from each invocation.</li>
+<li><strong>Retry amplification.</strong> If the pool is exhausted and
+callers retry immediately, demand rises exactly when capacity is
+exhausted. Fail fast on acquisition timeout, return errors upstream, and
+let higher layers shed load.</li>
+</ul>
+<h2 id="observing-pools">8. Observing pools</h2>
+<p>Useful metrics, from both sides:</p>
+<ul>
+<li><strong>Application pool:</strong> active connections, idle
+connections, <strong>threads waiting for a connection</strong>,
+acquisition time (p50/p99), timeouts, connections created and closed per
+minute. Rising wait time with a busy database means the database is the
+bottleneck; rising wait time with an idle database means the pool is too
+small or connections are leaking or held too long.</li>
+<li><strong>PgBouncer:</strong> <code>SHOW POOLS</code> and
+<code>SHOW STATS</code> report waiting clients
+(<code>cl_waiting</code>), active and idle server connections, and the
+longest wait (<code>maxwait</code>).</li>
+<li><strong>Postgres:</strong> <code>pg_stat_activity</code> shows each
+connection’s state. Many connections <strong>“idle in
+transaction”</strong> point to code that opens a transaction and then
+does slow work (or forgets to commit); these hold locks and block
+vacuum. <code>idle_in_transaction_session_timeout</code> limits the
+damage.</li>
+</ul>
+<h2 id="a-sizing-method">9. A sizing method</h2>
+<p>Putting it together:</p>
+<ol type="1">
+<li><strong>Start from the database.</strong> Estimate how many
+concurrently <em>active</em> queries the server handles efficiently:
+around two per core, adjusted for I/O waits. Load-test to find where
+throughput stops rising and latency starts to climb.</li>
+<li><strong>Reserve headroom</strong> for administration, migrations,
+replication, monitoring and background jobs.</li>
+<li><strong>Divide the remainder</strong> among the clients that need
+it. With many application instances, put an external pooler in
+transaction mode between them and the database, and set its server-side
+pool to the number from step 1.</li>
+<li><strong>Keep application pools small</strong> (often 5 to 20 per
+instance) with short acquisition timeouts, so overload produces fast,
+visible failures instead of queues inside the database.</li>
+<li><strong>Set lifetimes and timeouts:</strong> maximum connection
+lifetime below network idle timeouts, <code>statement_timeout</code> for
+runaway queries, and
+<code>idle_in_transaction_session_timeout</code>.</li>
+<li><strong>Re-check after changes</strong> in instance counts,
+autoscaling limits, or database size. A pool configuration that was fine
+at 10 pods can overload the database at 100.</li>
+</ol>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>A database connection is expensive to open (handshakes, auth, a
+forked process in Postgres) and costs memory and CPU to keep. Postgres
+14 greatly reduced the cost of many <em>idle</em> connections, but not
+of many <em>active</em> ones.</li>
+<li>Beyond roughly a few active queries per core, more concurrency adds
+<strong>contention, not throughput</strong>. By <strong>Little’s
+law</strong>, the extra requests just wait somewhere; it’s far better
+that they wait in a pool than inside the database.</li>
+<li>A starting pool size is <strong>(cores × 2) + effective
+spindles</strong>, for the total the database sees. Oracle’s demo showed
+<strong>2,048 → 96 connections</strong> improving response times from
+~100 ms to ~2 ms.</li>
+<li>Application pools need small maximums, <strong>short acquisition
+timeouts</strong>, maximum lifetimes and leak detection.</li>
+<li>With many instances or serverless functions, use an <strong>external
+pooler</strong>. <strong>PgBouncer transaction mode</strong> gives large
+multiplexing ratios but breaks session state (<code>SET</code>, session
+advisory locks, <code>LISTEN</code>, temp tables); prepared statements
+are supported since <strong>PgBouncer 1.21</strong>.</li>
+<li>Watch for <strong>connection storms</strong> on deploys and
+failovers, and for <strong>idle-in-transaction</strong> sessions holding
+locks.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Your service runs 30 pods with a pool of 25 each against a 16-core
+Postgres server. Calculate the potential connections and propose a
+better configuration.</li>
+<li>During a traffic spike, request latency jumps while database CPU is
+only at 40%. What would you check first: the pool, the database, or
+something else?</li>
+<li>Which features of your applications would break if you put PgBouncer
+in transaction mode in front of the database tomorrow? How would you
+find out before trying?</li>
+<li>An engineer proposes raising <code>max_connections</code> from 200
+to 2,000 to fix “too many connections” errors. What would you say, and
+what would you do instead?</li>
+<li>How would you handle database connections from a serverless function
+that can scale to 1,000 concurrent invocations?</li>
+<li>After a database failover, your application takes 10 minutes to
+recover. Which pool and driver settings might be responsible?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Brett Wooldridge, <a
+href="https://github.com/brettwooldridge/HikariCP/wiki/About-Pool-Sizing">HikariCP
+wiki: “About Pool Sizing”</a> (sizing formula, Oracle Real-World
+Performance demonstration)</li>
+<li><a href="https://www.pgbouncer.org/config.html">PgBouncer
+configuration</a> (pool modes, default_pool_size, max_client_conn,
+max_prepared_statements) and <a
+href="https://www.pgbouncer.org/changelog.html">changelog</a> (1.21.0,
+October 2023, prepared statement support)</li>
+<li>Andres Freund, <a
+href="https://techcommunity.microsoft.com/blog/adforpostgresql/improving-postgres-connection-scalability-snapshots/1806462">“Improving
+Postgres Connection Scalability: Snapshots”</a>, October 2020 (shipped
+in Postgres 14)</li>
+<li><a
+href="https://www.postgresql.org/docs/current/runtime-config-connection.html">PostgreSQL
+documentation: Connections and Authentication</a> (max_connections),
+<code>pg_stat_activity</code>,
+<code>idle_in_transaction_session_timeout</code>,
+<code>statement_timeout</code></li>
+<li>J. D. C. Little, “A Proof for the Queuing Formula: L = λW,”
+Operations Research, 1961</li>
+<li>Amazon RDS Proxy documentation; Supavisor and PgCat project
+documentation</li>
+<li>Figma engineering, “The growing pains of database architecture”
+(2023), on PgBouncer in Figma’s scaling journey</li>
+</ul>
+<p><em>Note on verification: HikariCP’s formula and Oracle example,
+PgBouncer’s modes, defaults and prepared-statement history, Andres
+Freund’s results and Postgres’s default max_connections were read from
+the linked pages today. Connection-cost figures (milliseconds to open),
+MySQL threading details, driver and pool setting names, and serverless
+guidance come from documentation as I know it and weren’t
+re-fetched.</em></p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/databases.html">Databases</a><a class="chip" href="/topics/distributed-systems.html">Distributed Systems</a></div>
+          <div class="daynav"><a href="/reading/http2-http3-quic.html"><div class="kicker">← Older · Nov 24</div><div class="t">HTTP/2, HTTP/3 and QUIC: why the web moved off TCP</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
