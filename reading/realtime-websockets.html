@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Real-time at scale: WebSockets, fan-out and millions of open connections · The Daily Commit</title>
+  <meta name="description" content="How chat apps, live dashboards and collaborative tools push updates to millions of clients. Covers polling, long polling, Server-Sent Events and WebSockets, the cost of holding connections, gateway and pub/sub architectures, Slack&#x27;s channel and gateway servers, Discord&#x27;s guild processes and fan-out tricks, WhatsApp&#x27;s 2 million connections per server, presence, ordering and missed messages, reconnect storms, load balancing long-lived connections, and backpressure.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Real-time at scale: WebSockets, fan-out and millions of open connections</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>14 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#getting-data-from-server-to-client">Getting data from server
+to client</a><a href="#what-holding-a-connection-costs">What holding a connection
+costs</a><a href="#the-basic-architecture-gateways-and-a-pubsub-backbone">The
+basic architecture: gateways and a pub/sub backbone</a><a href="#slack-channel-servers-and-gateway-servers">Slack: channel
+servers and gateway servers</a><a href="#discord-a-process-per-guild-and-the-fan-out-problem">Discord:
+a process per guild and the fan-out problem</a><a href="#presence-ordering-and-missed-messages">Presence, ordering and
+missed messages</a><a href="#operating-long-lived-connections">Operating long-lived
+connections</a><a href="#build-or-buy">Build or buy</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 14 min left</div>
+      </nav>
+      <article class="article" data-slug="realtime-websockets" data-minutes="14">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/networking.html">Networking</a> · November 26, 2026 · 14 min</div>
+        <h1>Real-time at scale: WebSockets, fan-out and millions of open connections</h1>
+        <p class="dek">How chat apps, live dashboards and collaborative tools push updates to millions of clients. Covers polling, long polling, Server-Sent Events and WebSockets, the cost of holding connections, gateway and pub/sub architectures, Slack&#x27;s channel and gateway servers, Discord&#x27;s guild processes and fan-out tricks, WhatsApp&#x27;s 2 million connections per server, presence, ordering and missed messages, reconnect storms, load balancing long-lived connections, and backpressure.</p>
+<p>Most of the web is request and response: the client asks, the server
+answers, the connection goes quiet. Chat, notifications, live sports
+scores, trading screens, multiplayer cursors in a design tool, and agent
+progress updates all need the opposite: the <strong>server</strong>
+decides when to send, and it needs to reach the right users within a
+fraction of a second. That means keeping a connection open to every
+online client, often millions of them, and routing each event to exactly
+the connections that care. This reading covers the transport options
+(polling, long polling, Server-Sent Events, WebSockets), what it costs
+to hold connections, how systems like Slack, Discord and WhatsApp
+structure their real-time layers, and the hard problems that show up at
+scale: fan-out to huge groups, presence, catching up after disconnects,
+reconnect storms after deploys, and backpressure on slow clients. It
+draws on Slack’s and Discord’s engineering blogs, WhatsApp’s early
+writing, RFC 6455, and the HTML specification for Server-Sent Events.
+The HTTP/2 and HTTP/3 reading and the load balancing reading are useful
+background.</p>
+<h2 id="getting-data-from-server-to-client">1. Getting data from server
+to client</h2>
+<p>There are four common ways for a server to get new data to a browser
+or app.</p>
+<p><strong>Polling.</strong> The client asks every few seconds:
+“anything new?” It’s simple, works through every proxy, and is stateless
+on the server. But most requests return nothing, latency is up to the
+polling interval, and at scale the empty requests dominate load. Polling
+is fine for slowly changing data (a build status every 30 seconds) and
+terrible for chat.</p>
+<p><strong>Long polling.</strong> The client asks, and the server
+<strong>holds the request open</strong> until there’s something to send
+or a timeout (often 30 to 60 seconds) passes, then the client
+immediately asks again. Latency drops to near zero, and it works
+anywhere HTTP works, which is why early real-time web apps (and
+Facebook’s original chat) used it. The costs: every message ends a
+request, so there’s a gap and a new request per delivery, headers are
+resent each time, and ordering across reconnections must be handled with
+cursors.</p>
+<p><strong>Server-Sent Events (SSE).</strong> Defined in the HTML
+standard, SSE is a long-lived HTTP response with
+<code>Content-Type: text/event-stream</code>, over which the server
+writes a stream of text events. The browser’s <code>EventSource</code>
+API handles parsing and <strong>automatic reconnection</strong>, sending
+a <code>Last-Event-ID</code> header so the server can resume from where
+the client left off. SSE is <strong>one-way</strong> (server to client),
+text-only, and works through ordinary HTTP infrastructure. Over
+HTTP/1.1, browsers limit connections per host (about six), which hurts
+when users open many tabs; over HTTP/2 and HTTP/3, many SSE streams
+share one connection, removing that limit. SSE has become popular again
+as the standard way to stream tokens from LLM APIs.</p>
+<p><strong>WebSockets.</strong> Standardised in RFC 6455 (December
+2011), a WebSocket starts as an HTTP request with an
+<code>Upgrade: websocket</code> header; after the server agrees, the TCP
+connection switches to a lightweight <strong>bidirectional,
+message-framed</strong> protocol. Either side can send text or binary
+messages at any time, with a 2 to 14 byte frame header. WebSockets suit
+interactive applications where the client also sends frequent messages
+(typing indicators, game input, cursor positions). The trade-offs: you
+lose HTTP semantics on the connection (no status codes, caching or
+standard retries per message), some corporate proxies interfere, and you
+must design your own message protocol, heartbeats and resumption.</p>
+<p>Newer options exist (WebSockets over HTTP/2 via RFC 8441, and
+<strong>WebTransport</strong> over HTTP/3, which offers multiple streams
+and unreliable datagrams), but WebSockets and SSE remain the
+workhorses.</p>
+<p>A good default: <strong>SSE for server-to-client streams</strong>
+(notifications, feeds, LLM output), <strong>WebSockets when the client
+sends a lot too</strong>, and long polling as a fallback for hostile
+networks.</p>
+<h2 id="what-holding-a-connection-costs">2. What holding a connection
+costs</h2>
+<p>A connection that’s open but idle uses little CPU. Its cost is mostly
+memory and bookkeeping:</p>
+<ul>
+<li><strong>Kernel socket buffers</strong> for each TCP connection (send
+and receive), which can be tuned down for mostly-idle connections.</li>
+<li><strong>TLS state</strong> for each connection.</li>
+<li><strong>Application state</strong>: the user’s identity,
+subscriptions, and a send buffer.</li>
+<li><strong>File descriptors</strong>: operating system limits must be
+raised well above defaults.</li>
+</ul>
+<p>Event-driven servers (epoll on Linux, kqueue on BSD) let one thread
+handle huge numbers of mostly-idle connections. WhatsApp’s early
+engineering blog post “1 million is so 2011” (January 2012) reported
+pushing a single FreeBSD server running their Erlang stack to
+<strong>over 2 million simultaneous TCP connections</strong>. Modern Go,
+Rust, Java (Netty), Node.js and Elixir servers comfortably hold hundreds
+of thousands of connections per machine.</p>
+<p>The harder limits are elsewhere:</p>
+<ul>
+<li><strong>Heartbeats.</strong> Idle connections get silently dropped
+by NATs, load balancers and mobile networks. Clients and servers
+exchange <strong>pings</strong> every 20 to 60 seconds so both sides
+detect dead connections and intermediaries see traffic. With millions of
+connections, heartbeats alone are a large steady load.</li>
+<li><strong>Mobile battery and radio.</strong> Frequent pings keep a
+phone’s radio awake. Mobile apps typically keep a socket open only while
+in the foreground and rely on the platform’s push notification services
+(APNs, FCM) in the background.</li>
+<li><strong>Deploys.</strong> Restarting a server disconnects every
+client on it. With long-lived connections, deployments become a major
+operational concern (section 7).</li>
+</ul>
+<h2 id="the-basic-architecture-gateways-and-a-pubsub-backbone">3. The
+basic architecture: gateways and a pub/sub backbone</h2>
+<p>Almost every large real-time system separates two concerns:</p>
+<ul>
+<li><strong>Gateway (edge) servers</strong> hold the client connections.
+They authenticate the client, keep track of what each connection is
+subscribed to, and write messages to sockets. They know nothing about
+business logic.</li>
+<li><strong>A routing or pub/sub layer</strong> decides which gateways
+need each event, so that an event is delivered to the right connections
+no matter which gateway they’re on.</li>
+</ul>
+<p>The write path is usually separate from the delivery path: clients
+<strong>send</strong> through ordinary HTTP APIs (with authentication,
+validation, rate limiting and persistence) and <strong>receive</strong>
+over the real-time connection. That keeps the hard guarantees (durable
+storage, idempotency) in the normal request path, and lets the real-time
+layer focus on fast delivery.</p>
+<p>For the routing layer, options range from Redis pub/sub (simple, but
+at-most-once and with every subscriber receiving every message on a
+channel) to Kafka or NATS, to purpose-built in-memory services that own
+topics, which is what Slack and Discord describe.</p>
+<h2 id="slack-channel-servers-and-gateway-servers">4. Slack: channel
+servers and gateway servers</h2>
+<p>Slack’s engineering blog post “Real-time Messaging” (April 2023)
+describes its architecture:</p>
+<figure class="diagram"><svg viewBox="0 0 760 330" role="img" aria-label="Slack real-time message flow from sender through channel server to gateway servers and websockets" font-size="13"><defs><marker id="rt1126" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">Write path in, fan-out path out</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Slack's real-time design (2023): messages are sent over HTTP and delivered over WebSockets.</text><rect x="24" y="150" width="100" height="48" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="74" y="172" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">sender</text><text x="74" y="187" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">HTTP POST</text><rect x="150" y="150" width="110" height="48" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="205" y="172" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">webapp</text><text x="205" y="187" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">persist to DB</text><rect x="286" y="150" width="110" height="48" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="341" y="172" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">admin server</text><text x="341" y="187" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">stateless</text><rect x="422" y="150" width="120" height="48" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="482" y="172" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">channel server</text><text x="482" y="187" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">hash ring</text><line x1="124" y1="174" x2="148" y2="174" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#rt1126)"></line><line x1="260" y1="174" x2="284" y2="174" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#rt1126)"></line><line x1="396" y1="174" x2="420" y2="174" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#rt1126)"></line><rect x="580" y="78" width="150" height="48" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25"></rect><text x="655" y="100" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">gateway: US</text><text x="655" y="115" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">WebSocket subs</text><line x1="542" y1="174" x2="578" y2="102" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#rt1126)"></line><rect x="580" y="150" width="150" height="48" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25"></rect><text x="655" y="172" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">gateway: EU</text><text x="655" y="187" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">WebSocket subs</text><line x1="542" y1="174" x2="578" y2="174" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#rt1126)"></line><rect x="580" y="222" width="150" height="48" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25"></rect><text x="655" y="244" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">gateway: APAC</text><text x="655" y="259" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">WebSocket subs</text><line x1="542" y1="174" x2="578" y2="246" stroke="var(--cds-chart-axis)" stroke-width="1.5" marker-end="url(#rt1126)"></line><text x="482" y="232" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">one owner per channel</text><text x="24" y="296" font-size="11.5" fill="var(--cds-text-secondary)">Each gateway receives a channel's message once and fans it out to its own connected clients.</text><text x="24" y="316" font-size="11.5" fill="var(--cds-text-secondary)">Source: Slack Engineering, "Real-time Messaging" (April 2023).</text></svg></figure>
+<ul>
+<li><strong>Channel servers</strong> are stateful, in-memory servers
+that each own a subset of channels, assigned with <strong>consistent
+hashing</strong>. Every message for a channel goes through that
+channel’s server. Slack runs a service it calls CHARMs (consistent hash
+ring managers) to manage the ring, and says a replacement channel server
+can be ready to serve traffic in under 20 seconds. At peak, about 16
+million channels are served per host.</li>
+<li><strong>Gateway servers</strong> are stateful, deployed in multiple
+regions, and hold users’ WebSocket connections and their
+<strong>subscriptions</strong> to channels.</li>
+<li><strong>Admin servers</strong> are stateless and sit between Slack’s
+main web application and the channel servers.</li>
+<li><strong>Presence servers</strong> track who’s online, also
+distributed by hashing (on user ID).</li>
+</ul>
+<p>When a user sends a message, the client calls Slack’s web API, which
+persists the message and passes it to an admin server. The admin server
+finds the right channel server via the hash ring, and the channel server
+sends the message to <strong>every gateway server around the world
+that’s subscribed to that channel</strong>. Each gateway then fans it
+out to its own connected clients. Slack describes delivering messages to
+tens of millions of connected clients across the world within about 500
+ms.</p>
+<p>Two design choices are worth noticing. <strong>One owner per
+channel</strong> gives a natural ordering point for each channel’s
+events. And <strong>sending once per gateway</strong> rather than once
+per user means a message to a 10,000-person channel crosses the backbone
+only as many times as there are gateways with subscribers, with the
+final fan-out done locally.</p>
+<h2 id="discord-a-process-per-guild-and-the-fan-out-problem">5. Discord:
+a process per guild and the fan-out problem</h2>
+<p>Discord’s 2017 post “How Discord Scaled Elixir to 5,000,000
+Concurrent Users” describes a different structure built on
+Erlang/Elixir’s lightweight processes:</p>
+<ul>
+<li>Each Discord server (“guild”) is represented by a <strong>guild
+process</strong> on some Erlang node. Each connected client’s WebSocket
+has a <strong>session process</strong>.</li>
+<li>When something happens in a guild (a message, a member joining, a
+presence change), the guild process sends it to every connected session
+in that guild.</li>
+</ul>
+<p>That fan-out became the bottleneck as guilds grew to tens of
+thousands of concurrently connected users. Sending a message between
+Erlang processes on different nodes took 30 to 70 µs, so a single event
+in a large guild took between 900 ms and 2.1 seconds just to dispatch,
+blocking the guild process. Discord’s fixes included:</p>
+<ul>
+<li><strong>Manifold</strong>, a library that groups recipient processes
+by the node they run on, sends <strong>one message per node</strong>,
+and lets a process on each node do the local fan-out, partitioned across
+CPU cores. This is the same “send once per gateway” principle as Slack’s
+design.</li>
+<li><strong>FastGlobal</strong> for read-heavy shared data: replacing
+lookups in ETS (Erlang’s in-memory table, about 7 µs per read) with a
+compiled-module trick costing about 0.3 µs, which cut a hash ring lookup
+workload from 17.5 seconds to 750 ms.</li>
+<li><strong>Semaphores</strong> to stop stampedes of session processes
+all hitting a guild process at once (for example, after a node restarts
+and many sessions reconnect).</li>
+</ul>
+<p>The post reported nearly five million concurrent users and millions
+of events per second at the time, with up to 500,000 live sessions per
+Erlang VM. The general lesson: in real-time systems the hard part
+usually isn’t holding connections; it’s <strong>fan-out to large
+groups</strong>, and the fixes are batching by destination, doing the
+last hop locally, and protecting hot objects from thundering herds.</p>
+<h2 id="presence-ordering-and-missed-messages">6. Presence, ordering and
+missed messages</h2>
+<h3 id="presence">Presence</h3>
+<p>“Who’s online” sounds simple and is surprisingly expensive. Every
+connect, disconnect and idle change is an event, and in a naive design
+each one fans out to everyone who can see that user. In a 100,000-member
+community, one user’s status change could be 100,000 deliveries. Common
+techniques:</p>
+<ul>
+<li><strong>Only send presence for people the viewer can actually
+see</strong> (the visible member list, recent conversation partners),
+subscribing and unsubscribing as the view changes.</li>
+<li><strong>Batch and debounce</strong> changes, and treat presence as
+best-effort: being a few seconds stale is fine.</li>
+<li><strong>Don’t flap.</strong> Use grace periods before marking
+someone offline after a disconnect, so a brief network blip doesn’t
+generate two events.</li>
+<li><strong>Large groups</strong> often show only counts or omit
+presence entirely.</li>
+</ul>
+<h3 id="ordering-and-gaps">Ordering and gaps</h3>
+<p>Real-time delivery is usually <strong>best-effort</strong>: a client
+that’s disconnected for ten seconds misses whatever was sent in that
+time. Reliable systems handle this with <strong>sequence numbers and
+catch-up</strong>:</p>
+<ul>
+<li>Each event in a stream (a channel, a document, a user’s feed) gets a
+monotonically increasing sequence number or cursor from the owner (the
+channel server, guild process or database).</li>
+<li>The client tracks the last sequence number it processed. On
+reconnect it sends it (SSE’s <code>Last-Event-ID</code> does exactly
+this), and the server either replays missed events from a buffer or
+tells the client to <strong>refetch</strong> state via the normal API if
+the gap is too large.</li>
+<li>If a client sees a <strong>gap</strong> in sequence numbers while
+connected, it fetches the missing range.</li>
+</ul>
+<p>The durable copy of the data lives in the database, written through
+the normal API; the real-time channel is an optimisation that tells
+clients what changed. Designing it that way means a lost real-time
+message causes a short delay, not lost data.</p>
+<h3 id="delivery-guarantees-and-deduplication">Delivery guarantees and
+deduplication</h3>
+<p>Because clients can receive the same event both over the socket and
+in a refetch, events should carry <strong>IDs</strong> so clients can
+deduplicate, and updates should be idempotent (“message 123 now has this
+content”) rather than relative (“append this”).</p>
+<h2 id="operating-long-lived-connections">7. Operating long-lived
+connections</h2>
+<h3 id="load-balancing">Load balancing</h3>
+<p>Load balancers distribute <strong>connections</strong>, not messages.
+A WebSocket connected to a server stays there for hours.
+Consequences:</p>
+<ul>
+<li><strong>New servers don’t get load</strong> until clients reconnect.
+After scaling out, the old servers remain hot. Some systems periodically
+close a small fraction of connections (with a “please reconnect”
+message) to rebalance.</li>
+<li><strong>Uneven connection weight:</strong> one connection might be
+an idle mobile client and another an admin viewing a 50,000-member
+channel. Balance on connection count <em>and</em> measured load.</li>
+<li><strong>Sticky routing</strong> is needed if a connection’s state
+lives on one server (as with Socket.IO’s long-polling fallback), which
+complicates failover.</li>
+</ul>
+<h3 id="deploys-and-reconnect-storms">Deploys and reconnect storms</h3>
+<p>Restarting a gateway server disconnects all its clients at once, and
+they all try to reconnect at the same moment, to the remaining servers
+and to every backend they need to rebuild their session (authentication,
+subscriptions, initial state). This <strong>reconnect storm</strong> can
+overload the system, and if reconnects fail and retry, it can sustain
+itself, a metastable failure in the resilience reading’s terms.
+Defences:</p>
+<ul>
+<li><strong>Drain gradually:</strong> stop accepting new connections on
+a server, then close existing ones over several minutes rather than all
+at once, telling clients to reconnect elsewhere.</li>
+<li><strong>Jittered exponential backoff</strong> in clients, with
+server-provided hints (“reconnect in 0 to 30 seconds”).</li>
+<li><strong>Cheap resumption:</strong> let a reconnecting client resume
+a session with a token and a sequence number, so it receives only missed
+events instead of rebuilding everything. Discord’s gateway protocol has
+an explicit “resume” operation for this.</li>
+<li><strong>Protect hot objects</strong> (large channels, guilds) with
+semaphores or rate limits on resubscription, as Discord did.</li>
+</ul>
+<h3 id="backpressure-and-slow-clients">Backpressure and slow
+clients</h3>
+<p>A client on a poor connection can’t receive messages as fast as
+they’re produced. If the server queues messages for it without limit,
+memory grows until the server falls over. Every gateway needs a
+<strong>bounded send buffer per connection</strong> and a policy for
+when it fills:</p>
+<ul>
+<li><strong>Drop and resync:</strong> discard queued messages and tell
+the client to refetch state.</li>
+<li><strong>Coalesce:</strong> for state updates (cursor positions,
+scores), keep only the latest value per key.</li>
+<li><strong>Disconnect:</strong> close the connection and let the client
+reconnect and catch up.</li>
+</ul>
+<p>The same applies inside the backend: if the fan-out layer can’t keep
+up, it needs to shed or coalesce work rather than build unbounded
+queues.</p>
+<h3 id="security">Security</h3>
+<p>Authenticate during the handshake (cookies or a short-lived token),
+<strong>check the <code>Origin</code> header</strong> on WebSocket
+upgrades to prevent cross-site WebSocket hijacking, re-check
+authorisation when subscribing to each channel (not just at connect
+time), handle token expiry on long-lived connections, and rate-limit
+messages per connection, since one socket can send a lot of traffic.</p>
+<h2 id="build-or-buy">8. Build or buy</h2>
+<p>Running a real-time layer at scale is a significant operational
+commitment. Managed services (Ably, Pusher, PubNub, AWS AppSync and API
+Gateway WebSockets, Azure Web PubSub, Cloudflare Durable Objects with
+WebSockets) handle connections, fan-out and reconnection for you, at a
+per-message or per-connection price. Building your own makes sense when
+real-time is central to the product, volumes make managed pricing
+expensive, or you need custom semantics (as Slack and Discord do). A
+middle path is to run gateways yourself on top of an existing pub/sub
+system, keeping the durable write path in your normal APIs and
+database.</p>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li><strong>Polling</strong> is simple but wasteful; <strong>long
+polling</strong> gives low latency over plain HTTP; <strong>SSE</strong>
+is the simplest one-way stream with built-in resume;
+<strong>WebSockets</strong> (RFC 6455, 2011) give bidirectional
+messaging at the cost of building your own protocol.</li>
+<li>Holding connections is cheap per connection (WhatsApp pushed
+<strong>over 2 million</strong> on one server in 2012); heartbeats,
+deploys and mobile constraints are the real costs.</li>
+<li>Separate <strong>gateways</strong> (hold connections) from
+<strong>routing/pub-sub</strong> (decide where events go), and keep
+<strong>writes on the normal API path</strong>.</li>
+<li><strong>Slack</strong>: channels hashed onto in-memory
+<strong>channel servers</strong>, which send each message once to every
+subscribed <strong>gateway</strong>, which fans out locally.</li>
+<li><strong>Discord</strong>: one process per guild; fan-out to huge
+guilds was the bottleneck, fixed by <strong>sending once per
+node</strong> (Manifold), faster shared lookups, and semaphores against
+stampedes.</li>
+<li>Treat real-time delivery as <strong>best-effort plus
+catch-up</strong> with sequence numbers and refetch; deduplicate by
+event ID.</li>
+<li>Plan for <strong>reconnect storms</strong>, <strong>uneven load on
+long-lived connections</strong>, and <strong>bounded per-connection
+buffers</strong> for slow clients.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>You’re adding live notifications to a web app with 200,000 daily
+users. Would you choose SSE or WebSockets, and why? What would make you
+change your mind?</li>
+<li>Design catch-up for a chat client that was offline for 30 seconds,
+and for one offline for three days. Where’s the boundary between replay
+and refetch?</li>
+<li>A channel with 50,000 members gets a burst of 100 messages per
+second. Estimate the fan-out work in a naive design and in a Slack-style
+“once per gateway” design.</li>
+<li>You need to deploy a new gateway version to servers holding 2
+million connections. Write the rollout plan, including how clients
+reconnect.</li>
+<li>How would you implement presence for a workspace with 100,000
+members without generating a storm of events every morning when people
+log on?</li>
+<li>What happens to your real-time layer if one client’s network is very
+slow? Where would memory grow, and what policy would you apply?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>I. Fette, A. Melnikov, <a
+href="https://www.rfc-editor.org/rfc/rfc6455">RFC 6455: The WebSocket
+Protocol</a> (December 2011); RFC 8441 (WebSockets over HTTP/2)</li>
+<li>WHATWG HTML Living Standard, “Server-sent events” (EventSource,
+Last-Event-ID)</li>
+<li>Slack Engineering, <a
+href="https://slack.engineering/real-time-messaging/">“Real-time
+Messaging”</a> (April 2023)</li>
+<li>Discord, <a
+href="https://discord.com/blog/how-discord-scaled-elixir-to-5-000-000-concurrent-users">“How
+Discord Scaled Elixir to 5,000,000 Concurrent Users”</a> (July 2017);
+Discord developer documentation on the Gateway (heartbeats, identify and
+resume)</li>
+<li>WhatsApp, <a
+href="https://blog.whatsapp.com/1-million-is-so-2011">“1 million is so
+2011”</a> (January 2012)</li>
+<li>W3C WebTransport draft and IETF WebTransport over HTTP/3 draft</li>
+<li>OWASP guidance on WebSocket security (Origin checks, cross-site
+WebSocket hijacking)</li>
+<li>Martin Kleppmann, <em>Designing Data-Intensive Applications</em>,
+ch. 11 on event streams and fan-out</li>
+</ul>
+<p><em>Note on verification: the Slack, Discord and WhatsApp figures and
+RFC 6455’s date were read from the linked pages today. Details on SSE
+behaviour, browser connection limits, heartbeat intervals, Discord’s
+resume operation, WebTransport and managed services come from
+specifications and documentation as I know them and weren’t
+re-fetched.</em></p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/networking.html">Networking</a><a class="chip" href="/topics/messaging.html">Messaging</a></div>
+          <div class="daynav"><a href="/reading/connection-pooling.html"><div class="kicker">← Older · Nov 25</div><div class="t">Database connection pooling: why fewer connections make a faster database</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
