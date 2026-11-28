@@ -1,0 +1,718 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inside the query optimizer: how databases choose a plan, and why they get it wrong · The Daily Commit</title>
+  <meta name="description" content="How a SQL query becomes an execution plan, using PostgreSQL as the running example. Covers parsing and rewriting, access paths and join algorithms, the cost model and its constants, statistics and selectivity estimation, the independence assumption and extended statistics, join ordering from System R dynamic programming to Postgres&#x27;s genetic optimizer and Cascades, what the Join Order Benchmark found about cardinality errors, prepared statements and generic plans, reading EXPLAIN ANALYZE, and a practical playbook for fixing bad plans.">
+  <script>try{var t=localStorage.getItem('dc-theme'),s=localStorage.getItem('dc-size');if(t)document.documentElement.dataset.theme=t;if(s)document.documentElement.style.setProperty('--read-size',s+'px')}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="hdr"><div class="wrap hdr-in">
+      <a class="brand" href="/">The Daily Commit<i>.</i></a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/">Today</a>
+        <a href="/reading/" aria-current="page">Archive</a>
+        <a href="/topics/">Topics</a>
+        <a href="/news/">AI News</a>
+        <a href="/ai-first/">AI First</a>
+      </nav>
+      <div class="tools">
+        <button type="button" class="icon-btn" data-settings aria-label="Reading settings" aria-expanded="false" aria-controls="settings">Aa</button>
+        <div class="pop" id="settings" hidden>
+          <div><div class="kicker" style="margin-bottom:8px">Text size</div><div class="seg"><button type="button" data-size="17">S</button><button type="button" data-size="19">M</button><button type="button" data-size="21">L</button><button type="button" data-size="23">XL</button></div></div>
+          <div><div class="kicker" style="margin-bottom:8px">Theme</div><div class="swatches"><button type="button" class="swatch" data-theme-pick="paper" style="background:#f7f4ee;color:#25211c">Paper</button><button type="button" class="swatch" data-theme-pick="sepia" style="background:#f1e7d6;color:#3a2e21">Sepia</button><button type="button" class="swatch" data-theme-pick="night" style="background:#191714;color:#e9e3d8">Night</button></div></div>
+          <button type="button" class="mono muted" data-theme-pick="" style="text-align:left">Match my system</button>
+        </div>
+      </div>
+  </div></header>
+
+  <main>
+    <div class="progress"></div>
+    <div class="rbar"><div class="wrap rbar-in">
+      <a class="link-btn mono" href="/reading/" style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>Archive</a>
+      <span class="mono muted now" data-now>Inside the query optimizer: how databases choose a plan, and why they get it wrong</span>
+      <button type="button" class="mono resume" data-resume hidden></button>
+      <span class="mono left"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-left>21 min left</span></span>
+    </div></div>
+    <div class="wrap reader-grid">
+      <nav class="toc" aria-label="Contents">
+        <div class="kicker" style="margin-bottom:12px">Contents</div>
+        <a href="#from-sql-text-to-a-plan">From SQL text to a plan</a><a href="#the-building-blocks-access-paths-and-join-algorithms">The
+building blocks: access paths and join algorithms</a><a href="#the-cost-model">The cost model</a><a href="#statistics-and-selectivity-estimation">Statistics and
+selectivity estimation</a><a href="#join-ordering-searching-the-plan-space">Join ordering:
+searching the plan space</a><a href="#what-the-research-says-how-good-are-query-optimizers-really">What the research says: “How Good Are Query Optimizers, Really?”</a><a href="#plans-that-change-over-time-caching-and-prepared-statements">Plans that change over time: caching and prepared statements</a><a href="#reading-explain-analyze">Reading EXPLAIN ANALYZE</a><a href="#a-playbook-for-fixing-bad-plans">A playbook for fixing bad
+plans</a><a href="#where-optimizers-are-heading">Where optimizers are
+heading</a><a href="#key-takeaways">Key takeaways</a><a href="#discussion-questions">Discussion questions</a><a href="#sources">Sources</a>
+        <div class="mono muted" style="margin-top:18px" data-pct>0% · 21 min left</div>
+      </nav>
+      <article class="article" data-slug="query-optimizers" data-minutes="21">
+        <div class="kicker acc" style="margin-bottom:18px"><a href="/topics/databases.html">Databases</a> · November 28, 2026 · 21 min</div>
+        <h1>Inside the query optimizer: how databases choose a plan, and why they get it wrong</h1>
+        <p class="dek">How a SQL query becomes an execution plan, using PostgreSQL as the running example. Covers parsing and rewriting, access paths and join algorithms, the cost model and its constants, statistics and selectivity estimation, the independence assumption and extended statistics, join ordering from System R dynamic programming to Postgres&#x27;s genetic optimizer and Cascades, what the Join Order Benchmark found about cardinality errors, prepared statements and generic plans, reading EXPLAIN ANALYZE, and a practical playbook for fixing bad plans.</p>
+<p>SQL is declarative: you say <em>what</em> rows you want, and the
+database decides <em>how</em> to get them. That decision is made by the
+query optimizer (Postgres calls it the planner), and it is one of the
+oldest and hardest pieces of a database. For one query with five joins
+there can be thousands of valid plans, and the fastest may be a million
+times faster than the slowest. The optimizer has to pick one in
+milliseconds, using a model of the data that is always partly wrong.
+When it picks well, nobody notices. When it picks badly, a query that
+ran in 20 ms yesterday takes 40 seconds today, nothing in the code has
+changed, and someone gets paged. This piece explains how optimizers
+work, using PostgreSQL as the running example and drawing on the System
+R paper, the Postgres documentation and the 2015 study “How Good Are
+Query Optimizers, Really?”. It ends with a practical method for
+diagnosing and fixing bad plans.</p>
+<h2 id="from-sql-text-to-a-plan">1. From SQL text to a plan</h2>
+<p>A query goes through roughly four stages in Postgres (other databases
+use the same steps under other names):</p>
+<ol type="1">
+<li><strong>Parse.</strong> The text becomes a parse tree. Syntax errors
+are caught here.</li>
+<li><strong>Analyze and rewrite.</strong> Names are resolved against the
+catalog, so <code>orders</code> becomes a specific table and
+<code>id</code> a specific column with a type. Views are expanded into
+their definitions, and rules are applied. The result is a <em>query
+tree</em>.</li>
+<li><strong>Plan/optimize.</strong> The planner considers many ways to
+run the query tree, estimates the cost of each, and keeps the cheapest.
+The output is a <em>plan tree</em> of physical operators such as Seq
+Scan, Index Scan, Hash Join and Sort.</li>
+<li><strong>Execute.</strong> The executor runs the plan tree. Each node
+pulls rows from its children: this is the iterator or “Volcano” model,
+named after Goetz Graefe’s Volcano system.</li>
+</ol>
+<p>Optimizers usually split stage 3 into two parts. <strong>Logical
+rewrites</strong> transform the query into an equivalent one that is
+usually better whatever the data looks like. Examples are pushing
+filters down below joins, flattening subqueries into joins, removing
+redundant joins and folding constants. <strong>Cost-based
+search</strong> then chooses among alternatives whose merit depends on
+the data: which index, which join algorithm, which join order. The first
+part follows rules; the second depends on estimates, and it is where the
+trouble starts.</p>
+<h2 id="the-building-blocks-access-paths-and-join-algorithms">2. The
+building blocks: access paths and join algorithms</h2>
+<p>A plan is assembled from a small set of operators. Knowing their cost
+profiles is most of what you need to read a plan.</p>
+<p><strong>Scanning one table.</strong></p>
+<ul>
+<li><strong>Sequential scan</strong> reads every page of the table in
+order. Sequential I/O is cheap per page, and the cost is predictable. It
+is the best choice when you need a large fraction of the table.</li>
+<li><strong>Index scan</strong> walks a B-tree to the matching entries,
+then fetches each matching row from the table (the “heap”). Each fetch
+can be a random page read. It is excellent for a few rows and terrible
+for many.</li>
+<li><strong>Index-only scan</strong> answers the query from the index
+alone when every needed column is in it and the visibility map says the
+pages are all-visible.</li>
+<li><strong>Bitmap scan</strong> is the middle ground. Postgres collects
+matching row locations from one or more indexes into a bitmap, sorts
+them by page, then reads the heap in physical order. It can also combine
+indexes with AND and OR.</li>
+</ul>
+<p>The crossover between these depends on <strong>how many rows
+match</strong>. That number is called <em>selectivity</em> (the fraction
+of rows that pass a filter) or <em>cardinality</em> (the number of
+rows), and the optimizer has to estimate it.</p>
+<p><strong>Joining two inputs.</strong></p>
+<ul>
+<li><strong>Nested loop join:</strong> for each row of the outer input,
+look up matches in the inner input. With an index on the inner side,
+each lookup is cheap, so this is ideal when the outer side is small.
+Without an index, it is O(N×M). It also has no start-up cost, so it
+returns the first row immediately, which matters with
+<code>LIMIT</code>.</li>
+<li><strong>Hash join:</strong> build a hash table on the smaller input,
+then stream the larger input and probe it. Cost is roughly linear in
+both inputs, but it needs memory (<code>work_mem</code> in Postgres); if
+the hash table doesn’t fit, it spills to disk in batches. It works only
+for equality joins.</li>
+<li><strong>Merge join:</strong> sort both inputs on the join key (or
+read them already sorted from an index), then walk them together. It
+suits large inputs that are already ordered and handles range-style
+merge conditions.</li>
+</ul>
+<p>The planner’s job is to choose, for every table, an access path, and
+for every join, an algorithm and an order. Its main input for each
+choice is the estimated number of rows flowing through each node.</p>
+<h2 id="the-cost-model">3. The cost model</h2>
+<p>To compare plans, the optimizer needs a single number for each.
+Postgres expresses cost in abstract units anchored to the cost of
+reading one page sequentially. The main knobs and their defaults
+are:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Parameter</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>seq_page_cost</code></td>
+<td>1.0</td>
+<td>Reading one page sequentially</td>
+</tr>
+<tr class="even">
+<td><code>random_page_cost</code></td>
+<td>4.0</td>
+<td>Reading one page at a random location</td>
+</tr>
+<tr class="odd">
+<td><code>cpu_tuple_cost</code></td>
+<td>0.01</td>
+<td>Processing one row</td>
+</tr>
+<tr class="even">
+<td><code>cpu_index_tuple_cost</code></td>
+<td>0.005</td>
+<td>Processing one index entry</td>
+</tr>
+<tr class="odd">
+<td><code>cpu_operator_cost</code></td>
+<td>0.0025</td>
+<td>Evaluating one operator or function</td>
+</tr>
+<tr class="even">
+<td><code>effective_cache_size</code></td>
+<td>4GB</td>
+<td>A hint for how much data is likely cached (no memory is
+allocated)</td>
+</tr>
+</tbody>
+</table>
+<p>A sequential scan of a table with 10,000 pages and 1,000,000 rows,
+with one filter, is costed at roughly
+<code>10,000 × 1.0 + 1,000,000 × 0.01 + 1,000,000 × 0.0025 = 22,500</code>.
+An index scan’s cost depends on how many index entries and heap pages it
+expects to touch, with each heap page charged at
+<code>random_page_cost</code>, adjusted for how well the table’s
+physical order correlates with the index order.</p>
+<p>In <code>EXPLAIN</code> output every node shows two costs, for
+example <code>cost=0.43..8.45</code>. The first is the <strong>start-up
+cost</strong>, the cost before the first row can be returned; the second
+is the <strong>total cost</strong> of returning all rows. A Sort has a
+large start-up cost, because it has to read all its input before
+emitting anything, while a Seq Scan has almost none. With
+<code>LIMIT 10</code>, the planner prefers plans with low start-up
+cost.</p>
+<p>Two things are worth knowing about the cost model:</p>
+<ul>
+<li><strong>The defaults assume spinning disks.</strong> A
+<code>random_page_cost</code> of 4.0 reflects that random reads were far
+more expensive than sequential reads on hard drives, even after allowing
+for caching. On SSDs or when the working set is in memory, many teams
+lower it to around 1.1 to 1.5, which makes index scans look relatively
+cheaper. Change it based on measurement, not folklore.</li>
+<li><strong>Costs are not milliseconds.</strong> They are for comparing
+plans for the same query on the same server. Comparing the cost of two
+different queries tells you little.</li>
+</ul>
+<p>Perhaps surprisingly, research suggests the cost model is usually
+<em>not</em> the main source of bad plans. The row estimates fed into it
+are.</p>
+<h2 id="statistics-and-selectivity-estimation">4. Statistics and
+selectivity estimation</h2>
+<p>The planner doesn’t look at the data when planning. It looks at
+<strong>statistics</strong> collected by <code>ANALYZE</code>, which
+autovacuum runs automatically after enough rows change. For each column,
+Postgres stores in <code>pg_statistic</code> (readable through the
+<code>pg_stats</code> view):</p>
+<ul>
+<li><strong><code>null_frac</code>:</strong> the fraction of values that
+are NULL.</li>
+<li><strong><code>n_distinct</code>:</strong> the estimated number of
+distinct values, stored as a negative fraction of rows when it scales
+with table size.</li>
+<li><strong>Most common values (MCVs)</strong> and their
+frequencies.</li>
+<li>A <strong>histogram</strong> of the remaining values, with buckets
+of equal population.</li>
+<li><strong><code>correlation</code>:</strong> how closely the physical
+row order follows the column’s sort order, which matters for index-scan
+costs.</li>
+</ul>
+<p>The level of detail is controlled by
+<code>default_statistics_target</code> (default 100). That means up to
+100 MCVs and 100 histogram buckets per column, built from a random
+sample of 300 × target rows, which is 30,000 rows at the default. You
+can raise the target for individual columns with
+<code>ALTER TABLE ... ALTER COLUMN ... SET STATISTICS</code>.</p>
+<p>With these statistics the planner estimates selectivity:</p>
+<ul>
+<li><strong><code>status = 'shipped'</code>:</strong> if
+<code>'shipped'</code> is an MCV, use its recorded frequency directly.
+If not, spread the remaining frequency evenly across the remaining
+distinct values.</li>
+<li><strong><code>created_at &gt; '2026-11-01'</code>:</strong> find
+where the value falls in the histogram and interpolate within the
+bucket.</li>
+<li><strong><code>a = $1</code> with an unknown parameter:</strong> use
+a generic estimate, such as 1 / <code>n_distinct</code>.</li>
+<li><strong>Expressions it can’t analyze</strong>, like
+<code>lower(email) = 'x'</code> without statistics on that expression:
+fall back to hard-coded default selectivities. Defaults like these are a
+frequent source of bad guesses.</li>
+</ul>
+<p><strong>Join cardinality</strong> is estimated from the inputs’
+cardinalities and the distinct counts of the join columns. The basic
+formula assumes every value on the smaller-domain side finds matches,
+roughly <code>|R| × |S| / max(ndistinct(R.a), ndistinct(S.a))</code>,
+refined with MCV lists where available.</p>
+<h3 id="the-independence-assumption">The independence assumption</h3>
+<p>For a query with several filters, the planner needs the combined
+selectivity. Unless told otherwise, it assumes the columns are
+<strong>independent</strong> and multiplies:</p>
+<p><code>sel(city = 'Paris' AND country = 'FR') = sel(city = 'Paris') × sel(country = 'FR')</code></p>
+<p>If 2% of orders are from Paris and 2.5% from France, it estimates
+0.05%. But every Paris order is from France, so the true answer is 2%, a
+40x underestimate. Real data is full of such correlations: city and
+country, model and manufacturer, <code>status = 'refunded'</code> and
+<code>refund_amount &gt; 0</code>, <code>tenant_id</code> and nearly
+everything in a multi-tenant table.</p>
+<p>Postgres 10 and later can fix this with <strong>extended
+statistics</strong>:</p>
+<pre class="sql"><code>CREATE STATISTICS orders_city_country (dependencies, ndistinct, mcv)
+  ON city, country FROM orders;
+ANALYZE orders;</code></pre>
+<p><code>dependencies</code> records functional dependencies (city
+determines country), <code>ndistinct</code> records the number of
+distinct combinations, which helps <code>GROUP BY</code> estimates, and
+<code>mcv</code> (Postgres 12 and later) stores the most common
+<em>combinations</em> and their frequencies. Since Postgres 14 you can
+also create statistics on expressions, such as
+<code>lower(email)</code>.</p>
+<p>The diagram below shows how a single correlated-filter misestimate
+turns into a bad join choice.</p>
+<figure class="diagram"><svg viewBox="0 0 760 360" role="img" aria-label="A query plan tree where a row-count underestimate leads the planner to choose a nested loop join that runs far slower than expected" font-size="13"><defs><marker id="me1128" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--cds-chart-axis)"></path></marker></defs><text x="24" y="28" font-size="15" font-weight="600" fill="var(--cds-text-primary)">How one bad estimate picks the wrong join</text><text x="24" y="50" font-size="11.5" fill="var(--cds-text-secondary)">Illustrative plan: two correlated filters are assumed independent, so the planner expects 50 orders and gets 2,000.</text><rect x="250" y="72" width="260" height="56" rx="8" fill="var(--cds-chart-categorical-4)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-4)" stroke-width="1.25"></rect><text x="380" y="94" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">Nested Loop (chosen)</text><text x="380" y="112" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">est. 1,000 rows · actual 40,000 rows</text><line x1="330" y1="130" x2="180" y2="186" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#me1128)"></line><line x1="430" y1="130" x2="580" y2="186" stroke="var(--cds-chart-axis)" stroke-width="1.4" marker-end="url(#me1128)"></line><rect x="24" y="188" width="310" height="76" rx="8" fill="var(--cds-chart-categorical-1)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-1)" stroke-width="1.25"></rect><text x="179" y="209" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">Seq Scan on orders (outer)</text><text x="179" y="226" text-anchor="middle" font-size="11" font-family="ui-monospace, monospace" fill="var(--cds-text-secondary)">city = 'Paris' AND country = 'FR'</text><text x="179" y="244" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">est. 0.02 × 0.025 × 100k = 50 rows</text><text x="179" y="258" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">actual 2,000 rows (Paris implies FR)</text><rect x="426" y="188" width="310" height="76" rx="8" fill="var(--cds-chart-categorical-2)" fill-opacity="0.16" stroke="var(--cds-chart-categorical-2)" stroke-width="1.25"></rect><text x="581" y="209" text-anchor="middle" font-weight="600" font-size="12.5" fill="var(--cds-text-primary)">Index Scan on order_items (inner)</text><text x="581" y="226" text-anchor="middle" font-size="11" font-family="ui-monospace, monospace" fill="var(--cds-text-secondary)">order_id = orders.id</text><text x="581" y="244" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">planned: 50 probes</text><text x="581" y="258" text-anchor="middle" font-size="11" fill="var(--cds-text-secondary)">actual: 2,000 probes, random I/O each</text><rect x="24" y="284" width="712" height="34" rx="8" fill="var(--cds-chart-categorical-3)" fill-opacity="0.12" stroke="var(--cds-chart-categorical-3)" stroke-width="1.25"></rect><text x="380" y="306" text-anchor="middle" font-size="11.5" fill="var(--cds-text-primary)">With the true 2,000 outer rows, a Hash Join over one sequential pass of order_items would likely have been cheaper.</text><text x="24" y="342" font-size="11.5" fill="var(--cds-text-secondary)">The error is 40x at the first join and multiplies as more joins are stacked on top. Fix the estimate, not the plan.</text></svg></figure>
+<h3 id="why-errors-compound">Why errors compound</h3>
+<p>An estimate error at the bottom of a plan doesn’t stay there. If the
+estimate for the first join’s input is 40x too low, the join’s estimate
+inherits that error, and the next join multiplies it by its own. Errors
+grow roughly <em>exponentially</em> with the number of joins. By the top
+of a ten-join plan, the planner can be off by orders of magnitude, and
+every decision above the first error is made with bad numbers.</p>
+<h2 id="join-ordering-searching-the-plan-space">5. Join ordering:
+searching the plan space</h2>
+<p>Joins are commutative and associative, so a query joining <em>n</em>
+tables has a huge number of possible orders. Counting only “left-deep”
+trees, where each join adds one base table, there are <em>n</em>!
+orders: 120 for 5 tables, 3.6 million for 10. Allowing “bushy” trees,
+where two joined results can be joined together, makes the count much
+larger.</p>
+<h3 id="system-r-and-dynamic-programming">System R and dynamic
+programming</h3>
+<p>The classic approach comes from IBM’s System R, described by Patricia
+Selinger and colleagues in “Access Path Selection in a Relational
+Database Management System” (SIGMOD 1979). It established much of what
+optimizers still do:</p>
+<ul>
+<li>Estimate each plan’s cost from statistics and a cost formula that
+combines I/O and CPU.</li>
+<li>Build plans bottom-up with <strong>dynamic programming</strong>:
+find the best way to access each single table, then the best way to join
+each pair, then each set of three built from the best smaller sets, and
+so on. Because the cost of joining a set doesn’t depend on how the set
+was built internally, you only need to keep the best plan for each
+subset.</li>
+<li>Keep “<strong>interesting orders</strong>.” A plan that is slightly
+more expensive but produces rows sorted on a column needed later by a
+merge join, <code>ORDER BY</code> or <code>GROUP BY</code> may win
+overall, so the best plan <em>per sort order</em> is kept for each
+subset.</li>
+<li>Avoid <strong>cross products</strong> unless there is no
+alternative.</li>
+</ul>
+<p>System R considered only left-deep trees. Postgres’s standard planner
+uses the same dynamic-programming idea, also considers bushy trees, and
+avoids cross products where possible.</p>
+<h3 id="when-the-search-space-is-too-large">When the search space is too
+large</h3>
+<p>Dynamic programming is still exponential in the number of tables.
+Postgres caps the work in two ways:</p>
+<ul>
+<li><strong><code>join_collapse_limit</code> and
+<code>from_collapse_limit</code></strong> (default 8 each) limit how
+many tables the planner will freely reorder as one group. Beyond that,
+explicit <code>JOIN</code> syntax is partly treated as the order to
+follow. Setting <code>join_collapse_limit = 1</code> makes the planner
+use the join order exactly as written, which is a blunt but sometimes
+useful tool.</li>
+<li><strong>The genetic query optimizer (GEQO)</strong> takes over when
+a query has at least <code>geqo_threshold</code> FROM items (default
+12). Instead of an exhaustive search, it uses a genetic algorithm to
+explore a sample of join orders. Planning becomes faster, but plan
+quality is less predictable, and the result depends on a random seed
+(<code>geqo_seed</code>). Some practitioners raise the threshold to 16
+or 18 on modern CPUs, but planning time grows geometrically beyond
+that.</li>
+</ul>
+<h3 id="cascades-and-transformation-based-optimizers">Cascades and
+transformation-based optimizers</h3>
+<p>A second family of optimizers is based on Goetz Graefe’s Volcano
+(1993) and Cascades (1995) frameworks. Instead of building plans
+bottom-up, they start with the query as an expression and apply
+<strong>transformation rules</strong>: join commutativity, join
+associativity, pushing a filter through a join, replacing a logical join
+with a physical hash join. Equivalent expressions are grouped together
+in a structure called the <em>memo</em>, so each subproblem is optimized
+once. The search is top-down and can prune branches that are already
+more expensive than the best plan found.</p>
+<p>SQL Server’s optimizer is based on Cascades, and CockroachDB’s
+cost-based optimizer uses a Cascades-style memo. The design makes it
+easier to add new rules and operators, since each rule is a
+self-contained transformation. Whatever the search strategy, though, the
+optimizer is still ranking plans using estimated cardinalities, so it
+inherits the same estimation problems.</p>
+<h2 id="what-the-research-says-how-good-are-query-optimizers-really">6.
+What the research says: “How Good Are Query Optimizers, Really?”</h2>
+<p>In 2015 Viktor Leis and colleagues at TU Munich published a study at
+VLDB that is now the standard reference on this question. They built the
+<strong>Join Order Benchmark (JOB)</strong> on the IMDB movie database,
+chosen because it is “full of correlations and non-uniform data
+distributions” like real data. Synthetic benchmarks such as TPC-H
+generate independent, uniform data, which flatters optimizers. JOB has
+<strong>113 queries with 3 to 16 joins each, 8 on average</strong>. They
+tested PostgreSQL, the research system HyPer and three commercial
+systems they didn’t name.</p>
+<p>Their main findings:</p>
+<ul>
+<li><strong>Cardinality estimates are often very wrong.</strong> For
+join results, the errors spanned up to about 10^8 (underestimates) and
+10^4 (overestimates). Even with a single join, 16% of PostgreSQL’s
+estimates were wrong by a factor of 10 or more; with two joins it was
+32%, and with three, 52%.</li>
+<li><strong>Errors grow with the number of joins, and systems
+underestimate.</strong> Every system tested tended to underestimate the
+size of multi-join results, and none of them detected correlations
+across joins.</li>
+<li><strong>Underestimates cause the worst disasters.</strong> The
+queries that timed out in PostgreSQL were mostly cases where a very low
+estimate led it to choose a nested loop join <em>without</em> an index
+on the inner side. Such a plan is cheap if the outer side really has 1
+row and catastrophic if it has 100,000. Disabling non-index nested loops
+removed the timeouts. This is why some optimizers treat such plans as
+risky and avoid them when the estimate is uncertain.</li>
+<li><strong>Some operators can protect themselves.</strong> A hash join
+that sizes its hash table from the estimate degrades badly when the
+estimate is too low; one that resizes at runtime based on the rows it
+actually receives does not. The paper notes that PostgreSQL 9.5 added
+this kind of resizing.</li>
+<li><strong>Cardinality matters more than the cost model.</strong>
+Tuning the cost model improved runtimes, but even a trivial cost
+function that just counted rows did reasonably well. Feeding the
+optimizer <em>true</em> cardinalities made a much bigger difference than
+refining cost formulas.</li>
+<li><strong>More indexes make the optimizer’s job harder.</strong> With
+only primary-key indexes, most queries ran close to the plan chosen with
+true cardinalities. When foreign-key indexes were added, more queries
+became much slower than the ideal plan, because more risky choices were
+available. The paper doesn’t say indexes are bad, only that more options
+give the optimizer more ways to be wrong.</li>
+<li><strong>Searching the plan space thoroughly is worth it.</strong>
+Exhaustive dynamic programming, including bushy trees, found better
+plans than heuristic or restricted searches, as long as estimates were
+reasonable.</li>
+</ul>
+<p>The practical lesson is the one to remember: <strong>when a plan is
+bad, look first at the row estimates, not at the cost
+constants.</strong></p>
+<h2 id="plans-that-change-over-time-caching-and-prepared-statements">7.
+Plans that change over time: caching and prepared statements</h2>
+<p>Planning costs CPU, so databases try to reuse plans. That introduces
+another way to get a bad plan.</p>
+<p>In Postgres, a <strong>prepared statement</strong> (an explicit
+<code>PREPARE</code>, or the extended query protocol most drivers use)
+can run with either:</p>
+<ul>
+<li>a <strong>custom plan</strong>, made for the actual parameter values
+each time, or</li>
+<li>a <strong>generic plan</strong>, made once without knowing the
+values and reused.</li>
+</ul>
+<p>By default (<code>plan_cache_mode = auto</code>), the first five
+executions use custom plans. From the sixth, Postgres builds a generic
+plan and compares its <em>estimated</em> cost with the average estimated
+cost of the custom plans so far, after adding a charge for planning to
+the custom plans. If the generic plan looks no more expensive, it is
+used from then on.</p>
+<p>This works well for queries whose best plan doesn’t depend on the
+values. It goes wrong with <strong>skewed data</strong>. Imagine
+<code>WHERE tenant_id = $1</code>, where one tenant has 40% of the rows
+and most have a few hundred. If the first five executions are for small
+tenants, the generic plan (which assumes an average tenant) looks fine
+and gets locked in, then runs badly for the big tenant. The symptom is a
+query that is fast in <code>psql</code>, where you type literal values
+and get a custom plan, but slow from the application. The comparison is
+based on estimates, never on measured runtimes.</p>
+<p>Postgres 12 added <code>plan_cache_mode</code>, which you can set to
+<code>force_custom_plan</code> for the session, role or transaction to
+avoid this, at the cost of planning on every execution. Note that
+drivers add their own layer: the JDBC driver and psycopg 3, for example,
+switch to server-side prepared statements only after a statement has
+been executed a few times (their <code>prepareThreshold</code> and
+<code>prepare_threshold</code> settings default to 5). So from the
+application’s point of view, the switch to a generic plan can happen
+around the tenth execution.</p>
+<p>Other databases face the same trade-off under different names: SQL
+Server calls it <strong>parameter sniffing</strong>, and Oracle added
+<strong>adaptive cursor sharing</strong> to keep several plans for
+different value ranges.</p>
+<h2 id="reading-explain-analyze">8. Reading EXPLAIN ANALYZE</h2>
+<p><code>EXPLAIN</code> shows the plan and its estimates.
+<code>EXPLAIN (ANALYZE, BUFFERS)</code> runs the query and adds what
+actually happened. A typical line looks like this:</p>
+<pre class="text"><code>Nested Loop  (cost=0.85..1250.40 rows=50 width=48)
+             (actual time=0.05..2841.11 rows=40000 loops=1)
+  Buffers: shared hit=12034 read=86512</code></pre>
+<p>What to look for:</p>
+<ol type="1">
+<li><strong>Estimated vs actual rows.</strong> Compare
+<code>rows=</code> in the cost section with <code>rows=</code> in the
+actual section on every node. A ratio of 10x or more is worth
+investigating; find the <em>lowest</em> node in the tree where they
+diverge, because everything above it inherits the error.</li>
+<li><strong><code>loops</code>.</strong> For the inner side of a nested
+loop, <code>actual rows</code> and <code>time</code> are <em>per
+loop</em>. Multiply by <code>loops</code> to get the total. A
+cheap-looking index scan with <code>loops=40000</code> is where the time
+went.</li>
+<li><strong>Buffers.</strong> <code>shared hit</code> pages came from
+Postgres’s cache; <code>read</code> pages came from the OS cache or
+disk. Lots of reads on an index scan suggests random I/O the planner
+didn’t expect.</li>
+<li><strong>Rows removed by filter.</strong> A scan that reads 1,000,000
+rows to return 10 is a candidate for an index or a better one.</li>
+<li><strong>Spills.</strong> “Sort Method: external merge” or a Hash
+node with “Batches: 16” means the operation exceeded
+<code>work_mem</code> and used disk.</li>
+</ol>
+<p>Two cautions. <code>ANALYZE</code> really runs the statement, so wrap
+an <code>UPDATE</code> or <code>DELETE</code> in a transaction you roll
+back. And timing every node adds overhead; for a very fast query,
+<code>EXPLAIN (ANALYZE, TIMING OFF)</code> gives row counts with less
+distortion. For problems that happen only in production, the
+<code>auto_explain</code> extension logs plans of queries slower than a
+threshold, and <code>pg_stat_statements</code> tells you which queries
+are worth looking at in the first place.</p>
+<h2 id="a-playbook-for-fixing-bad-plans">9. A playbook for fixing bad
+plans</h2>
+<p>When a query’s plan goes bad, work through these steps roughly in
+order. Earlier steps fix the cause; later ones work around it.</p>
+<ol type="1">
+<li><strong>Confirm it’s the plan.</strong> Check
+<code>pg_stat_statements</code> for a jump in mean time, and compare the
+current plan with a known-good one if you logged it. Lock waits, a cold
+cache or a noisy neighbour can look like a plan problem.</li>
+<li><strong>Refresh statistics.</strong> Run <code>ANALYZE</code> on the
+tables involved. After a bulk load or a big delete, autovacuum may not
+have caught up, and the planner is working from an old picture of the
+data. Tables that grow every day (with a <code>created_at</code> column,
+for example) are especially prone to this: queries for “today” fall
+beyond the last histogram bucket. Recent Postgres versions extrapolate
+somewhat at the edges of indexed columns, but not perfectly.</li>
+<li><strong>Give the planner better statistics.</strong> Raise the
+statistics target on skewed columns. Add extended statistics on
+correlated columns, and on expressions used in filters.</li>
+<li><strong>Make the query easier to estimate.</strong> Rewrite
+predicates the planner can’t see through:
+<code>WHERE date(created_at) = '2026-11-28'</code> becomes a range on
+<code>created_at</code>. Avoid wrapping indexed columns in functions or
+casts. Replace an <code>OR</code> across different columns with a
+<code>UNION ALL</code> when it lets each part use an index.</li>
+<li><strong>Fix the physical design.</strong> Add the index the plan
+actually needs, maybe a composite or partial one. Remove unused indexes
+that tempt the planner into risky choices.</li>
+<li><strong>Adjust cost parameters for the hardware.</strong> Set
+<code>random_page_cost</code> and <code>effective_cache_size</code> to
+match reality. Change these globally and deliberately, after testing,
+not as a per-query hack.</li>
+<li><strong>Control plan caching.</strong> For skewed parameters, use
+<code>plan_cache_mode = force_custom_plan</code> for the affected role
+or code path.</li>
+<li><strong>Last resort: override the planner.</strong> Postgres
+deliberately has no built-in query hints. The community view is that
+hints hide underlying problems and become wrong as data changes. You can
+still disable an operator for one transaction
+(<code>SET LOCAL enable_nestloop = off</code>), materialize an
+intermediate result with a CTE (<code>WITH ... AS MATERIALIZED</code>,
+since Postgres 12), or use the <code>pg_hint_plan</code> extension.
+Other databases offer hints or plan baselines (Oracle SQL Plan
+Management, SQL Server Query Store plan forcing) that pin a known-good
+plan. Every override is a bet that the data won’t change enough to make
+it wrong; document it and revisit it.</li>
+</ol>
+<p>A broader point follows from the research: <strong>plan stability is
+often more valuable than plan optimality.</strong> A query that is
+reliably 30 ms is better for a production system than one that is
+usually 5 ms and occasionally 30 seconds. That’s why some teams prefer
+simpler queries with predictable plans on hot paths, keep joins on those
+paths to a few tables, and save the many-table analytical queries for
+systems built for them.</p>
+<h2 id="where-optimizers-are-heading">10. Where optimizers are
+heading</h2>
+<p>Optimizers are still an active research area. Three directions stand
+out:</p>
+<ul>
+<li><strong>Adaptive execution.</strong> Instead of committing to a plan
+up front, the executor watches actual row counts and changes course.
+Oracle’s adaptive plans can switch between nested loop and hash join at
+runtime; SQL Server has adaptive joins and memory-grant feedback;
+Spark’s Adaptive Query Execution re-plans between stages using real
+statistics from completed stages.</li>
+<li><strong>Feedback from past runs.</strong> Using observed
+cardinalities from earlier executions to correct future estimates. IBM
+DB2’s LEO (“learning optimizer”) explored this in the early 2000s, and
+several commercial systems now feed runtime information back into later
+planning.</li>
+<li><strong>Learned components.</strong> Research systems have tried
+learned cardinality estimators and learned optimizers trained on query
+history (Bao, from MIT, steers an existing optimizer with hints rather
+than replacing it). These show promise, but production adoption is
+cautious, because a model that is right on average and badly wrong
+occasionally doesn’t fix the tail-latency problem.</li>
+</ul>
+<p>In the meantime, the most effective tool is still the one Selinger’s
+team relied on in 1979: good statistics, plus engineers who know how to
+read a plan.</p>
+<h2 id="key-takeaways">Key takeaways</h2>
+<ul>
+<li>The optimizer chooses <strong>access paths, join algorithms and join
+order</strong> by estimating the cost of alternatives. Costs are driven
+mostly by <strong>estimated row counts</strong>.</li>
+<li>Postgres’s cost units are relative to a sequential page read;
+defaults like <strong><code>random_page_cost = 4.0</code></strong>
+assume spinning disks and are often lowered on SSDs.</li>
+<li>Statistics from <code>ANALYZE</code> (null fraction, distinct
+counts, <strong>MCVs, histograms</strong>, correlation) drive
+selectivity estimates; <code>default_statistics_target</code> is
+<strong>100</strong>.</li>
+<li>Multiplying selectivities assumes <strong>independent
+columns</strong>, which real data violates. <strong>Extended
+statistics</strong> (<code>CREATE STATISTICS</code>, Postgres 10+, MCV
+lists in 12+) fix many of these cases.</li>
+<li>Errors <strong>compound across joins</strong>. The Join Order
+Benchmark found errors of up to about 10^8, systematic
+<strong>underestimation</strong>, and that true cardinalities help far
+more than a better cost model.</li>
+<li><strong>Underestimates are the dangerous direction</strong>: they
+lead to nested loops that are fine for 50 rows and disastrous for
+50,000.</li>
+<li>Postgres searches join orders with <strong>dynamic
+programming</strong> up to <strong><code>join_collapse_limit</code> =
+8</strong> and switches to <strong>GEQO at 12 FROM items</strong>.
+Cascades-style optimizers (SQL Server, CockroachDB) search with
+transformation rules and a memo.</li>
+<li><strong>Generic plans</strong> for prepared statements are
+considered from the sixth execution and can be bad for <strong>skewed
+parameters</strong>; <code>plan_cache_mode</code> (Postgres 12+)
+controls this.</li>
+<li>When reading <code>EXPLAIN ANALYZE</code>, find the <strong>lowest
+node where estimated and actual rows diverge</strong>, and remember to
+multiply by <strong>loops</strong>.</li>
+<li>Fix causes before symptoms: <strong>statistics, query shape and
+indexes</strong> come before cost parameters, and overrides come
+last.</li>
+</ul>
+<h2 id="discussion-questions">Discussion questions</h2>
+<ol type="1">
+<li>Pick a slow query from your system and run
+<code>EXPLAIN (ANALYZE, BUFFERS)</code>. Where is the first node where
+estimated and actual rows differ by more than 10x, and what caused
+it?</li>
+<li>Which pairs of columns in your main tables are strongly correlated?
+Would extended statistics change any plans, and how would you check
+before and after?</li>
+<li>A query is fast in <code>psql</code> and slow from the application.
+List the possible explanations and how you’d tell them apart.</li>
+<li>In a multi-tenant table where one tenant has 40% of the rows, what
+plan problems would you expect, and how would you design the schema,
+indexes and queries to keep plans stable?</li>
+<li>Postgres refuses to add built-in hints, while Oracle and SQL Server
+have them. Which approach would you prefer for a production system, and
+why?</li>
+<li>The Join Order Benchmark found that adding foreign-key indexes made
+some plans worse. How does that change how you think about adding
+indexes “just in case”?</li>
+</ol>
+<h2 id="sources">Sources</h2>
+<ul>
+<li>P. Griffiths Selinger, M. M. Astrahan, D. D. Chamberlin, R. A.
+Lorie, T. G. Price, <a
+href="https://dl.acm.org/doi/10.1145/582095.582099">“Access Path
+Selection in a Relational Database Management System”</a>, SIGMOD 1979
+(System R optimizer, dynamic programming, interesting orders)</li>
+<li>V. Leis, A. Gubichev, A. Mirchev, P. Boncz, A. Kemper, T. Neumann,
+<a
+href="https://15721.courses.cs.cmu.edu/spring2020/papers/22-costmodels/p204-leis.pdf">“How
+Good Are Query Optimizers, Really?”</a>, VLDB 2015, and Adrian Colyer’s
+<a
+href="https://blog.acolyer.org/2017/01/30/how-good-are-query-optimizers-really/">summary
+on The Morning Paper</a> (Join Order Benchmark)</li>
+<li>G. Graefe, “Volcano: An Extensible and Parallel Query Evaluation
+System” (1994) and “The Cascades Framework for Query Optimization”
+(1995)</li>
+<li>PostgreSQL documentation: <a
+href="https://www.postgresql.org/docs/current/runtime-config-query.html">Query
+Planning configuration</a> (cost constants, collapse limits, GEQO,
+plan_cache_mode), “How the Planner Uses Statistics”, “Using EXPLAIN”,
+<code>CREATE STATISTICS</code>, <code>PREPARE</code></li>
+<li><a
+href="https://postgresqlco.nf/en/doc/param/geqo_threshold">postgresqlco.nf:
+geqo_threshold</a> and <a
+href="https://v2.pgconfigurator.cybertec-postgresql.com/docs/parameters/join_collapse_limit">Cybertec:
+join_collapse_limit</a></li>
+<li>Christophe Pettus, <a
+href="https://thebuild.com/blog/the-sixth-execution/">“The sixth
+execution”</a> (custom vs generic plan decision, driver prepare
+thresholds)</li>
+<li>R. Marcus et al., “Bao: Making Learned Query Optimization
+Practical”, SIGMOD 2021; M. Stillger et al., “LEO: DB2’s LEarning
+Optimizer”, VLDB 2001</li>
+<li>CockroachDB engineering blog, “How we built a cost-based SQL
+optimizer” (2018); Microsoft SQL Server documentation on parameter
+sensitivity and Query Store</li>
+</ul>
+<p><em>Note on verification: the Join Order Benchmark details and
+findings, the <code>geqo_threshold</code> and
+<code>join_collapse_limit</code> defaults, and the custom-vs-generic
+plan rule, plan_cache_mode and driver thresholds were read from the
+linked pages today. Postgres cost-constant defaults, statistics details
+(sample size, MCVs, extended statistics versions), System R,
+Volcano/Cascades, adaptive execution features and the learned-optimizer
+papers come from documentation and literature as I know them and weren’t
+re-fetched. The orders/city example in the diagram is
+illustrative.</em></p>
+
+        <div class="end-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap"><div class="big">You reached the end.</div>
+          <button type="button" class="btn btn-solid" data-mark hidden><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Mark as read</span></button></div>
+          <div class="chips" style="margin-top:14px"><span class="kicker" style="align-self:center;margin-right:4px">Filed under</span><a class="chip" href="/topics/databases.html">Databases</a></div>
+          <div class="daynav"><a href="/reading/authorization-zanzibar.html"><div class="kicker">← Older · Nov 27</div><div class="t">Authorization at scale: from roles to Google&#x27;s Zanzibar</div></a><a href="/news/"><div class="kicker">Also today →</div><div class="t">AI News: 15 stories</div></a></div>
+        </div>
+      </article>
+      <aside class="reader-aside"></aside>
+    </div>
+  </main>
+
+  <footer class="ftr"><div class="wrap">
+    <span class="name">The Daily Commit<span style="color:var(--accent)">.</span></span>
+    <span class="mono muted">Deep dives on how systems work, plus the AI news.</span>
+  </div></footer>
+  <script src="/site.js"></script>
+  <script data-goatcounter="https://shaktiss221.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+</body>
+</html>
